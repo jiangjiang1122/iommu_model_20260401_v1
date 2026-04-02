@@ -169,6 +169,18 @@ void RP_Module::send_translation_request_1_thread()
     printf("[DEV2] DC address: 0x%lx, io hgatp.MODE=%d (Sv48x4), PPN=0x%lx, iosatp.MODE=%d (Bare)\n", 
            DC_addr_2, DC.iohgatp.MODE, DC.iohgatp.PPN, DC.fsc.iosatp.MODE);
     
+    // ========== 配置设备 3: Sv39 + Bare 模式 ==========
+    printf("\n========== 配置设备 3 (device_id=0x07, Sv39+Bare) ==========\n");
+    uint64_t DC_addr_3 = add_device(iommu_ptr, 0x07, 3, 0, 0, 0, 0, 0,
+                                    1, 1, 0, 0, 0,
+                                    IOHGATP_Bare, IOSATP_Sv39, PDTP_Bare,
+                                    MSIPTP_Off, 0, 0, 0);
+    
+    // 从 DDR 中读取设备 3 的 DC 内容
+    read_memory_test_rp(DC_addr_3, sizeof(device_context_t), (char*)&DC);
+    printf("[DEV3] DC address: 0x%lx, io hgatp.MODE=%d (Bare), iosatp.MODE=%d (Sv39), PPN=0x%lx\n", 
+           DC_addr_3, DC.iohgatp.MODE, DC.fsc.iosatp.MODE, DC.fsc.iosatp.PPN);
+    
     // 重置 next_free_page，避免与 DC 和 DDT 冲突
     extern uint64_t next_free_page;
     next_free_page = 20;  // 从 PPN 20 开始分配页表
@@ -191,6 +203,8 @@ void RP_Module::send_translation_request_1_thread()
     uint64_t dev2_spa = 0x11000;
     gpte.PPN = dev2_spa / PAGESIZE;
     
+    // 重新读取设备 2 的 DC 以获取正确的 io hgatp
+    read_memory_test_rp(DC_addr_2, sizeof(device_context_t), (char*)&DC);
     pte_addr = add_g_stage_pte(iommu_ptr, DC.iohgatp, dev2_gpa, gpte, 0);
     if (pte_addr == (uint64_t)-1) {
         printf("[DEV2] ✗ ERROR: add_g_stage_pte failed!\n");
@@ -199,10 +213,39 @@ void RP_Module::send_translation_request_1_thread()
     printf("[DEV2] Added G-stage PTE at addr 0x%lx, GPA 0x%lx -> SPA 0x%lx (PPN=0x%lx)\n", 
            pte_addr, dev2_gpa, dev2_spa, gpte.PPN);
     
+    // ========== 为设备 3 设置 S-stage 页表 ==========
+    printf("\n[DEV3] Setting up S-stage page table (Sv39)...\n");
+    pte.raw = 0;  // 使用已声明的 spte_t pte 变量
+    pte.V = 1;
+    pte.R = 1;
+    pte.W = 1;
+    pte.X = 0;
+    pte.U = 1;  // 用户态可访问
+    pte.G = 0;
+    pte.A = 0;
+    pte.D = 0;
+    pte.PBMT = PMA;
+    
+    // 设备 3 的地址映射：IOVA 0xA000 -> PA 0x12000
+    uint64_t dev3_iova = 0xA000;
+    uint64_t dev3_pa = 0x12000;
+    pte.PPN = dev3_pa / PAGESIZE;
+    
+    // 读取设备 3 的 DC 获取 iosatp.PPN
+    read_memory_test_rp(DC_addr_3, sizeof(device_context_t), (char*)&DC);
+    pte_addr = add_s_stage_pte(DC.fsc.iosatp, dev3_iova, pte, 0, 0);  // level 0 for Sv39
+    if (pte_addr == (uint64_t)-1) {
+        printf("[DEV3] ✗ ERROR: add_s_stage_pte failed!\n");
+        return;
+    }
+    printf("[DEV3] Added S-stage PTE at addr 0x%lx, IOVA 0x%lx -> PA 0x%lx (PPN=0x%lx)\n", 
+           pte_addr, dev3_iova, dev3_pa, pte.PPN);
+    
     // 使页表生效，刷新缓存
-    printf("\n[TEST] Invalidating IOMMU caches for both devices...\n");
+    printf("\n[TEST] Invalidating IOMMU caches for all three devices...\n");
     iodir(iommu_ptr, INVAL_DDT, 1, 0x05, 0);  // 设备 1 DDT 无效
     iodir(iommu_ptr, INVAL_DDT, 1, 0x06, 0);  // 设备 2 DDT 无效
+    iodir(iommu_ptr, INVAL_DDT, 1, 0x07, 0);  // 设备 3 DDT 无效
     iotinval(iommu_ptr, GVMA, 1, 0, 0, 1, 0, 0);  // GSCID 无效
     
     // ========== 第一笔请求：设备 1 (Bare + Bare) ==========
@@ -277,11 +320,49 @@ void RP_Module::send_translation_request_1_thread()
     
     if (f) {
         fprintf(f, "[TEST_2_DEV2] Completed status=0x%x\n", rsp.status);
-        fprintf(f, "[TEST] All requests completed\n");
-        fclose(f);
+        fflush(f);
     }
     printf("[TEST_2_DEV2] Returned from send_translation_request_rp - status=%d\n", rsp.status);
     printf("[TEST_2_DEV2] Second translation request completed successfully\n");
+    
+    // ========== 第三笔请求：设备 3 (Sv39 + Bare) ==========
+    printf("\n========== 第三笔请求：设备 3 (device_id=0x07, Sv39+Bare) ==========\n");
+    uint64_t test_iova_3 = 0xA000;  // 设备 3 的 IOVA（需要 S-stage 页表翻译）
+    printf("[TEST_3_DEV3] Starting device 3 translation with IOVA=0x%lx (expected PA=0x%lx, Sv39 page table)\n", 
+           test_iova_3, 0x12000);
+    fflush(stdout);
+    
+    if (f) {
+        fprintf(f, "[TEST_3_DEV3] Starting IOVA=0x%lx\n", test_iova_3);
+        fflush(f);
+    }
+    
+    std::cout << "[TEST_3_COUT] Calling send_translation_request_rp for DEV3 IOVA=0x" 
+              << std::hex << test_iova_3 << std::dec << std::endl;
+    
+    send_translation_request_rp(iommu_ptr, 0x07,  // device_id = 0x07
+                                0,    // pid_valid
+                                0,    // process_id
+                                0,    // no_write
+                                0,    // exec_req
+                                0,    // priv_req
+                                0,    // is_cxl_dev
+                                0,    // at = ADDR_TYPE_UNTRANSLATED
+                                test_iova_3,  // iova
+                                16,   // length
+                                READ, // read_writeAMO
+                                &req, &rsp);
+    
+    std::cout << "[TEST_3_COUT] Returned from send_translation_request_rp, status=0x" 
+              << std::hex << rsp.status << std::dec << std::endl;
+    
+    if (f) {
+        fprintf(f, "[TEST_3_DEV3] Completed status=0x%x\n", rsp.status);
+        fprintf(f, "[TEST] All requests completed\n");
+        fclose(f);
+    }
+    printf("[TEST_3_DEV3] Returned from send_translation_request_rp - status=%d\n", rsp.status);
+    printf("[TEST_3_DEV3] Third translation request completed successfully\n");
     
     // 测试完成
     printf("\n[TEST] All multi-device tests completed!\n");
