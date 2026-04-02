@@ -16,12 +16,19 @@ uint8_t RP_Module::read_memory_test_rp(uint64_t addr, uint8_t size, char *data)
 
 uint8_t RP_Module::write_memory_test_rp(char *data, uint64_t addr, uint32_t size)
 {
+    // 如果是写入 DC 区域，打印详细信息
+    if (addr <= 0x200 && addr + size >= 0x140) {
+        printf("[WRITE_MEMORY_RP] Writing to addr=0x%lx, size=%d, data[0]=0x%lx\n", 
+               addr, size, *(uint64_t*)data);
+    }
     memcpy(&ddr_ptr->memory[addr], data, size);
     return 0;
 }
 
 void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req, iommu_to_hb_rsp_t *rsp_msg)
 {
+    printf("[DEBUG_IOVA] Entering iommu_translate_iova_rp\n");
+    fflush(stdout);
     // 创建一个TLM传输事务
     tlm_generic_payload trans;
     sc_time delay = SC_ZERO_TIME;
@@ -51,19 +58,23 @@ void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req,
     // 将扩展添加到传输中
     trans.set_extension(ext);
 
-    // 发送传输请求到IOMMU
+    // 发送传输请求到 IOMMU
     axi_master_to_pcie_noc_0_socket->b_transport(trans, delay);
-
+    
     cout << "[RP Module] Disallowed transaction test - at:" << ext->at
                                   << ", pid_valid:" << ext->pid_valid
                                   << ", exec_req:" << ext->exec_req
                                   << ", priv_req:" << ext->priv_req
                                   << ", no_write:" << req->no_write
                                   << ", response: " << trans.get_response_string() << endl;
-
+    
     // TODO : get resp from trans
-                        
-    delete ext;
+    // 注意：不要 delete ext，因为 TLM 事务可能仍然持有它的引用
+    // ext 的生命周期由 TLM 框架管理，或者应该使用智能指针
+    // delete ext;  // 已注释，避免 double-free 或使用后释放
+                            
+    printf("[DEBUG_IOVA] Exiting iommu_translate_iova_rp\n");
+    fflush(stdout);
 }
 
 
@@ -161,6 +172,10 @@ void RP_Module::send_translation_request_rp(iommu_top *iommu, uint32_t did, uint
     uint32_t length, uint8_t read_writeAMO,
     hb_to_iommu_req_t *req, iommu_to_hb_rsp_t *rsp) {
 
+    printf("[SEND_REQ] Entering send_translation_request_rp, IOVA=0x%lx\n", iova);
+    fflush(stdout);
+    std::cout << "[SEND_REQ_COUT] IOVA=0x" << std::hex << iova << std::dec << std::endl;
+
     req->device_id        = did;
     req->pid_valid        = pid_valid;
     req->process_id       = pid;
@@ -175,6 +190,10 @@ void RP_Module::send_translation_request_rp(iommu_top *iommu, uint32_t did, uint
 
     iommu_translate_iova_rp(iommu, req, rsp);
 
+    printf("[SEND_REQ] Exiting send_translation_request_rp, status=0x%x\n", rsp->status);
+    fflush(stdout);
+    std::cout << "[SEND_REQ_COUT] Status=0x" << std::hex << rsp->status << std::dec << std::endl;
+
     return;
 }
 
@@ -188,6 +207,8 @@ uint64_t RP_Module::add_device(iommu_top *iommu, uint32_t device_id, uint32_t gs
     char zero[16384];
     memset(zero, 0, 16384);
     memset(&DC, 0, sizeof(DC));
+    
+    printf("[ADD_DEVICE] Called with iohgatp_mode=%d, iosatp_mode=%d\n", iohgatp_mode, iosatp_mode);
 
     DC.tc.V      = 1;
     DC.tc.EN_ATS = en_ats;
@@ -203,9 +224,11 @@ uint64_t RP_Module::add_device(iommu_top *iommu, uint32_t device_id, uint32_t gs
     if ( iohgatp_mode != IOHGATP_Bare ) {
         DC.iohgatp.GSCID = gscid;
         DC.iohgatp.PPN = get_free_ppn(4);
+        printf("[ADD_DEVICE] Allocated iohgatp PPN=0x%lx for mode %d\n", DC.iohgatp.PPN, iohgatp_mode);
         write_memory_test_rp(zero, DC.iohgatp.PPN * PAGESIZE, 16384 );
     }
     DC.iohgatp.MODE = iohgatp_mode;
+    printf("[ADD_DEVICE] Set DC.iohgatp.MODE=%d, PPN=0x%lx\n", DC.iohgatp.MODE, DC.iohgatp.PPN);
     if ( iosatp_mode != IOSATP_Bare ) {
         DC.tc.PDTV = 0;
         DC.fsc.iosatp.MODE = iosatp_mode;
@@ -325,19 +348,40 @@ uint64_t RP_Module::add_g_stage_pte (
         vpn[4] = get_bits(58, 48, gpa);
         LEVELS = 5;
     }
+    
+    printf("[ADD_G_STAGE_PTE] GPA=0x%lx, add_level=%d, LEVELS=%d\n", gpa, add_level, LEVELS);
+    printf("[ADD_G_STAGE_PTE] VPN values: [0]=%d, [1]=%d, [2]=%d, [3]=%d\n", vpn[0], vpn[1], vpn[2], vpn[3]);
+    
     i = LEVELS - 1;
     a = iohgatp.PPN * PAGESIZE;
+    printf("[ADD_G_STAGE_PTE] Starting walk: i=%d, root_addr=0x%lx (PPN=0x%lx)\n", i, a, iohgatp.PPN);
+    
     while ( i > add_level ) {
         nl_gpte.raw = 0;
-        if ( read_memory_test_rp( (a | (vpn[i] * PTESIZE)), PTESIZE, (char *)&nl_gpte.raw) ) return -1;
+        printf("[ADD_G_STAGE_PTE] Reading PTE at level %d, addr=0x%lx (vpn[%d]=%d)\n", i, (a | (vpn[i] * PTESIZE)), i, vpn[i]);
+        if ( read_memory_test_rp( (a | (vpn[i] * PTESIZE)), PTESIZE, (char *)&nl_gpte.raw) ) {
+            printf("[ADD_G_STAGE_PTE] ERROR: Failed to read PTE at level %d!\n", i);
+            return -1;
+        }
         if ( nl_gpte.V == 0 ) {
+            printf("[ADD_G_STAGE_PTE] Level %d PTE invalid (V=0), allocating new page...\n", i);
             nl_gpte.V = 1;
             nl_gpte.PPN = get_free_ppn(1);
-            if ( write_memory_test_rp( (char *)&nl_gpte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE) ) return -1;
+            printf("[ADD_G_STAGE_PTE] Allocated PPN=0x%lx for level %d\n", nl_gpte.PPN, i);
+            if ( write_memory_test_rp( (char *)&nl_gpte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE) ) {
+                printf("[ADD_G_STAGE_PTE] ERROR: Failed to write PTE at level %d!\n", i);
+                return -1;
+            }
+        } else {
+            printf("[ADD_G_STAGE_PTE] Level %d PTE already valid: 0x%lx\n", i, nl_gpte.raw);
         }
         i = i - 1;
-        if ( i < 0 ) return -1;
+        if ( i < 0 ) {
+            printf("[ADD_G_STAGE_PTE] ERROR: i became negative!\n");
+            return -1;
+        }
         a = nl_gpte.PPN * PAGESIZE;
+        printf("[ADD_G_STAGE_PTE] Moving to level %d, next_addr=0x%lx\n", i, a);
     }
     if ( write_memory_test_rp( (char *)&gpte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE) ) return -1;
     return (a | (vpn[i] * PTESIZE));
@@ -370,6 +414,13 @@ uint64_t RP_Module::add_dev_context(
     if ( iommu->iommu_inst.reg_file.ddtp.iommu_mode == DDT_3LVL ) LEVELS = 3;
     if ( iommu->iommu_inst.reg_file.ddtp.iommu_mode == DDT_2LVL ) LEVELS = 2;
     if ( iommu->iommu_inst.reg_file.ddtp.iommu_mode == DDT_1LVL ) LEVELS = 1;
+    
+    printf("[ADD_DEV_CONTEXT] Writing DC for device_id=0x%x, DDI[0]=%d, DDI[1]=%d, DDI[2]=%d\n", 
+           device_id, DDI[0], DDI[1], DDI[2]);
+    printf("[ADD_DEV_CONTEXT] DC.tc.V=%d, DC.tc.EN_ATS=%d, DC.tc.GADE=%d, DC.tc.SADE=%d\n",
+           DC->tc.V, DC->tc.EN_ATS, DC->tc.GADE, DC->tc.SADE);
+    printf("[ADD_DEV_CONTEXT] DC_SIZE=%d, DC address=0x%lx\n", DC_SIZE, (a + (DDI[0] * DC_SIZE)));
+    
     i = LEVELS - 1;
     while ( i > 0 ) {
         ddte.raw = 0;
@@ -378,11 +429,37 @@ uint64_t RP_Module::add_dev_context(
             ddte.V = 1;
             ddte.PPN = get_free_ppn(1);
             if ( write_memory_test_rp( (char *)&ddte.raw, (a + (DDI[i] * 8)), 8) ) return -1;
+            printf("[ADD_DEV_CONTEXT] Created new DDTE at level %d, index %d, PPN=0x%lx\n", i, DDI[i], ddte.PPN);
         }
         i = i - 1;
         a = ddte.PPN * PAGESIZE;
     }
+    
+    // 写入 DC 之前再次确认
+    printf("[ADD_DEV_CONTEXT] About to write DC (size=%d bytes) to address 0x%lx\n", DC_SIZE, (a + (DDI[0] * DC_SIZE)));
+    printf("[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x%lx 0x%lx\n", ((uint64_t*)DC)[0], ((uint64_t*)DC)[1]);
+    
     if ( write_memory_test_rp( (char *)DC, (a + (DDI[0] * DC_SIZE)), DC_SIZE) ) return -1;
+    
+    // 立即读回验证
+    device_context_t DC_verify;
+    memset(&DC_verify, 0, sizeof(DC_verify));
+    if ( read_memory_test_rp( (a + (DDI[0] * DC_SIZE)), DC_SIZE, (char *)&DC_verify) ) {
+        printf("[ADD_DEV_CONTEXT] ERROR: Failed to read back DC for verification!\n");
+        return -1;
+    }
+    
+    printf("[ADD_DEV_CONTEXT] Verification - Read back DC from 0x%lx\n", (a + (DDI[0] * DC_SIZE)));
+    printf("[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=%d (should be 1)\n", DC_verify.tc.V);
+    printf("[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=%d\n", DC_verify.tc.EN_ATS);
+    printf("[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x%lx 0x%lx\n", ((uint64_t*)&DC_verify)[0], ((uint64_t*)&DC_verify)[1]);
+    
+    if ( DC_verify.tc.V != 1 ) {
+        printf("[ADD_DEV_CONTEXT] ERROR: DC V bit is not set after write! Write/Read memory test failed.\n");
+    } else {
+        printf("[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!\n");
+    }
+    
     return (a + (DDI[0] * DC_SIZE));
 }
 

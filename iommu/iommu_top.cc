@@ -158,14 +158,38 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
             else
             {
                 printf("[IOMMU] Regular translation, calculating physical address\n");
+                printf("[IOMMU] Debug info - PPN: 0x%lx, S bit: %d, page_offset: 0x%lx\n", 
+                       rsp.trsp.PPN, rsp.trsp.S, trans.get_address() & 0xFFF);
                 
-                // Calculate physical address from PPN (Page Number) and page size
-                // PPN is in NAPOT format, so we need to convert it back to regular address
-                uint64_t page_size = (rsp.trsp.S == 1) ? 0x200000 : 0x1000; // 2MB or 4KB
-                uint64_t page_number = rsp.trsp.PPN & ~((page_size / 4096) - 1); // Clear lower bits based on page size
-                uint64_t calculated_pa = (page_number << 12); // Shift back to get page-aligned address
+                // Calculate physical address from PPN and page size
+                // In Bare mode, PPN is already the direct page number, not NAPOT format
+                uint64_t page_size;
+                if (rsp.trsp.S == 1) {
+                    // Large page (2MB)
+                    page_size = 0x200000;
+                } else {
+                    // Small page (4KB)
+                    page_size = 0x1000;
+                }
                 
-                printf("[IOMMU] Calculated physical address: 0x%lx\n", calculated_pa);
+                // For Bare mode translation, use the PPN directly
+                // For page-based translations with NAPOT format, convert NAPOT PPN back to regular PPN
+                uint64_t actual_ppn;
+                if (page_size >= 0x40000000) {  // Bare mode
+                    actual_ppn = rsp.trsp.PPN;
+                } else {
+                    // NAPOT format: extract base PPN by clearing the NAPOT bits
+                    // NAPOT PPN has form: base_PPN | ((page_sz/2/PAGESIZE) - 1)
+                    uint64_t napot_mask = (page_size/2/PAGESIZE) - 1;
+                    actual_ppn = rsp.trsp.PPN & ~napot_mask;
+                }
+                
+                uint64_t calculated_pa = (actual_ppn << 12) | (trans.get_address() & 0xFFF);
+                
+                printf("[IOMMU] Using page_size: 0x%lx, Calculated physical address: 0x%lx\n", 
+                       page_size, calculated_pa);
+                printf("[IOMMU] Debug info - PPN: 0x%lx, S bit: %d, page_offset: 0x%lx\n",
+                       rsp.trsp.PPN, rsp.trsp.S, trans.get_address() & 0xFFF);
                 
                 trans.set_address(calculated_pa);
                 axi_master_0_to_pcie_noc_socket->b_transport(trans,delay);
