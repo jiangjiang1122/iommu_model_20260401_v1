@@ -33,6 +33,7 @@ iommu_translate_iova(
     gpte_t g_pte;
     uint8_t ioatc_status, gst_fault, is_implicit, pasid_valid;
     uint64_t napot_ppn, napot_iova, napot_gpa;
+    uint8_t is_bare_translation;  // Flag to indicate Bare mode translation
 
     // Classify transaction type
     iotval2 = 0;
@@ -160,29 +161,44 @@ iommu_translate_iova(
     //    report "Transaction type disallowed" (cause = 260).
     //    a. `ddtp.iommu_mode` is `2LVL` and `DDI[2]` is not 0
     //    b. `ddtp.iommu_mode` is `1LVL` and either `DDI[2]` is not 0 or `DDI[1]` is not 0
+#ifdef DEBUG_TRANSLATION
+    printf("[TRANSLATION_IOVA] Step 5: Checking device_id width - DDI[0]=%d, DDI[1]=%d, DDI[2]=%d\n", DDI[0], DDI[1], DDI[2]);
+    printf("[TRANSLATION_IOVA] Current iommu_mode: %d (1=Bare, 2=1LVL, 3=2LVL)\n", iommu->reg_file.ddtp.iommu_mode);
+#endif
     if ( iommu->reg_file.ddtp.iommu_mode == DDT_2LVL && DDI[2] != 0 ) {
+#ifdef DEBUG_TRANSLATION
+        printf("[TRANSLATION_IOVA] FAIL: 2LVL mode but DDI[2]!=0, cause=260\n");
+#endif
         cause = 260; // "Transaction type disallowed"
         goto stop_and_report_fault;
     }
 
     if ( iommu->reg_file.ddtp.iommu_mode == DDT_1LVL && (DDI[2] != 0 || DDI[1] != 0) ) {
+#ifdef DEBUG_TRANSLATION
+        printf("[TRANSLATION_IOVA] FAIL: 1LVL mode but DDI[2]!=0 or DDI[1]!=0, cause=260\n");
+#endif
         cause = 260; // "Transaction type disallowed"
         goto stop_and_report_fault;
     }
+#ifdef DEBUG_TRANSLATION
+    printf("[TRANSLATION_IOVA] Step 5 passed: device_id width is valid\n");
+#endif
 
     // 6. Use `device_id` to then locate the device-context (`DC`) as specified in
     //    section 2.4.1 of IOMMU specification.
 #ifdef DEBUG_TRANSLATION
     printf("[TRANSLATION_IOVA] Step 6: Locating device context for device_id: 0x%x\n", req->device_id);
+    printf("[TRANSLATION_IOVA] Device ID breakdown - DDI[0]=%d, DDI[1]=%d, DDI[2]=%d\n", DDI[0], DDI[1], DDI[2]);
 #endif
     if ( locate_device_context(iommu, &DC, req->device_id, req->pid_valid, req->process_id, &cause) ) {
 #ifdef DEBUG_TRANSLATION
-        printf("[TRANSLATION_IOVA] Device context lookup failed, going to stop_and_report_fault\n");
+    printf("[TRANSLATION_IOVA] Device context lookup failed with cause: %d, going to stop_and_report_fault\n", cause);
 #endif
         goto stop_and_report_fault;
     }
 #ifdef DEBUG_TRANSLATION
     printf("[TRANSLATION_IOVA] Device context located successfully, DTF: %d\n", DC.tc.DTF);
+    printf("[TRANSLATION_IOVA] DC.tc.EN_ATS: %d, req->tr.at: %d\n", DC.tc.EN_ATS, req->tr.at);
 #endif
     DTF = DC.tc.DTF;
 
@@ -482,15 +498,37 @@ step_20:
     printf("[TRANSLATION_IOVA] Final PA: 0x%lx, page_sz: %ld, is_msi: %d, is_mrif: %d\n", pa, page_sz, is_msi, is_mrif);
 #endif
     rsp_msg->status               = SUCCESS;
-    // The PPN and size is returned in same format as for ATS translation response
-    // see below comments on for format details.
-    rsp_msg->trsp.PPN             = ((pa & ~(page_sz - 1)) | ((page_sz/2) - 1))/PAGESIZE;
-    rsp_msg->trsp.S               = (page_sz > PAGESIZE) ? 1 : 0;
+    
+    // Determine if this is a Bare mode translation (both stages are Bare)
+    // In Bare mode: IOVA = PA directly, no page table walk needed
+    is_bare_translation = 0;  // Initialize to 0
+    if (PSCV == 0 && GV == 0) {
+        // Both first-stage (S/VS) and second-stage (G) are Bare mode
+        is_bare_translation = 1;
+#ifdef DEBUG_TRANSLATION
+        printf("[TRANSLATION_IOVA] Bare mode detected: PSCV=0, GV=0 (IOVA=PA direct mapping)\n");
+#endif
+    }
+    
+    // Calculate PPN based on translation mode
+    // For Bare mode translations, use simple PPN = PA >> 12
+    // For page-based translations, use ATS NAPOT format
+    if (is_bare_translation) {  // Bare mode: both stages are Bare
+        // Simple page number for Bare mode
+        rsp_msg->trsp.PPN         = pa >> 12;
+        rsp_msg->trsp.S           = 0;  // Indicate small page for simplicity
+    } else {
+        // The PPN and size is returned in same format as for ATS translation response
+        // see below comments on for format details.
+        rsp_msg->trsp.PPN         = ((pa & ~(page_sz - 1)) | ((page_sz/2) - 1))/PAGESIZE;
+        rsp_msg->trsp.S           = (page_sz > PAGESIZE) ? 1 : 0;
+    }
     rsp_msg->trsp.is_msi          = is_msi;
     rsp_msg->trsp.is_mrif         = is_msi & is_mrif;
     rsp_msg->trsp.dest_mrif_addr  = dest_mrif_addr;
     rsp_msg->trsp.mrif_nid        = mrif_nid;
     rsp_msg->trsp.PBMT            = vs_pte.PBMT;
+    rsp_msg->trsp.is_bare_mode    = is_bare_translation;  // Set Bare mode flag
 
     if ( TTYP == PCIE_ATS_TRANSLATION_REQUEST ) {
         // When a Success response is generated for a ATS translation request, the setting

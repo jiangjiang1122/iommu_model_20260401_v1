@@ -175,13 +175,19 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
                 // For Bare mode translation, use the PPN directly
                 // For page-based translations with NAPOT format, convert NAPOT PPN back to regular PPN
                 uint64_t actual_ppn;
-                if (page_size >= 0x40000000) {  // Bare mode
-                    actual_ppn = rsp.trsp.PPN;
+                if (rsp.trsp.is_bare_mode == 1) {  // Bare mode: IOVA=PA direct mapping
+                    actual_ppn = rsp.trsp.PPN;  // Use PPN directly (already PA >> 12)
+#ifdef DEBUG_TRANSLATION
+                    printf("[IOMMU] Bare mode translation detected via is_bare_mode flag\n");
+#endif
                 } else {
                     // NAPOT format: extract base PPN by clearing the NAPOT bits
                     // NAPOT PPN has form: base_PPN | ((page_sz/2/PAGESIZE) - 1)
                     uint64_t napot_mask = (page_size/2/PAGESIZE) - 1;
                     actual_ppn = rsp.trsp.PPN & ~napot_mask;
+#ifdef DEBUG_TRANSLATION
+                    printf("[IOMMU] Page-based translation, NAPOT mask: 0x%lx\n", napot_mask);
+#endif
                 }
                 
                 uint64_t calculated_pa = (actual_ppn << 12) | (trans.get_address() & 0xFFF);
