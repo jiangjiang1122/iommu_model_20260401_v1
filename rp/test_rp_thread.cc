@@ -8,12 +8,14 @@
 #include <iostream>
 using namespace std;
 
+#if  0
 void RP_Module::send_translation_request_0_thread()
 {
     while (true)
     {
 
     // 等待一段时间让系统初始化
+    wait(10, SC_NS);
     wait(10, SC_NS);
 
     uint8_t at, pid_valid, exec_req, priv_req, no_write, PR, PW, AV;
@@ -54,6 +56,7 @@ void RP_Module::send_translation_request_0_thread()
     cout << "[RP Module] Tests completed" << endl;
    }
 }
+#endif
 
 void RP_Module::send_translation_request_1_thread() 
 {    

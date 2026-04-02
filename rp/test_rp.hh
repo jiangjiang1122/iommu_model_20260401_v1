@@ -70,7 +70,7 @@ public:
         SC_THREAD(send_translation_request_1_thread);
     }
 
-    void send_translation_request_0_thread();
+    //void send_translation_request_0_thread();
     void send_translation_request_1_thread();
     
     // 添加函数声明  

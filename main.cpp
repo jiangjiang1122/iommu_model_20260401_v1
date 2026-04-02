@@ -33,9 +33,17 @@
 using namespace std;
 using namespace tlm;
 using namespace tlm_utils;
+using namespace sc_core;
 
 int sc_main(int argc, char *argv[]) {
+    // Display SystemC version information
+    printf("%s\n", sc_release());
+    printf("Copyright (c) 1996-2018 by all Contributors,\n");
+    printf("ALL RIGHTS RESERVED\n");
+    fflush(stdout);  // Force flush output buffer
+    
     printf("Starting RISC-V IOMMU SystemC Model\n");
+    fflush(stdout);  // Force flush output buffer
 
     // 创建IOMMU顶层模块实例
     iommu_top* iommu = new iommu_top("iommu");
