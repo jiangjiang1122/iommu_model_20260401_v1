@@ -72,9 +72,20 @@ int sc_main(int argc, char *argv[]) {
     // 绑定PCIENOC模块的initiator socket到IOMMU的target socket
     pcienoc->ahb_master_to_pcie_noc_1_socket.bind(iommu->ahb_slave_from_pcie_noc_1_socket);
 
-    // 运行仿真，设置仿真时间为1000纳秒
-    printf("IOMMU simulation start\n");
+
+    
+    // 启动IOMMU模块
+    printf("Starting IOMMU simulation for single translation test\n");
+    fflush(stdout);
+    
+    // 等待系统初始化
+    sc_core::sc_start(100, sc_core::SC_NS);
+    
+    // 运行仿真足够长的时间以完成翻译过程
     sc_core::sc_start(1000, sc_core::SC_NS);
+    
+    printf("IOMMU simulation completed\n");
+    fflush(stdout);
 
     // 清理内存
     delete pcienoc;

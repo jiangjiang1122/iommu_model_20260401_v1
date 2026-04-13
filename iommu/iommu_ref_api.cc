@@ -47,7 +47,7 @@ uint8_t write_memory(iommu_t *iommu, char *data, uint64_t address, uint32_t size
 
 uint8_t read_memory_test(iommu_t *iommu, uint64_t addr, uint8_t size, char *data)
 {
-    printf("IOMMU:read_memory_test: addr = 0x%x, size = %d\n",addr,size);
+    printf("[IOMMU_REF_API] read_memory_test: addr = 0x%lx, size = %d\n",addr,size);
     // 创建 TLM 通用负载
     tlm::tlm_generic_payload trans;
     sc_time delay = SC_ZERO_TIME;
@@ -62,8 +62,12 @@ uint8_t read_memory_test(iommu_t *iommu, uint64_t addr, uint8_t size, char *data
     trans.set_dmi_allowed(false);
     trans.set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
 
-    // 调用 b_transport
+    // 调用 b_transport - this should trigger DDR read
+    printf("[IOMMU_REF_API] About to call b_transport on axi_master_1_to_cmn_rnd_socket\n");
     iommu->top->axi_master_1_to_cmn_rnd_socket->b_transport(trans, delay);
+    
+    printf("[IOMMU_REF_API] After TLM READ - data[0-7]: 0x%lx\n", *(uint64_t*)data);
+    printf("[IOMMU_REF_API] Response status: %d\n", trans.get_response_status());
 
     // 检查响应状态
     if (trans.get_response_status() != tlm::TLM_OK_RESPONSE) {

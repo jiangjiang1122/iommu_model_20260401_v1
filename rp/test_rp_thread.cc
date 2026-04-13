@@ -107,13 +107,64 @@ void RP_Module::send_translation_request_1_thread()
    
     printf("Device context invalid");
 
+    // 初始化全局memory指针和next_free_page
+    extern int8_t *memory;
+    extern uint64_t next_free_page;
+    extern uint64_t next_free_gpage[65536];
+    
+    // 将全局memory指针指向DDR模块的内存
+    memory = reinterpret_cast<int8_t*>(ddr_ptr->memory);
+    next_free_page = 0;
+    
+    // 初始化next_free_gpage数组
+    for (uint32_t gscid = 0; gscid < 65536; gscid++) {
+        next_free_gpage[gscid] = 0;
+    }
+    
+    printf("[INIT] Global memory pointer initialized to DDR memory: %p\n", (void*)memory);
+    printf("[INIT] next_free_page reset to 0\n");
+    fflush(stdout);
+
     // 检查 IOMMU 模式
     ddtp_t ddtp_check;
     ddtp_check.raw = read_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 4);
     printf("\n[DEBUG] Current IOMMU mode before enable_iommu: %d\n", ddtp_check.iommu_mode);
+    
+    // 如果当前不是Off或Bare模式，需要先关闭IOMMU
+    if (ddtp_check.iommu_mode != 0 && ddtp_check.iommu_mode != 1) {
+        printf("[INIT] IOMMU is in mode %d, switching to Off mode first\n", ddtp_check.iommu_mode);
+        ddtp_t ddtp_off;
+        ddtp_off.raw = 0;
+        ddtp_off.iommu_mode = 0;  // Off模式
+        write_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 8, ddtp_off.raw);
+        // 等待busy位清零
+        do {
+            ddtp_check.raw = read_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 8);
+        } while (ddtp_check.busy == 1);
+        printf("[INIT] IOMMU switched to Off mode\n");
+        fflush(stdout);
+    }
+    
+    // 手动设置max_iommu_mode，因为reset_iommu未被调用
+    iommu_ptr->iommu_inst.max_iommu_mode = DDT_3LVL;  // 支持最大3级DDT
+    printf("[INIT] Set max_iommu_mode to DDT_3LVL (%d)\n", DDT_3LVL);
+    fflush(stdout);
 
     // 先使能 IOMMU，分配并初始化 DDT 根表
-    fail_if( ( enable_iommu(iommu_ptr, DDT_1LVL) < 0 ) );    
+    printf("[DEBUG] About to call enable_iommu with DDT_2LVL=%d\n", DDT_2LVL);
+    printf("[DEBUG] Current max_iommu_mode=%d\n", iommu_ptr->iommu_inst.max_iommu_mode);
+    fflush(stdout);
+    
+    int8_t enable_result = enable_iommu(iommu_ptr, DDT_2LVL);
+    printf("[DEBUG] enable_iommu returned %d\n", enable_result);
+    
+    // 读取写入后的DDTP值
+    ddtp_check.raw = read_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 8);
+    printf("[DEBUG] After enable_iommu: DDTP.iommu_mode=%d, DDTP.ppn=0x%lx, DDTP.busy=%d\n", 
+           ddtp_check.iommu_mode, ddtp_check.ppn, ddtp_check.busy);
+    fflush(stdout);
+    
+    fail_if( enable_result < 0 );    
     
     // 重置 next_free_page 到一个安全的起始值，避免与 DDT 冲突
     // DDT 使用了 PPN 0，所以我们从 PPN 10 开始分配 (地址 0xA000)
@@ -248,7 +299,8 @@ void RP_Module::send_translation_request_1_thread()
     iodir(iommu_ptr, INVAL_DDT, 1, 0x07, 0);  // 设备 3 DDT 无效
     iotinval(iommu_ptr, GVMA, 1, 0, 0, 1, 0, 0);  // GSCID 无效
     
-    // ========== 第一笔请求：设备 1 (Bare + Bare) ==========
+    // ========== 第一笔请求：设备 1 (Bare + Bare) - 已注释 ==========
+    /*
     printf("\n========== 第一笔请求：设备 1 (device_id=0x05, Bare+Bare) ==========\n");
     uint64_t test_iova_1 = 0x8000;  // 设备 1 的 IOVA（Bare 模式直接映射）
     printf("[TEST_1_DEV1] Starting device 1 translation with IOVA=0x%lx (expected PA=0x%lx, bare mode)\n", 
@@ -286,8 +338,10 @@ void RP_Module::send_translation_request_1_thread()
     }
     printf("[TEST_1_DEV1] Returned from send_translation_request_rp - status=%d\n", rsp.status);
     printf("[TEST_1_DEV1] First translation request completed successfully\n");
+    */
     
-    // ========== 第二笔请求：设备 2 (Bare + Sv48x4) ==========
+    // ========== 第二笔请求：设备 2 (Bare + Sv48x4) - 已注释 ==========
+    /*
     printf("\n========== 第二笔请求：设备 2 (device_id=0x06, Bare+Sv48x4) ==========\n");
     uint64_t test_iova_2 = 0x9000;  // 设备 2 的 GPA（需要页表翻译）
     printf("[TEST_2_DEV2] Starting device 2 translation with IOVA=0x%lx (expected PA=0x%lx, page table)\n", 
@@ -324,6 +378,7 @@ void RP_Module::send_translation_request_1_thread()
     }
     printf("[TEST_2_DEV2] Returned from send_translation_request_rp - status=%d\n", rsp.status);
     printf("[TEST_2_DEV2] Second translation request completed successfully\n");
+    */
     
     // ========== 第三笔请求：设备 3 (Sv39 + Bare) ==========
     printf("\n========== 第三笔请求：设备 3 (device_id=0x07, Sv39+Bare) ==========\n");
@@ -332,6 +387,7 @@ void RP_Module::send_translation_request_1_thread()
            test_iova_3, 0x12000);
     fflush(stdout);
     
+    FILE* f = fopen("/tmp/iommu_test_log.txt", "w");
     if (f) {
         fprintf(f, "[TEST_3_DEV3] Starting IOVA=0x%lx\n", test_iova_3);
         fflush(f);

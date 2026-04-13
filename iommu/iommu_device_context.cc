@@ -172,11 +172,6 @@ step_8:
     // Count walks in DDT
     count_events(iommu, pid_valid, process_id, 0, 0, device_id, 0, 0, DDT_WALKS);
 
-#ifdef DEBUG_TRANSLATION
-    printf("[LOCATE_DC] Step 8: Attempting to read DC at address 0x%lx\n", a + (DDI[0] * DC_SIZE));
-    printf("[LOCATE_DC] a=0x%lx, DDI[0]=%d, DC_SIZE=%d, pa_mask=0x%lx\n", a, DDI[0], DC_SIZE, pa_mask);
-#endif
-
     // 8. Let `DC` be value of `DC_SIZE` bytes at address `a + DDI[0] * DC_SIZE`. If
     //    `capabilities.MSI_FLAT` is 1 then `DC_SIZE` is 64-bytes else it is 32-bytes.
     //    If accessing `DC` violates a PMA or PMP check, then stop and report
@@ -185,6 +180,13 @@ step_8:
     //    (cause = 268). This fault is detected if the IOMMU supports the RAS capability
     //    (`capabilities.RAS == 1`).
     DC_SIZE = ( iommu->reg_file.capabilities.msi_flat == 1 ) ? EXT_FORMAT_DC_SIZE : BASE_FORMAT_DC_SIZE;
+    
+#ifdef DEBUG_TRANSLATION
+    printf("[LOCATE_DC] Step 8: Attempting to read DC at address 0x%lx\n", a + (DDI[0] * DC_SIZE));
+    printf("[LOCATE_DC] a=0x%lx, DDI[0]=%d, DC_SIZE=%d, msi_flat=%d, pa_mask=0x%lx\n", 
+           a, DDI[0], DC_SIZE, iommu->reg_file.capabilities.msi_flat, pa_mask);
+#endif
+    
     status = ((a + (DDI[0] * DC_SIZE)) & ~pa_mask) ?
              ACCESS_FAULT :
              read_memory(iommu, (a + (DDI[0] * DC_SIZE)), DC_SIZE, (char *)DC,
@@ -192,6 +194,8 @@ step_8:
                          iommu->reg_file.iommu_qosid.mcid, PMA, endian);
 #ifdef DEBUG_TRANSLATION
     printf("[LOCATE_DC] Reading DC memory status: %d\n", status);
+    printf("[LOCATE_DC] DC raw data (first 16 bytes): 0x%lx 0x%lx\n", ((uint64_t*)DC)[0], ((uint64_t*)DC)[1]);
+    printf("[LOCATE_DC] DC.tc.V = %d\n", DC->tc.V);
 #endif
     if ( status & ACCESS_FAULT ) {
         *cause = 257;     // DDT entry load access fault

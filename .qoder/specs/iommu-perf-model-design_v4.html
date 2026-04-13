@@ -1,0 +1,1763 @@
+<!DOCTYPE html><html><head>
+      <title>iommu-perf-model-design_v4</title>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      
+      <link rel="stylesheet" href="file:///c:\Users\jiangliyun\.vscode\extensions\shd101wyy.markdown-preview-enhanced-0.8.22\crossnote\dependencies\katex\katex.min.css">
+      
+      
+      
+      
+      
+      <style>
+      code[class*=language-],pre[class*=language-]{color:#333;background:0 0;font-family:Consolas,"Liberation Mono",Menlo,Courier,monospace;text-align:left;white-space:pre;word-spacing:normal;word-break:normal;word-wrap:normal;line-height:1.4;-moz-tab-size:8;-o-tab-size:8;tab-size:8;-webkit-hyphens:none;-moz-hyphens:none;-ms-hyphens:none;hyphens:none}pre[class*=language-]{padding:.8em;overflow:auto;border-radius:3px;background:#f5f5f5}:not(pre)>code[class*=language-]{padding:.1em;border-radius:.3em;white-space:normal;background:#f5f5f5}.token.blockquote,.token.comment{color:#969896}.token.cdata{color:#183691}.token.doctype,.token.macro.property,.token.punctuation,.token.variable{color:#333}.token.builtin,.token.important,.token.keyword,.token.operator,.token.rule{color:#a71d5d}.token.attr-value,.token.regex,.token.string,.token.url{color:#183691}.token.atrule,.token.boolean,.token.code,.token.command,.token.constant,.token.entity,.token.number,.token.property,.token.symbol{color:#0086b3}.token.prolog,.token.selector,.token.tag{color:#63a35c}.token.attr-name,.token.class,.token.class-name,.token.function,.token.id,.token.namespace,.token.pseudo-class,.token.pseudo-element,.token.url-reference .token.variable{color:#795da3}.token.entity{cursor:help}.token.title,.token.title .token.punctuation{font-weight:700;color:#1d3e81}.token.list{color:#ed6a43}.token.inserted{background-color:#eaffea;color:#55a532}.token.deleted{background-color:#ffecec;color:#bd2c00}.token.bold{font-weight:700}.token.italic{font-style:italic}.language-json .token.property{color:#183691}.language-markup .token.tag .token.punctuation{color:#333}.language-css .token.function,code.language-css{color:#0086b3}.language-yaml .token.atrule{color:#63a35c}code.language-yaml{color:#183691}.language-ruby .token.function{color:#333}.language-markdown .token.url{color:#795da3}.language-makefile .token.symbol{color:#795da3}.language-makefile .token.variable{color:#183691}.language-makefile .token.builtin{color:#0086b3}.language-bash .token.keyword{color:#0086b3}pre[data-line]{position:relative;padding:1em 0 1em 3em}pre[data-line] .line-highlight-wrapper{position:absolute;top:0;left:0;background-color:transparent;display:block;width:100%}pre[data-line] .line-highlight{position:absolute;left:0;right:0;padding:inherit 0;margin-top:1em;background:hsla(24,20%,50%,.08);background:linear-gradient(to right,hsla(24,20%,50%,.1) 70%,hsla(24,20%,50%,0));pointer-events:none;line-height:inherit;white-space:pre}pre[data-line] .line-highlight:before,pre[data-line] .line-highlight[data-end]:after{content:attr(data-start);position:absolute;top:.4em;left:.6em;min-width:1em;padding:0 .5em;background-color:hsla(24,20%,50%,.4);color:#f4f1ef;font:bold 65%/1.5 sans-serif;text-align:center;vertical-align:.3em;border-radius:999px;text-shadow:none;box-shadow:0 1px #fff}pre[data-line] .line-highlight[data-end]:after{content:attr(data-end);top:auto;bottom:.4em}html body{font-family:'Helvetica Neue',Helvetica,'Segoe UI',Arial,freesans,sans-serif;font-size:16px;line-height:1.6;color:#333;background-color:#fff;overflow:initial;box-sizing:border-box;word-wrap:break-word}html body>:first-child{margin-top:0}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{line-height:1.2;margin-top:1em;margin-bottom:16px;color:#000}html body h1{font-size:2.25em;font-weight:300;padding-bottom:.3em}html body h2{font-size:1.75em;font-weight:400;padding-bottom:.3em}html body h3{font-size:1.5em;font-weight:500}html body h4{font-size:1.25em;font-weight:600}html body h5{font-size:1.1em;font-weight:600}html body h6{font-size:1em;font-weight:600}html body h1,html body h2,html body h3,html body h4,html body h5{font-weight:600}html body h5{font-size:1em}html body h6{color:#5c5c5c}html body strong{color:#000}html body del{color:#5c5c5c}html body a:not([href]){color:inherit;text-decoration:none}html body a{color:#08c;text-decoration:none}html body a:hover{color:#00a3f5;text-decoration:none}html body img{max-width:100%}html body>p{margin-top:0;margin-bottom:16px;word-wrap:break-word}html body>ol,html body>ul{margin-bottom:16px}html body ol,html body ul{padding-left:2em}html body ol.no-list,html body ul.no-list{padding:0;list-style-type:none}html body ol ol,html body ol ul,html body ul ol,html body ul ul{margin-top:0;margin-bottom:0}html body li{margin-bottom:0}html body li.task-list-item{list-style:none}html body li>p{margin-top:0;margin-bottom:0}html body .task-list-item-checkbox{margin:0 .2em .25em -1.8em;vertical-align:middle}html body .task-list-item-checkbox:hover{cursor:pointer}html body blockquote{margin:16px 0;font-size:inherit;padding:0 15px;color:#5c5c5c;background-color:#f0f0f0;border-left:4px solid #d6d6d6}html body blockquote>:first-child{margin-top:0}html body blockquote>:last-child{margin-bottom:0}html body hr{height:4px;margin:32px 0;background-color:#d6d6d6;border:0 none}html body table{margin:10px 0 15px 0;border-collapse:collapse;border-spacing:0;display:block;width:100%;overflow:auto;word-break:normal;word-break:keep-all}html body table th{font-weight:700;color:#000}html body table td,html body table th{border:1px solid #d6d6d6;padding:6px 13px}html body dl{padding:0}html body dl dt{padding:0;margin-top:16px;font-size:1em;font-style:italic;font-weight:700}html body dl dd{padding:0 16px;margin-bottom:16px}html body code{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:.85em;color:#000;background-color:#f0f0f0;border-radius:3px;padding:.2em 0}html body code::after,html body code::before{letter-spacing:-.2em;content:'\00a0'}html body pre>code{padding:0;margin:0;word-break:normal;white-space:pre;background:0 0;border:0}html body .highlight{margin-bottom:16px}html body .highlight pre,html body pre{padding:1em;overflow:auto;line-height:1.45;border:#d6d6d6;border-radius:3px}html body .highlight pre{margin-bottom:0;word-break:normal}html body pre code,html body pre tt{display:inline;max-width:initial;padding:0;margin:0;overflow:initial;line-height:inherit;word-wrap:normal;background-color:transparent;border:0}html body pre code:after,html body pre code:before,html body pre tt:after,html body pre tt:before{content:normal}html body blockquote,html body dl,html body ol,html body p,html body pre,html body ul{margin-top:0;margin-bottom:16px}html body kbd{color:#000;border:1px solid #d6d6d6;border-bottom:2px solid #c7c7c7;padding:2px 4px;background-color:#f0f0f0;border-radius:3px}@media print{html body{background-color:#fff}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{color:#000;page-break-after:avoid}html body blockquote{color:#5c5c5c}html body pre{page-break-inside:avoid}html body table{display:table}html body img{display:block;max-width:100%;max-height:100%}html body code,html body pre{word-wrap:break-word;white-space:pre}}.markdown-preview{width:100%;height:100%;box-sizing:border-box}.markdown-preview ul{list-style:disc}.markdown-preview ul ul{list-style:circle}.markdown-preview ul ul ul{list-style:square}.markdown-preview ol{list-style:decimal}.markdown-preview ol ol,.markdown-preview ul ol{list-style-type:lower-roman}.markdown-preview ol ol ol,.markdown-preview ol ul ol,.markdown-preview ul ol ol,.markdown-preview ul ul ol{list-style-type:lower-alpha}.markdown-preview .newpage,.markdown-preview .pagebreak{page-break-before:always}.markdown-preview pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}.markdown-preview pre.line-numbers>code{position:relative}.markdown-preview pre.line-numbers .line-numbers-rows{position:absolute;pointer-events:none;top:1em;font-size:100%;left:0;width:3em;letter-spacing:-1px;border-right:1px solid #999;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.markdown-preview pre.line-numbers .line-numbers-rows>span{pointer-events:none;display:block;counter-increment:linenumber}.markdown-preview pre.line-numbers .line-numbers-rows>span:before{content:counter(linenumber);color:#999;display:block;padding-right:.8em;text-align:right}.markdown-preview .mathjax-exps .MathJax_Display{text-align:center!important}.markdown-preview:not([data-for=preview]) .code-chunk .code-chunk-btn-group{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .status{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .output-div{margin-bottom:16px}.markdown-preview .md-toc{padding:0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link div,.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}.markdown-preview .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}.scrollbar-style::-webkit-scrollbar{width:8px}.scrollbar-style::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}.scrollbar-style::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode]){position:relative;width:100%;height:100%;top:0;left:0;margin:0;padding:0;overflow:auto}html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{position:relative;top:0;min-height:100vh}@media screen and (min-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em calc(50% - 457px + 2em)}}@media screen and (max-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{font-size:14px!important;padding:1em}}@media print{html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{display:none}}html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{position:fixed;bottom:8px;left:8px;font-size:28px;cursor:pointer;color:inherit;z-index:99;width:32px;text-align:center;opacity:.4}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] #sidebar-toc-btn{opacity:1}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc{position:fixed;top:0;left:0;width:300px;height:100%;padding:32px 0 48px 0;font-size:14px;box-shadow:0 0 4px rgba(150,150,150,.33);box-sizing:border-box;overflow:auto;background-color:inherit}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar{width:8px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc a{text-decoration:none}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc{padding:0 16px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link div,html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{left:300px;width:calc(100% - 300px);padding:2em calc(50% - 457px - 300px / 2);margin:0;box-sizing:border-box}@media screen and (max-width:1274px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{width:100%}}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .markdown-preview{left:50%;transform:translateX(-50%)}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .md-sidebar-toc{display:none}
+/* Please visit the URL below for more information: */
+/*   https://shd101wyy.github.io/markdown-preview-enhanced/#/customize-css */
+
+      </style>
+      <script type="text/javascript">
+  document.addEventListener("DOMContentLoaded", function () {
+    // your code here
+  });
+</script>
+    </head>
+    <body for="html-export">
+      <div class="crossnote markdown-preview  ">
+      
+<h1 id="iommu-性能模型重构设计方案-v4">IOMMU 性能模型重构设计方案 (V4) </h1>
+<h2 id="context">Context </h2>
+<p>当前 IOMMU 模型是一个纯功能级(Functional Level)的 SystemC TLM-2.0 模型，所有通信使用阻塞式 <code>b_transport</code>，一次只能处理一个翻译请求。本方案将其重构为近似时序级(Approximately Timed, AT)性能模型。</p>
+<p><strong>设计原则</strong>：</p>
+<ul>
+<li>现有 Rivos 参考模型代码（<code>iommu_translate.cc</code>、<code>iommu_device_context.cc</code> 等）<strong>保留不修改</strong>，作为功能参考模型</li>
+<li>各硬件子模块按照实际硬件功能<strong>重新实现代码</strong>，可借鉴参考模型中的数据结构定义、地址计算逻辑、验证检查逻辑等</li>
+<li>非阻塞 socket 通信支持并发请求</li>
+<li>按硬件子模块划分 SC_THREAD，每个子模块有独立的输入 buffer</li>
+<li>异步 DDR 访问，通过 AXI ID 标识请求，上下文暂存本地</li>
+<li>DDR 端口同时支持阻塞和非阻塞两种模式（原子操作必须使用阻塞接口）</li>
+</ul>
+<p><strong>V4 相对 V3 的核心变更</strong>：</p>
+<ol>
+<li><strong>新增 Walker Cache 子模块</strong>：参考架构文档 4.5 章节，在 PTW 模块内集成 Walker Cache（含 PTWc_1/PTWc_2/PTWc_3 三级中间结果缓存），减少页表 walk 的 DDR 访问次数</li>
+<li><strong>新增 Cache Invalidation 通道</strong>：CQ Proc 通过 <code>cq_to_cache_inv_fifo</code> 向各 Cache 模块（DC/PC/PT/Walker Cache）发送失效命令</li>
+<li><strong>对照架构文档 5.1 概述校验</strong>：补充 CQ Proc 通过 AXI Master 1 向 RP 发送 ATS Msg 的描述</li>
+</ol>
+<hr>
+<h2 id="一-现有架构分析">一、现有架构分析 </h2>
+<h3 id="11-当前通信模式全阻塞串行处理">1.1 当前通信模式（全阻塞，串行处理） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>RP::send_request()
+  -&gt; axi_master-&gt;b_transport()           [阻塞]
+    -&gt; iommu_top::axi_slave_b_transport()
+      -&gt; iommu_translate_iova()           [同步翻译，约700行goto状态机]
+        -&gt; locate_device_context()
+          -&gt; read_memory_test() -&gt; b_transport() [阻塞DDR读]
+        -&gt; locate_process_context()
+          -&gt; read_memory_test() -&gt; b_transport() [阻塞DDR读]
+        -&gt; two_stage_address_translation()
+          -&gt; read_memory() -&gt; b_transport()      [阻塞DDR读]
+        -&gt; msi_address_translation()
+          -&gt; read_memory() -&gt; b_transport()      [阻塞DDR读]
+      -&gt; axi_master_0-&gt;b_transport()      [阻塞转发]
+</code></pre><p><strong>核心问题</strong>：一次只处理一笔请求，无并发能力。</p>
+<h3 id="12-关键文件清单">1.2 关键文件清单 </h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>作用</th>
+<th>性能模型中定位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iommu/iommu_top.hh/.cc</code></td>
+<td>顶层SC_MODULE</td>
+<td><strong>重写</strong>为性能模型核心</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_struct.hh</code></td>
+<td><code>iommu_t</code>主结构体</td>
+<td>部分复用数据结构</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_translate.cc/.hh</code></td>
+<td><code>iommu_translate_iova()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_device_context.cc</code></td>
+<td><code>locate_device_context()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_process_context.cc</code></td>
+<td><code>locate_process_context()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_two_stage_trans.cc</code></td>
+<td><code>two_stage_address_translation()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_second_stage_trans.cc</code></td>
+<td><code>second_stage_address_translation()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_msi_trans.cc</code></td>
+<td><code>msi_address_translation()</code></td>
+<td><strong>保留为功能参考</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_atc.cc/.hh</code></td>
+<td>缓存lookup/insert</td>
+<td>借鉴并扩展缓存逻辑</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_ref_api.cc/.hh</code></td>
+<td>DDR访问封装</td>
+<td><strong>重写</strong>为双模式(阻塞+非阻塞)</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_data_structures.hh</code></td>
+<td>DC/PC/PTE数据结构</td>
+<td><strong>直接复用</strong></td>
+</tr>
+<tr>
+<td><code>iommu/iommu_registers.hh</code></td>
+<td>寄存器定义</td>
+<td><strong>直接复用</strong></td>
+</tr>
+<tr>
+<td><code>iommu/param_trans_def.hh</code></td>
+<td>PayloadExtention</td>
+<td>扩展axi_id字段</td>
+</tr>
+<tr>
+<td><code>ddr/test_ddr.hh</code></td>
+<td>DDR模型</td>
+<td><strong>重写</strong>支持并发</td>
+</tr>
+<tr>
+<td><code>rp/test_rp*.cc/.hh</code></td>
+<td>RP测试模型</td>
+<td><strong>重写</strong>支持并发</td>
+</tr>
+</tbody>
+</table>
+<h3 id="13-现有接口与硬件对应">1.3 现有接口与硬件对应 </h3>
+<table>
+<thead>
+<tr>
+<th>代码中Socket名称</th>
+<th>硬件对应</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>axi_slave_from_pcie_noc_0_socket</code> (Target)</td>
+<td>AXI Slave 0 (512b@1GHz)</td>
+<td>接收翻译请求+Page Request</td>
+</tr>
+<tr>
+<td><code>ahb_slave_from_pcie_noc_1_socket</code> (Target)</td>
+<td>AHB Slave (32b@100MHz)</td>
+<td>固件寄存器访问</td>
+</tr>
+<tr>
+<td><code>axi_master_0_to_pcie_noc_socket</code> (Initiator)</td>
+<td>AXI Master 0 (512b@1GHz)</td>
+<td>翻译后DMA数据转发</td>
+</tr>
+<tr>
+<td><code>axi_master_1_to_cmn_rnd_socket</code> (Initiator)</td>
+<td>AXI Master 2 (64b@1GHz)</td>
+<td>DDT/PDT/页表/CQ/FQ/PQ/MRIF读写</td>
+</tr>
+<tr>
+<td><code>axi_master_2_to_pcie_noc_socket</code> (Initiator)</td>
+<td>AXI Master 1 (128b@1GHz)</td>
+<td>ATS消息回传RP</td>
+</tr>
+<tr>
+<td><code>axi_stream_to_cmn_rnd_socket</code> (Initiator)</td>
+<td>AXI Stream (@450MHz)</td>
+<td>IMSIC中断文件访问</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="二-性能模型整体架构">二、性能模型整体架构 </h2>
+<h3 id="21-子模块划分与数据流">2.1 子模块划分与数据流 </h3>
+<p>所有子模块作为 <code>iommu_top</code> 内部的 SC_THREAD，通过 <code>sc_fifo&lt;iommu_task_t*&gt;</code> 传递任务指针。</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>+====================================================================================+
+|                              iommu_top (SC_MODULE)                                  |
+|                                                                                     |
+|  AXI Slave 0 -----&gt; [inbound_fifo]                                                 |
+|  (nb_transport)           |                                                         |
+|                           v                                                         |
+|                      [Parser] --parser_to_pq_fifo--&gt; [PQ Proc]                     |
+|                       |  |  |                                                       |
+|          +------------+  |  +------------+                                          |
+|          |               |               |                                          |
+|  parser_to_dc_cache  parser_to       parser_to_pc_cache                             |
+|  _query_fifo        _collector_fifo  _query_fifo                                    |
+|          |          (iova+原始请求)       |                                          |
+|          v               |               v                                          |
+|   [DC Cache]             |         [PC Cache]                                       |
+|   (查询+更新)             |         (查询+更新)                                       |
+|          |               |               |                                          |
+|  dc_cache_to_            |       pc_cache_to_                                       |
+|  collector_fifo          |       collector_fifo                                     |
+|          |               |               |                                          |
+|          v               v               v                                          |
+|        +----------[Collector]------------+                                          |
+|        | 进程1: 接收Parser任务+DC/PC结果   |                                          |
+|        |   (pending_tasks按task_id匹配)   |                                          |
+|        | 进程2: xDTW响应处理               |                                          |
+|        +---------+---------+-------------+                                          |
+|                  |         |         |                                               |
+|   collector_to_ /          |          \ collector_to_                               |
+|   xdtw_fifo   /           |           \ pt/msipt_cache                              |
+|               v            |            v                                           |
+|          [xDTW]            |    collector_to_pt_cache_query_fifo                    |
+|     (2进程:请求+响应)       |    collector_to_msipt_cache_query_fifo                  |
+|     DDR(nb)--&gt;             |            |              |                             |
+|          |                 |            v              v                             |
+|   xdtw_to_collector_fifo  |   [PT Cache]       [MSIPT Cache]                       |
+|          |                 |   (3进程:            (4进程:                             |
+|          v                 |    查询/结果/PTW响应)  查询/结果/MSIPTW请求/MSIPTW响应)    |
+|        Collector           |      |                    |                             |
+|                            |   miss:                miss:                            |
+|  collector_to_dc/pc_       |   pt_cache_to_ptw_fifo  msipt_cache_to_msiptw_fifo     |
+|  cache_update_fifo         |      |                    |                             |
+|     |          |           |      v                    v                             |
+|     v          v           |   [PTW + Walker Cache] [MSIPTW]                        |
+|  DC Cache   PC Cache       |   (2进程:请求+响应)    (2进程:请求+响应)                   |
+|  (更新)     (更新)          |   内置Walker Cache     DDR(nb)--&gt;                       |
+|                            |   (PTWc_1/2/3)            |                             |
+|                            |   DDR(nb)--&gt;              |                             |
+|                            |      |                    |                             |
+|                            |   ptw_to_pt_cache_fifo  msiptw_to_msipt_cache_fifo     |
+|                            |      |                    |                             |
+|                            |      v                    v                             |
+|                            |   PT Cache更新缓存     MSIPT Cache更新缓存              |
+|                            |      |                    |                             |
+|                            | pt_cache_to_fwd_fifo  msipt_cache_to_fwd_fifo          |
+|                            |      |                    |                             |
+|                            |      v                    v                             |
+|                            | --&gt; AXI Master 0     --&gt; AXI Stream (M==3)             |
+|                            | (翻译后DMA数据)      --&gt; AXI Master 2 (M==1, MRIF)     |
+|                            |                                                        |
+|  ====== 错误处理通道 ======                                                          |
+|  各模块 --fault_fifo--&gt; [Fault Proc] --&gt; [FQ Proc] --DDR--&gt;                         |
+|                                                                                     |
+|  ====== Cache失效通道 ======                                                         |
+|  [CQ Proc] --cq_to_cache_inv_fifo--&gt; DC/PC/PT/Walker Cache                         |
+|  [CQ Proc] --AXI Master 1--&gt; RP (ATS Invalidation/Page Rsp)                        |
+|  [CQ Proc] --DDR(AXI Master 2)--&gt; CQ读取                                            |
+|                                                                                     |
+|  [Reg Access] (保持b_transport)                                                     |
+|  AHB Slave --------&gt;                                                                |
++====================================================================================+
+</code></pre><hr>
+<h2 id="三-核心数据结构设计">三、核心数据结构设计 </h2>
+<h3 id="31-统一事务上下文-iommu_task_t">3.1 统一事务上下文 <code>iommu_task_t</code> </h3>
+<p>新建文件 <code>iommu/iommu_task.hh</code>：</p>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// 任务状态枚举</span>
+<span class="token keyword keyword-enum">enum</span> <span class="token class-name">task_state_t</span> <span class="token punctuation">{</span>
+    <span class="token comment">// Parser阶段</span>
+    TASK_PARSE_DONE<span class="token punctuation">,</span>           <span class="token comment">// Parser完成解析，已发起DC+PC查询</span>
+
+    <span class="token comment">// DC/PC Cache查询结果</span>
+    TASK_DC_HIT<span class="token punctuation">,</span>               <span class="token comment">// DC Cache命中</span>
+    TASK_DC_MISS<span class="token punctuation">,</span>              <span class="token comment">// DC Cache未命中</span>
+    TASK_PC_HIT<span class="token punctuation">,</span>               <span class="token comment">// PC Cache命中</span>
+    TASK_PC_MISS<span class="token punctuation">,</span>              <span class="token comment">// PC Cache未命中</span>
+
+    <span class="token comment">// xDTW完成</span>
+    TASK_DC_WALK_DONE<span class="token punctuation">,</span>         <span class="token comment">// xDTW完成DDT walk，得到DC</span>
+    TASK_PC_WALK_DONE<span class="token punctuation">,</span>         <span class="token comment">// xDTW完成PDT walk，得到PC</span>
+
+    <span class="token comment">// PT Cache查询</span>
+    TASK_TLB_HIT<span class="token punctuation">,</span>              <span class="token comment">// PT Cache(TLB)命中</span>
+    TASK_TLB_MISS<span class="token punctuation">,</span>             <span class="token comment">// PT Cache(TLB)未命中</span>
+
+    <span class="token comment">// PTW完成</span>
+    TASK_PT_WALK_DONE<span class="token punctuation">,</span>         <span class="token comment">// PTW完成页表walk</span>
+
+    <span class="token comment">// MSIPT Cache查询</span>
+    TASK_MSIPT_HIT<span class="token punctuation">,</span>            <span class="token comment">// MSIPT Cache命中</span>
+    TASK_MSIPT_MISS<span class="token punctuation">,</span>           <span class="token comment">// MSIPT Cache未命中</span>
+    TASK_MSIPT_WALK_DONE<span class="token punctuation">,</span>      <span class="token comment">// MSIPTW完成MSI页表walk</span>
+
+    <span class="token comment">// 最终状态</span>
+    TASK_FORWARD<span class="token punctuation">,</span>              <span class="token comment">// 地址翻译完成，准备转发</span>
+    TASK_FAULT<span class="token punctuation">,</span>                <span class="token comment">// 出错</span>
+    TASK_DONE                  <span class="token comment">// 完成</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Walk类型枚举（用于DDR请求标识）</span>
+<span class="token keyword keyword-enum">enum</span> <span class="token class-name">walk_type_t</span> <span class="token punctuation">{</span>
+    WALK_DDT<span class="token punctuation">,</span>                  <span class="token comment">// DDT radix tree walk</span>
+    WALK_PDT<span class="token punctuation">,</span>                  <span class="token comment">// PDT radix tree walk</span>
+    WALK_VS_PT<span class="token punctuation">,</span>                <span class="token comment">// VS-stage 页表walk</span>
+    WALK_G_PT<span class="token punctuation">,</span>                 <span class="token comment">// G-stage 页表walk</span>
+    WALK_G_PT_IMPLICIT<span class="token punctuation">,</span>        <span class="token comment">// G-stage 隐式翻译(VS PTE地址翻译)</span>
+    WALK_MSI_PT<span class="token punctuation">,</span>               <span class="token comment">// MSI 页表walk</span>
+    WALK_AD_UPDATE<span class="token punctuation">,</span>            <span class="token comment">// A/D位原子更新（blocking）</span>
+    WALK_FQ_WRITE<span class="token punctuation">,</span>             <span class="token comment">// FQ写入</span>
+    WALK_PQ_WRITE<span class="token punctuation">,</span>             <span class="token comment">// PQ写入</span>
+    WALK_CQ_READ<span class="token punctuation">,</span>              <span class="token comment">// CQ读取</span>
+    WALK_MRIF_WRITE            <span class="token comment">// MRIF写入（blocking原子OR）</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Walk上下文 - DDR异步回调恢复用</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">walk_context_t</span> <span class="token punctuation">{</span>
+    walk_type_t walk_type<span class="token punctuation">;</span>
+    <span class="token keyword keyword-int8_t">int8_t</span>      level<span class="token punctuation">;</span>          <span class="token comment">// 当前walk层级</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     max_levels<span class="token punctuation">;</span>     <span class="token comment">// 总层级数</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    base_addr<span class="token punctuation">;</span>      <span class="token comment">// 当前层基地址</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    index<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span><span class="token punctuation">;</span>       <span class="token comment">// DDI/PDI/VPN索引数组</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     pte_size<span class="token punctuation">;</span>       <span class="token comment">// PTE大小(4或8字节)</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    read_addr<span class="token punctuation">;</span>      <span class="token comment">// 当前DDR读取地址</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     read_size<span class="token punctuation">;</span>      <span class="token comment">// 当前DDR读取大小</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    vs_a<span class="token punctuation">;</span>           <span class="token comment">// VS walk的当前地址a</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    g_a<span class="token punctuation">;</span>            <span class="token comment">// G walk的当前地址a</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 统一事务上下文</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">iommu_task_t</span> <span class="token punctuation">{</span>
+    <span class="token comment">// === 任务标识 ===</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    task_id<span class="token punctuation">;</span>             <span class="token comment">// 全局唯一ID（由Parser分配）</span>
+    sc_time     timestamp<span class="token punctuation">;</span>           <span class="token comment">// 进入时间戳</span>
+
+    <span class="token comment">// === 原始请求（从PayloadExtention提取） ===</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    device_id<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    process_id<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     pid_valid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     exec_req<span class="token punctuation">,</span> priv_req<span class="token punctuation">,</span> no_write<span class="token punctuation">,</span> is_cxl_dev<span class="token punctuation">;</span>
+    addr_type_t at<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    iova<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    length<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     read_writeAMO<span class="token punctuation">;</span>
+    tlm<span class="token double-colon punctuation">::</span>tlm_generic_payload<span class="token operator">*</span> original_trans<span class="token punctuation">;</span> <span class="token comment">// 原始TLM payload指针</span>
+
+    <span class="token comment">// === 状态机 ===</span>
+    task_state_t state<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     TTYP<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     is_read<span class="token punctuation">,</span> is_write<span class="token punctuation">,</span> is_exec<span class="token punctuation">,</span> priv<span class="token punctuation">;</span>
+
+    <span class="token comment">// === DC/PC 查询结果 ===</span>
+    device_context_t  DC<span class="token punctuation">;</span>
+    process_context_t PC<span class="token punctuation">;</span>
+    <span class="token keyword keyword-bool">bool</span>        dc_valid<span class="token punctuation">;</span>            <span class="token comment">// DC查询是否已返回</span>
+    <span class="token keyword keyword-bool">bool</span>        pc_valid<span class="token punctuation">;</span>            <span class="token comment">// PC查询是否已返回</span>
+    <span class="token keyword keyword-bool">bool</span>        need_pc<span class="token punctuation">;</span>             <span class="token comment">// 是否需要PC（由Collector根据DC.tc.PDTV判断）</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     DTF<span class="token punctuation">,</span> PSCV<span class="token punctuation">,</span> GV<span class="token punctuation">,</span> PV<span class="token punctuation">,</span> SUM<span class="token punctuation">,</span> SXL<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    GSCID<span class="token punctuation">,</span> PSCID<span class="token punctuation">,</span> DID<span class="token punctuation">,</span> PID<span class="token punctuation">;</span>
+    iosatp_t    iosatp<span class="token punctuation">;</span>
+    iohgatp_t   iohgatp<span class="token punctuation">;</span>
+
+    <span class="token comment">// === 翻译结果 ===</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    pa<span class="token punctuation">,</span> gpa<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    page_sz<span class="token punctuation">,</span> gst_page_sz<span class="token punctuation">;</span>
+    spte_t      vs_pte<span class="token punctuation">;</span>
+    gpte_t      g_pte<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     is_msi<span class="token punctuation">,</span> is_mrif<span class="token punctuation">,</span> is_bare_mode<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    mrif_nid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    dest_mrif_addr<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    cause<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    iotval<span class="token punctuation">,</span> iotval2<span class="token punctuation">;</span>
+
+    <span class="token comment">// === Walk上下文 ===</span>
+    walk_context_t walk_ctx<span class="token punctuation">;</span>         <span class="token comment">// 当前活跃walk</span>
+    walk_context_t saved_vs_walk<span class="token punctuation">;</span>    <span class="token comment">// 嵌套G-stage时保存的VS walk</span>
+
+    <span class="token comment">// === DDR请求跟踪 ===</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    current_axi_id<span class="token punctuation">;</span>      <span class="token comment">// 当前DDR请求的AXI ID</span>
+
+    <span class="token comment">// === Walker Cache命中信息 (V4新增) ===</span>
+    <span class="token keyword keyword-int8_t">int8_t</span>      wc_hit_level<span class="token punctuation">;</span>        <span class="token comment">// Walker Cache命中的层级(-1=未命中, 1/2/3=PTWc_x命中)</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    wc_hit_ppn<span class="token punctuation">;</span>          <span class="token comment">// Walker Cache命中时的中间PPN</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre><h3 id="32-ddr响应结构">3.2 DDR响应结构 </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token keyword keyword-struct">struct</span> <span class="token class-name">ddr_response_t</span> <span class="token punctuation">{</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    axi_id<span class="token punctuation">;</span>
+    walk_type_t walk_type<span class="token punctuation">;</span>       <span class="token comment">// 请求类型，用于路由</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    task_id<span class="token punctuation">;</span>         <span class="token comment">// 关联的任务ID</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     status<span class="token punctuation">;</span>          <span class="token comment">// 0=OK, 1=ERROR</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     data<span class="token punctuation">[</span><span class="token number">64</span><span class="token punctuation">]</span><span class="token punctuation">;</span>        <span class="token comment">// 读回数据</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    data_size<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre><h3 id="33-axi-id-分配器与outstanding表">3.3 AXI ID 分配器与Outstanding表 </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// AXI ID分配器</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">axi_id_allocator_t</span> <span class="token punctuation">{</span>
+    std<span class="token double-colon punctuation">::</span>queue<span class="token operator">&lt;</span><span class="token keyword keyword-uint16_t">uint16_t</span><span class="token operator">&gt;</span> free_ids<span class="token punctuation">;</span>
+    sc_event             id_freed_evt<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>             max_ids<span class="token punctuation">;</span>       <span class="token comment">// 如64或256</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">init</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> max<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span> <span class="token function">alloc_id</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>               <span class="token comment">// 分配，池空则wait</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">free_id</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> id<span class="token punctuation">)</span><span class="token punctuation">;</span>         <span class="token comment">// 归还，触发event</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Outstanding DDR请求表（全局唯一，在iommu_top中）</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">ddr_outstanding_entry_t</span> <span class="token punctuation">{</span>
+    iommu_task_t<span class="token operator">*</span>   task<span class="token punctuation">;</span>
+    walk_type_t     walk_type<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>        expected_addr<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>         expected_size<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+std<span class="token double-colon punctuation">::</span>unordered_map<span class="token operator">&lt;</span><span class="token keyword keyword-uint16_t">uint16_t</span><span class="token punctuation">,</span> ddr_outstanding_entry_t<span class="token operator">&gt;</span> ddr_outstanding_table<span class="token punctuation">;</span>
+</code></pre><h3 id="34-walker-cache-数据结构-v4新增">3.4 Walker Cache 数据结构 (V4新增) </h3>
+<p>参考架构文档 4.5 章节设计。Walker Cache 缓存页表 walk 两阶段/一阶段地址翻译过程中 VA/GPA 到下一级页表物理地址 PPN 的中间结果，目标是减少 DDR 访问次数。</p>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// ==================== Walker Cache缓存条目 ====================</span>
+
+<span class="token comment">// PTWc_1: 缓存VPN[3]级中间结果（Sv48专用，Sv39时对应VPN[2]）</span>
+<span class="token comment">// 直接映射, s=64条目</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">walker_cache_entry_1_t</span> <span class="token punctuation">{</span>
+    <span class="token keyword keyword-bool">bool</span>        valid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    gscid<span class="token punctuation">;</span>           <span class="token comment">// 16比特</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    pscid<span class="token punctuation">;</span>           <span class="token comment">// 20比特</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_high<span class="token punctuation">;</span>        <span class="token comment">// VPN最高段 (VPN[3] for Sv48, VPN[2] for Sv39)</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    ppn<span class="token punctuation">;</span>             <span class="token comment">// 中间结果PPN (44比特)</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     addr_mode<span class="token punctuation">;</span>       <span class="token comment">// 地址模式标志 (Sv39/Sv48, VS/G-stage)</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// PTWc_2: 缓存{VPN[3],VPN[2]}级中间结果</span>
+<span class="token comment">// 2-way组相连, s=64条目/way</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">walker_cache_entry_2_t</span> <span class="token punctuation">{</span>
+    <span class="token keyword keyword-bool">bool</span>        valid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    gscid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    pscid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_high<span class="token punctuation">;</span>        <span class="token comment">// VPN最高段</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_mid<span class="token punctuation">;</span>         <span class="token comment">// VPN次高段 (VPN[2] for Sv48, VPN[1] for Sv39)</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    ppn<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     addr_mode<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     rrpv<span class="token punctuation">;</span>            <span class="token comment">// SRRIP替换算法值 (M=2比特)</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// PTWc_3: 缓存{VPN[3],VPN[2],VPN[1]}级中间结果</span>
+<span class="token comment">// 4-way组相连, s=64条目/way (仅Sv48启用, Sv39关闭)</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">walker_cache_entry_3_t</span> <span class="token punctuation">{</span>
+    <span class="token keyword keyword-bool">bool</span>        valid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    gscid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    pscid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_high<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_mid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    vpn_low<span class="token punctuation">;</span>         <span class="token comment">// VPN[1] for Sv48</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    ppn<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     addr_mode<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     rrpv<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Walker Cache容量配置</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">WALKER_CACHE_SET_SIZE</span>   <span class="token expression"><span class="token number">64</span></span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">PTWC1_WAYS</span>              <span class="token expression"><span class="token number">1</span>   </span><span class="token comment">// 直接映射</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">PTWC2_WAYS</span>              <span class="token expression"><span class="token number">2</span>   </span><span class="token comment">// 2-way组相连</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">PTWC3_WAYS</span>              <span class="token expression"><span class="token number">4</span>   </span><span class="token comment">// 4-way组相连</span></span>
+
+<span class="token comment">// Walker Cache管理结构（内置于PTW模块中）</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">walker_cache_t</span> <span class="token punctuation">{</span>
+    walker_cache_entry_1_t ptwc_1<span class="token punctuation">[</span>WALKER_CACHE_SET_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    walker_cache_entry_2_t ptwc_2<span class="token punctuation">[</span>PTWC2_WAYS<span class="token punctuation">]</span><span class="token punctuation">[</span>WALKER_CACHE_SET_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    walker_cache_entry_3_t ptwc_3<span class="token punctuation">[</span>PTWC3_WAYS<span class="token punctuation">]</span><span class="token punctuation">[</span>WALKER_CACHE_SET_SIZE<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    sc_mutex               wc_mutex<span class="token punctuation">;</span>    <span class="token comment">// 保护并发访问</span>
+
+    <span class="token comment">// 索引散列函数 (参考架构文档4.5.4)</span>
+    <span class="token comment">// PTWc_1: hash_1 = (gscid ^ pscid ^ vpn_high) &amp; (s-1)</span>
+    <span class="token comment">// PTWc_2: hash_2 = (gscid ^ pscid ^ vpn_high ^ vpn_mid) &amp; (s-1)</span>
+    <span class="token comment">// PTWc_3: hash_3 = (gscid ^ pscid ^ vpn_high ^ vpn_mid ^ vpn_low) &amp; (s-1)</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span> <span class="token function">hash_1</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span> <span class="token function">hash_2</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_mid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span> <span class="token function">hash_3</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_mid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_low<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 查询接口 (按优先级: PTWc_3 &gt; PTWc_2 &gt; PTWc_1)</span>
+    <span class="token comment">// 返回: 命中级别(1/2/3), 命中的PPN; 0=未命中</span>
+    <span class="token keyword keyword-int">int</span> <span class="token function">lookup</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span> iova<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> addr_mode<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span><span class="token operator">*</span> ppn<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 更新接口 (PTW walk完成后更新中间结果)</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">update_ptwc1</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span> ppn<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> mode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">update_ptwc2</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_mid<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span> ppn<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> mode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">update_ptwc3</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_high<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_mid<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> vpn_low<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span> ppn<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> mode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 失效接口</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">invalidate_by_gscid</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">)</span><span class="token punctuation">;</span>                              <span class="token comment">// DC失效触发</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">invalidate_by_gscid_pscid</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">)</span><span class="token punctuation">;</span>       <span class="token comment">// PC失效触发</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">invalidate_by_iova</span><span class="token punctuation">(</span><span class="token keyword keyword-uint16_t">uint16_t</span> gscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint32_t">uint32_t</span> pscid<span class="token punctuation">,</span> <span class="token keyword keyword-uint64_t">uint64_t</span> iova<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 页表修改触发</span>
+    <span class="token keyword keyword-void">void</span> <span class="token function">invalidate_all</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>                                                   <span class="token comment">// 全部失效</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre><h3 id="35-cache-invalidation-命令结构-v4新增">3.5 Cache Invalidation 命令结构 (V4新增) </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// Cache失效命令类型</span>
+<span class="token keyword keyword-enum">enum</span> <span class="token class-name">cache_inv_type_t</span> <span class="token punctuation">{</span>
+    INV_DDT<span class="token punctuation">,</span>            <span class="token comment">// IOTINVAL.DDT - 失效DC Cache + 关联的PT/Walker Cache</span>
+    INV_VMA<span class="token punctuation">,</span>            <span class="token comment">// IOTINVAL.VMA - 失效PT Cache + Walker Cache</span>
+    INV_IOFENCE<span class="token punctuation">,</span>        <span class="token comment">// IOFENCE.C - 等待所有in-flight翻译完成</span>
+    INV_ATS_INVAL<span class="token punctuation">,</span>      <span class="token comment">// ATS.INVAL - 向RP发送ATS Invalidation Request</span>
+    INV_ATS_PRGR<span class="token punctuation">,</span>       <span class="token comment">// ATS.PRGR - 向RP发送Page Request Group Response</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// Cache失效命令结构</span>
+<span class="token keyword keyword-struct">struct</span> <span class="token class-name">cache_inv_cmd_t</span> <span class="token punctuation">{</span>
+    cache_inv_type_t type<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    device_id<span class="token punctuation">;</span>       <span class="token comment">// DDT失效时使用</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    process_id<span class="token punctuation">;</span>      <span class="token comment">// VMA失效时使用</span>
+    <span class="token keyword keyword-uint16_t">uint16_t</span>    gscid<span class="token punctuation">;</span>           <span class="token comment">// 用于PT/Walker Cache失效</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    pscid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    addr<span class="token punctuation">;</span>            <span class="token comment">// VMA失效时的地址</span>
+    <span class="token keyword keyword-bool">bool</span>        gv<span class="token punctuation">;</span>              <span class="token comment">// gscid有效</span>
+    <span class="token keyword keyword-bool">bool</span>        pscidv<span class="token punctuation">;</span>          <span class="token comment">// pscid有效</span>
+    <span class="token keyword keyword-bool">bool</span>        av<span class="token punctuation">;</span>              <span class="token comment">// addr有效</span>
+    <span class="token keyword keyword-uint8_t">uint8_t</span>     func3<span class="token punctuation">;</span>           <span class="token comment">// IOFENCE功能码</span>
+    <span class="token comment">// ATS Msg相关字段</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    dseg<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint32_t">uint32_t</span>    rid<span class="token punctuation">;</span>
+    <span class="token keyword keyword-uint64_t">uint64_t</span>    payload<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre><hr>
+<h2 id="四-fifo定义与sc_thread声明">四、FIFO定义与SC_THREAD声明 </h2>
+<h3 id="41-全部fifo声明">4.1 全部FIFO声明 </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// ===================== 入站缓冲 =====================</span>
+sc_fifo<span class="token operator">&lt;</span>tlm<span class="token double-colon punctuation">::</span>tlm_generic_payload<span class="token operator">*</span><span class="token operator">&gt;</span> inbound_fifo<span class="token punctuation">;</span>              <span class="token comment">// 深度16</span>
+
+<span class="token comment">// ===================== Parser输出 =====================</span>
+<span class="token comment">// Parser发送iova+原始请求信息给Collector，Collector建立pending_tasks表按task_id跟踪</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> parser_to_collector_fifo<span class="token punctuation">;</span>              <span class="token comment">// 深度16</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> parser_to_pq_fifo<span class="token punctuation">;</span>                     <span class="token comment">// 深度4</span>
+<span class="token comment">// Parser直接向DC Cache和PC Cache发起查询（携带task_id）</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> parser_to_dc_cache_query_fifo<span class="token punctuation">;</span>         <span class="token comment">// 深度8</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> parser_to_pc_cache_query_fifo<span class="token punctuation">;</span>         <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== Cache查询结果返回Collector =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> dc_cache_to_collector_fifo<span class="token punctuation">;</span>            <span class="token comment">// 深度8</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> pc_cache_to_collector_fifo<span class="token punctuation">;</span>            <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== Collector到Cache (更新操作) =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> collector_to_dc_cache_update_fifo<span class="token punctuation">;</span>     <span class="token comment">// 深度8</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> collector_to_pc_cache_update_fifo<span class="token punctuation">;</span>     <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== Collector到Walker =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> collector_to_xdtw_fifo<span class="token punctuation">;</span>                <span class="token comment">// 深度4</span>
+
+<span class="token comment">// ===================== Collector到PT/MSIPT Cache (查询操作) =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> collector_to_pt_cache_query_fifo<span class="token punctuation">;</span>      <span class="token comment">// 深度8</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> collector_to_msipt_cache_query_fifo<span class="token punctuation">;</span>   <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== xDTW返回 =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> xdtw_to_collector_fifo<span class="token punctuation">;</span>                <span class="token comment">// 深度4</span>
+
+<span class="token comment">// ===================== PT Cache 内部+外部FIFO =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> pt_cache_lookup_result_fifo<span class="token punctuation">;</span>           <span class="token comment">// 深度4 (内部: 查询进程 -&gt; 结果处理进程)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> pt_cache_to_ptw_fifo<span class="token punctuation">;</span>                  <span class="token comment">// 深度4 (PT Cache miss -&gt; PTW)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> ptw_to_pt_cache_fifo<span class="token punctuation">;</span>                  <span class="token comment">// 深度4 (PTW结果返回PT Cache)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> pt_cache_to_fwd_fifo<span class="token punctuation">;</span>                  <span class="token comment">// 深度8 (地址翻译完成 -&gt; AXI Master 0)</span>
+
+<span class="token comment">// ===================== MSIPT Cache 内部+外部FIFO =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> msipt_cache_lookup_result_fifo<span class="token punctuation">;</span>        <span class="token comment">// 深度4 (内部: 查询进程 -&gt; 结果处理进程)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> msipt_cache_to_msiptw_fifo<span class="token punctuation">;</span>            <span class="token comment">// 深度4 (MSIPT Cache miss -&gt; 内置MSIPTW)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> msiptw_to_msipt_cache_fifo<span class="token punctuation">;</span>            <span class="token comment">// 深度4 (MSIPTW结果返回MSIPT Cache)</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> msipt_cache_to_fwd_fifo<span class="token punctuation">;</span>               <span class="token comment">// 深度8 (MSI翻译完成 -&gt; AXI Stream / AXI Master 2)</span>
+
+<span class="token comment">// ===================== 全局错误处理 =====================</span>
+sc_fifo<span class="token operator">&lt;</span>iommu_task_t<span class="token operator">*</span><span class="token operator">&gt;</span> fault_fifo<span class="token punctuation">;</span>                             <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== Cache Invalidation (V4新增) =====================</span>
+<span class="token comment">// CQ Proc向各Cache模块发送失效命令</span>
+sc_fifo<span class="token operator">&lt;</span>cache_inv_cmd_t<span class="token operator">&gt;</span> cq_to_cache_inv_fifo<span class="token punctuation">;</span>                <span class="token comment">// 深度8</span>
+
+<span class="token comment">// ===================== DDR响应FIFO（统一） =====================</span>
+sc_fifo<span class="token operator">&lt;</span>ddr_response_t<span class="token operator">&gt;</span> ddr_rsp_fifo<span class="token punctuation">;</span>                          <span class="token comment">// 深度16</span>
+</code></pre><h3 id="42-ddr响应路由线程">4.2 DDR响应路由线程 </h3>
+<p>由于DDR只有一个请求FIFO和一个响应FIFO，需要一个路由线程将DDR响应分发到各子模块：</p>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token function">SC_THREAD</span><span class="token punctuation">(</span>ddr_rsp_router_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre><pre data-role="codeBlock" data-info="" class="language-text"><code>行为:
+  loop:
+    rsp = ddr_rsp_fifo.read()   // 等待DDR响应
+    根据 rsp.walk_type 路由:
+      WALK_DDT / WALK_PDT                          -&gt; 放入 xdtw内部响应队列 (通知xdtw_rsp_thread)
+      WALK_VS_PT / WALK_G_PT / WALK_G_PT_IMPLICIT  -&gt; 放入 ptw内部响应队列 (通知ptw_rsp_thread)
+      WALK_MSI_PT                                   -&gt; 放入 msiptw内部响应队列 (通知msiptw_rsp_thread)
+</code></pre><blockquote>
+<p><strong>注意</strong>: 各子模块内部维护自己的响应队列（<code>std::queue</code> + <code>sc_event</code>），DDR响应路由线程通过push+notify分发。</p>
+</blockquote>
+<h3 id="43-sc_thread声明">4.3 SC_THREAD声明 </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token comment">// ==================== Parser ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>parser_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                          <span class="token comment">// 解析入站请求，发起DC/PC Cache查询</span>
+
+<span class="token comment">// ==================== Collector (2个进程) ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>collector_cache_lookup_result_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>   <span class="token comment">// 进程1: 接收Parser任务+DC/PC Cache查询结果，按task_id匹配</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>collector_xdtw_response_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>          <span class="token comment">// 进程2: 处理xDTW返回的DC/PC walk结果</span>
+
+<span class="token comment">// ==================== DC/PC Cache ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>dc_cache_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                        <span class="token comment">// DC Cache: 处理Parser查询请求 + Collector更新请求</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>pc_cache_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                        <span class="token comment">// PC Cache: 处理Parser查询请求 + Collector更新请求</span>
+
+<span class="token comment">// ==================== PT Cache (3个进程) ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>pt_cache_query_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                  <span class="token comment">// 进程1: IOTLB查询</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>pt_cache_result_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                 <span class="token comment">// 进程2: 查询结果处理(命中-&gt;转发, 未命中-&gt;PTW)</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>pt_cache_ptw_rsp_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                <span class="token comment">// 进程3: PTW响应处理，更新IOTLB缓存并转发</span>
+
+<span class="token comment">// ==================== MSIPT Cache (4个进程，含内置MSIPTW) ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>msipt_cache_query_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>               <span class="token comment">// 进程1: MSI Cache查询</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>msipt_cache_result_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>              <span class="token comment">// 进程2: 查询结果处理(命中-&gt;路由输出, 未命中-&gt;MSIPTW)</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>msiptw_req_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                      <span class="token comment">// 进程3: 内置MSIPTW请求，执行向DDR的MSI页表查询</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>msiptw_rsp_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                      <span class="token comment">// 进程4: 内置MSIPTW响应，接收DDR响应，更新缓存并路由输出</span>
+
+<span class="token comment">// ==================== Walker模块 ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>xdtw_req_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                        <span class="token comment">// xDTW请求进程</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>xdtw_rsp_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                        <span class="token comment">// xDTW响应进程</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>ptw_req_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                         <span class="token comment">// PTW请求进程(含Walker Cache查询)</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>ptw_rsp_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                         <span class="token comment">// PTW响应进程(含Walker Cache更新)</span>
+
+<span class="token comment">// ==================== DDR响应路由 ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>ddr_rsp_router_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// ==================== 输出模块 ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>forwarder_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                       <span class="token comment">// AXI Master 0 转发</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>msi_forwarder_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                   <span class="token comment">// AXI Stream / AXI Master 2 转发</span>
+
+<span class="token comment">// ==================== Fault/Queue处理 ====================</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>fault_proc_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                      <span class="token comment">// 全局错误处理</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>fq_proc_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                         <span class="token comment">// Fault Queue处理</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>pq_proc_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                         <span class="token comment">// Page Request Queue处理</span>
+<span class="token function">SC_THREAD</span><span class="token punctuation">(</span>cq_proc_thread<span class="token punctuation">)</span><span class="token punctuation">;</span>                         <span class="token comment">// Command Queue处理 + Cache Invalidation分发</span>
+</code></pre><hr>
+<h2 id="五-各子模块详细设计">五、各子模块详细设计 </h2>
+<h3 id="51-parser解析器">5.1 Parser（解析器） </h3>
+<p><strong>职责</strong>: 接收AXI Slave 0的入站请求，解析请求类型，创建<code>iommu_task_t</code>，直接向DC Cache和PC Cache发起查询，同时将任务信息发送给Collector。对无法处理的错误包进行丢弃和错误上报。</p>
+<p><strong>内部进程</strong>: 1个（<code>parser_thread</code>）</p>
+<p><strong>不涉及DDR访问，全部是纯逻辑。</strong></p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>parser_thread:
+  loop:
+    payload = inbound_fifo.read()             // 阻塞等待入站请求
+    提取PayloadExtention -&gt; device_id, at, pid_valid, process_id等
+
+    创建 iommu_task_t* task:
+      task-&gt;task_id = ++global_task_counter
+      task-&gt;timestamp = sc_time_stamp()
+      填充所有原始请求字段
+      task-&gt;wc_hit_level = -1                 // Walker Cache初始化为未命中
+
+    (1) 判断请求类型:
+    如果是PRI消息 (ext-&gt;msg_type == 0b0010 &amp;&amp; ext-&gt;msg_code == PAGE_REQ):
+      -&gt; parser_to_pq_fifo.write(task)
+      -&gt; continue
+
+    如果是无法处理的错误包:
+      丢弃，生成错误上报 -&gt; fault_fifo
+      -&gt; continue
+
+    (2) 地址翻译请求处理:
+    执行纯逻辑预处理（借鉴iommu_translate_iova steps 1~5）:
+      - 检查 ddtp.iommu_mode:
+        - Off -&gt; task-&gt;state = TASK_FAULT, task-&gt;cause = 256
+        - Bare -&gt; task-&gt;is_bare_mode = 1, task-&gt;pa = iova, task-&gt;state = TASK_FORWARD
+      - 提取DDI索引(用于后续DDT walk)
+      - 推导TTYP和访问属性(is_read, is_write, is_exec, priv)
+      - 检查device_id宽度是否超过max_devid_mask
+
+    如果Bare模式:
+      直接发往 pt_cache_to_fwd_fifo
+    如果错误:
+      -&gt; fault_fifo
+    否则（正常地址翻译流程）:
+      task-&gt;state = TASK_PARSE_DONE
+      task-&gt;dc_valid = false
+      task-&gt;pc_valid = false
+      -&gt; parser_to_collector_fifo.write(task)
+      -&gt; parser_to_dc_cache_query_fifo.write(task)
+      -&gt; parser_to_pc_cache_query_fifo.write(task)
+
+    wait(1, SC_NS)
+</code></pre><h3 id="52-collector收集调度器">5.2 Collector（收集调度器） </h3>
+<p><strong>职责</strong>: 核心调度模块，负责：</p>
+<ol>
+<li>接收Parser的任务信息，建立pending_tasks跟踪表</li>
+<li>收集DC/PC Cache查询结果，根据命中/未命中决定后续流程</li>
+<li>收集xDTW返回的DC/PC结果，更新缓存并继续流程</li>
+<li>当获取了DC和PC信息后，判断是发往PT Cache(页表翻译)还是MSIPT Cache(MSI翻译)</li>
+</ol>
+<p><strong>内部进程</strong>: 2个</p>
+<p><strong>不涉及DDR访问，全部是纯逻辑判断。</strong></p>
+<h4 id="进程1-collector_cache_lookup_result_thread">进程1: collector_cache_lookup_result_thread </h4>
+<p>单线程监听3个FIFO，通过 <code>pending_tasks</code> 表按 <code>task_id</code> 匹配。</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>collector_cache_lookup_result_thread:
+
+  // 内部维护: pending_tasks表 (task_id -&gt; task)
+
+  loop:
+    等待 parser_to_collector_fifo 或 dc_cache_to_collector_fifo 或 pc_cache_to_collector_fifo 非空
+
+    如果 parser_to_collector_fifo 有数据:
+      task = parser_to_collector_fifo.read()
+      pending_tasks[task-&gt;task_id] = task
+      continue
+
+    如果 dc_cache_to_collector_fifo 有数据:
+      task = dc_cache_to_collector_fifo.read()
+      pending_task = pending_tasks[task-&gt;task_id]
+      pending_task-&gt;dc_valid = true
+      pending_task-&gt;DC = task-&gt;DC
+      如果 pending_task-&gt;pc_valid == false: continue
+
+    如果 pc_cache_to_collector_fifo 有数据:
+      task = pc_cache_to_collector_fifo.read()
+      pending_task = pending_tasks[task-&gt;task_id]
+      pending_task-&gt;pc_valid = true
+      pending_task-&gt;PC = task-&gt;PC
+      如果 pending_task-&gt;dc_valid == false: continue
+
+    // DC和PC结果都已到齐
+    task = pending_task
+    从pending_tasks表中移除task-&gt;task_id
+
+    (1) DC_HIT + PC_HIT:
+      执行DC配置验证（步骤7~13纯逻辑）
+      如果验证失败 -&gt; fault_fifo
+      判断是否需要PC -&gt; 设置iosatp/iohgatp
+      执行MSI地址判断并路由
+
+    (2) DC_HIT + PC_MISS:
+      判断是否真的需要PC:
+        如果需要 -&gt; collector_to_xdtw_fifo (PDT walk)
+        否则按DC_HIT + PC_HIT逻辑处理
+
+    (3) DC_MISS:
+      -&gt; collector_to_xdtw_fifo (DDT walk)
+
+    (4) 校验失败:
+      -&gt; fault_fifo
+
+    wait(1, SC_NS)
+
+  // MSI地址判断逻辑:
+  如果 DC.msiptp.MODE != MSIPTP_Off:
+    is_msi = (task-&gt;gpa &amp; DC.msi_addr_mask) == DC.msi_addr_pattern
+    如果 is_msi -&gt; collector_to_msipt_cache_query_fifo
+  否则 -&gt; collector_to_pt_cache_query_fifo
+</code></pre><h4 id="进程2-collector_xdtw_response_thread">进程2: collector_xdtw_response_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>collector_xdtw_response_thread:
+  loop:
+    task = xdtw_to_collector_fifo.read()
+
+    如果 task-&gt;state == TASK_DC_WALK_DONE:
+      collector_to_dc_cache_update_fifo.write(task)
+      判断是否需要PC:
+        如果需要且PC未命中 -&gt; collector_to_xdtw_fifo (PDT walk)
+        如果需要且PC已命中 -&gt; 执行配置验证 -&gt; MSI判断 -&gt; 路由
+        如果不需要 -&gt; 执行配置验证 -&gt; MSI判断 -&gt; 路由
+
+    如果 task-&gt;state == TASK_PC_WALK_DONE:
+      collector_to_pc_cache_update_fifo.write(task)
+      设置iosatp/iohgatp/SUM/PSCID
+      执行MSI判断 -&gt; 路由
+
+    如果 task-&gt;state == TASK_FAULT:
+      -&gt; fault_fifo
+
+    wait(1, SC_NS)
+</code></pre><h3 id="53-dc-cache">5.3 DC Cache </h3>
+<p><strong>职责</strong>: 设备上下文缓存。查询请求来自Parser（携带task_id），查询结果输出给Collector。容量64条。</p>
+<p><strong>内部进程</strong>: 1个（<code>dc_cache_thread</code>）</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>dc_cache_thread:
+  loop:
+    等待 (parser_to_dc_cache_query_fifo 或 collector_to_dc_cache_update_fifo 有数据)
+
+    如果是查询请求（parser_to_dc_cache_query_fifo）:
+      task = fifo.read()
+      result = lookup_dc_cache(task-&gt;device_id, &amp;task-&gt;DC)
+      task-&gt;state = (result == HIT) ? TASK_DC_HIT : TASK_DC_MISS
+      dc_cache_to_collector_fifo.write(task)
+      wait(1, SC_NS)
+
+    如果是更新请求（collector_to_dc_cache_update_fifo）:
+      task = fifo.read()
+      update_dc_cache(task-&gt;device_id, &amp;task-&gt;DC)
+      wait(1, SC_NS)
+</code></pre><h3 id="54-pc-cache">5.4 PC Cache </h3>
+<p><strong>设计与DC Cache同构</strong>，查询键为(device_id, process_id)。查询请求来自Parser（<code>parser_to_pc_cache_query_fifo</code>），查询结果输出给Collector（<code>pc_cache_to_collector_fifo</code>）。</p>
+<h3 id="55-pt-cache含转发逻辑">5.5 PT Cache（含转发逻辑） </h3>
+<p><strong>职责</strong>: IOTLB查询、命中转发、未命中提交PTW、接收PTW结果更新缓存。</p>
+<p><strong>内部进程</strong>: 3个</p>
+<h4 id="进程1-pt_cache_query_thread">进程1: pt_cache_query_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>pt_cache_query_thread:
+  loop:
+    task = collector_to_pt_cache_query_fifo.read()
+    result = lookup_iotlb(task-&gt;iova, task-&gt;PSCV, task-&gt;PSCID, task-&gt;GV, task-&gt;GSCID, ...)
+    如果 HIT: 填充pa/page_sz, task-&gt;state = TASK_TLB_HIT
+    如果 MISS: task-&gt;state = TASK_TLB_MISS
+    如果 FAULT: task-&gt;state = TASK_FAULT
+    pt_cache_lookup_result_fifo.write(task)
+    wait(1, SC_NS)
+</code></pre><h4 id="进程2-pt_cache_result_thread">进程2: pt_cache_result_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>pt_cache_result_thread:
+  loop:
+    task = pt_cache_lookup_result_fifo.read()
+    如果 TASK_TLB_HIT: task-&gt;state = TASK_FORWARD -&gt; pt_cache_to_fwd_fifo
+    如果 TASK_TLB_MISS: -&gt; pt_cache_to_ptw_fifo
+    如果 TASK_FAULT: -&gt; fault_fifo
+    wait(1, SC_NS)
+</code></pre><h4 id="进程3-pt_cache_ptw_rsp_thread">进程3: pt_cache_ptw_rsp_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>pt_cache_ptw_rsp_thread:
+  loop:
+    task = ptw_to_pt_cache_fifo.read()
+    update_iotlb(task-&gt;iova, task-&gt;vs_pte, task-&gt;g_pte, task-&gt;pa, task-&gt;page_sz, ...)
+    task-&gt;state = TASK_FORWARD
+    pt_cache_to_fwd_fifo.write(task)
+    wait(1, SC_NS)
+</code></pre><h3 id="56-msipt-cache含内置msiptw">5.6 MSIPT Cache（含内置MSIPTW） </h3>
+<p><strong>职责</strong>: MSI页表缓存查询与翻译，内置MSIPTW。</p>
+<p><strong>内部进程</strong>: 4个</p>
+<h4 id="进程1-msipt_cache_query_thread">进程1: msipt_cache_query_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>msipt_cache_query_thread:
+  loop:
+    task = collector_to_msipt_cache_query_fifo.read()
+    result = lookup_msipt_cache(task-&gt;DC.msiptp, interrupt_file_num)
+    如果 HIT: task-&gt;state = TASK_MSIPT_HIT
+    如果 MISS: task-&gt;state = TASK_MSIPT_MISS
+    msipt_cache_lookup_result_fifo.write(task)
+    wait(1, SC_NS)
+</code></pre><h4 id="进程2-msipt_cache_result_thread">进程2: msipt_cache_result_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>msipt_cache_result_thread:
+  loop:
+    task = msipt_cache_lookup_result_fifo.read()
+    如果 TASK_MSIPT_HIT:
+      执行MSI输出路由(task, msipte)
+    如果 TASK_MSIPT_MISS:
+      msipt_cache_to_msiptw_fifo.write(task)
+    wait(1, SC_NS)
+
+  MSI输出路由(task, msipte):
+    检查 msipte.V == 0 -&gt; FAULT (cause=261)
+    检查 msipte.M == 0 或 M == 2 -&gt; FAULT (cause=263)
+    如果 msipte.M == 3: task-&gt;pa = PPN&lt;&lt;12 | gpa[11:0], is_mrif=0 -&gt; msipt_cache_to_fwd_fifo
+    如果 msipte.M == 1: 提取MRIF信息, is_mrif=1 -&gt; msipt_cache_to_fwd_fifo
+</code></pre><h4 id="进程3-msiptw_req_thread">进程3: msiptw_req_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>msiptw_req_thread:
+  loop:
+    task = msipt_cache_to_msiptw_fifo.read()
+    addr = task-&gt;DC.msiptp.PPN * PAGESIZE | (interrupt_file_num * 16)
+    task-&gt;walk_ctx.walk_type = WALK_MSI_PT
+    分配AXI ID, 记录outstanding表, 发起非阻塞DDR读
+    wait(1, SC_NS)
+</code></pre><h4 id="进程4-msiptw_rsp_thread">进程4: msiptw_rsp_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>msiptw_rsp_thread:
+  loop:
+    等待内部DDR响应队列非空
+    rsp = 内部响应队列.pop()
+    恢复task, 释放AXI ID
+    如果错误: -&gt; fault_fifo, continue
+    解析msipte(16字节), 更新MSIPT Cache
+    task-&gt;state = TASK_MSIPT_WALK_DONE
+    执行MSI输出路由(task, msipte)
+    wait(1, SC_NS)
+</code></pre><h3 id="57-xdtwddtpdt-walker">5.7 xDTW（DDT/PDT Walker） </h3>
+<p><strong>职责</strong>: 执行DDT/PDT radix tree walk获取DC/PC。</p>
+<p><strong>内部进程</strong>: 2个</p>
+<h4 id="进程1-xdtw_req_thread">进程1: xdtw_req_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>xdtw_req_thread:
+  loop:
+    task = collector_to_xdtw_fifo.read()
+    判断walk类型(DDT/PDT), 初始化walk_ctx
+    计算DDR读取地址, 分配AXI ID, 发起非阻塞DDR读
+    wait(1, SC_NS)
+</code></pre><h4 id="进程2-xdtw_rsp_thread">进程2: xdtw_rsp_thread </h4>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>xdtw_rsp_thread:
+  loop:
+    等待内部DDR响应队列非空
+    rsp = 内部响应队列.pop()
+    恢复task, 释放AXI ID
+
+    DDT walk:
+      解析ddte, 检查V位
+      非叶节点: level--, 计算下一级地址, 发起新DDR读, continue
+      叶节点: 读取完整DC, 配置检查
+        task-&gt;state = TASK_DC_WALK_DONE -&gt; xdtw_to_collector_fifo
+      错误: -&gt; fault_fifo
+
+    PDT walk:
+      类似DDT walk逻辑
+      叶节点: 读取PC, 配置检查
+        task-&gt;state = TASK_PC_WALK_DONE -&gt; xdtw_to_collector_fifo
+      错误: -&gt; fault_fifo
+
+    wait(1, SC_NS)
+</code></pre><h3 id="58-ptwpage-table-walker含内置walker-cache">5.8 PTW（Page Table Walker，含内置Walker Cache） </h3>
+<p><strong>最复杂的子模块</strong>，重写实现两阶段翻译的页表walk。借鉴<code>iommu_two_stage_trans.cc</code>和<code>iommu_second_stage_trans.cc</code>的逻辑。</p>
+<p><strong>关键特征</strong>:</p>
+<ul>
+<li>支持VS-stage和G-stage嵌套walk</li>
+<li>A/D位更新必须使用<strong>阻塞DDR接口</strong>（原子操作）</li>
+<li><strong>内置Walker Cache</strong>：三级中间结果缓存（PTWc_1/PTWc_2/PTWc_3），减少DDR访问</li>
+</ul>
+<p><strong>内部进程</strong>: 2个</p>
+<p><strong>内置数据结构</strong>: <code>walker_cache_t</code>（见3.4节）</p>
+<h4 id="581-walker-cache-设计参考架构文档45章节">5.8.1 Walker Cache 设计（参考架构文档4.5章节） </h4>
+<p>Walker Cache 缓存页表 walk 过程中 VA/GPA 到下一级页表物理地址 PPN 的中间结果。</p>
+<p><strong>三级缓存表结构</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>缓存表</th>
+<th>缓存内容</th>
+<th>组织方式</th>
+<th>容量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PTWc_1</td>
+<td>VPN最高段对应的中间PPN</td>
+<td>直接映射</td>
+<td>64条目</td>
+</tr>
+<tr>
+<td>PTWc_2</td>
+<td>VPN最高两段对应的中间PPN</td>
+<td>2-way组相连</td>
+<td>2×64条目</td>
+</tr>
+<tr>
+<td>PTWc_3</td>
+<td>VPN最高三段对应的中间PPN</td>
+<td>4-way组相连</td>
+<td>4×64条目 (仅Sv48)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>地址模式兼容</strong>：</p>
+<ul>
+<li>Sv48: 4级页表 (VPN[3]/VPN[2]/VPN[1]/VPN[0])，PTWc_1/2/3 全部启用</li>
+<li>Sv39: 3级页表 (VPN[2]/VPN[1]/VPN[0])，PTWc_3 关闭，PTWc_1 缓存 VPN[2]，PTWc_2 缓存 {VPN[2],VPN[1]}</li>
+</ul>
+<p><strong>散列函数</strong> (参考架构文档4.5.4):</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>PTWc_1: hash_1 = (gscid[5:0] ^ pscid[5:0] ^ vpn_high[5:0]) &amp; 0x3F
+PTWc_2: hash_2 = (gscid[5:0] ^ pscid[5:0] ^ vpn_high[5:0] ^ vpn_mid[5:0]) &amp; 0x3F
+PTWc_3: hash_3 = (gscid[5:0] ^ pscid[5:0] ^ vpn_high[5:0] ^ vpn_mid[5:0] ^ vpn_low[5:0]) &amp; 0x3F
+</code></pre><p><strong>缓存替换</strong>: PTWc_1 直接映射无替换；PTWc_2/PTWc_3 使用 SRRIP 算法（2比特RRPV）。</p>
+<p><strong>查询优先级</strong>: PTWc_3 &gt; PTWc_2 &gt; PTWc_1。命中更高级别的缓存可以跳过更多walk层级。</p>
+<p><strong>Walker Cache 查询逻辑</strong>（在 ptw_req_thread 中执行）:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>walker_cache_lookup(task):
+  从iova中提取VPN字段:
+    Sv48: vpn[3], vpn[2], vpn[1], vpn[0]
+    Sv39: vpn[2], vpn[1], vpn[0]
+
+  // 按优先级查询 (同时查询3个缓存表，取最优命中)
+  如果 Sv48 且 PTWc_3命中(gscid, pscid, vpn[3], vpn[2], vpn[1]):
+    // 跳过3级walk，直接从level 0开始
+    task-&gt;wc_hit_level = 3
+    task-&gt;wc_hit_ppn = ptwc3_result.ppn
+    起始PTE地址 = ppn * PAGESIZE + vpn[0] * PTESIZE
+    return
+
+  如果 PTWc_2命中(gscid, pscid, vpn_high, vpn_mid):
+    // 跳过2级walk
+    task-&gt;wc_hit_level = 2
+    task-&gt;wc_hit_ppn = ptwc2_result.ppn
+    起始PTE地址 = ppn * PAGESIZE + vpn_next * PTESIZE
+    return
+
+  如果 PTWc_1命中(gscid, pscid, vpn_high):
+    // 跳过1级walk
+    task-&gt;wc_hit_level = 1
+    task-&gt;wc_hit_ppn = ptwc1_result.ppn
+    起始PTE地址 = ppn * PAGESIZE + vpn_next * PTESIZE
+    return
+
+  // 全部未命中，从根开始walk
+  task-&gt;wc_hit_level = -1
+</code></pre><p><strong>Walker Cache 更新逻辑</strong>（在 ptw_rsp_thread 中执行）:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>walker_cache_update(task, level, ppn):
+  // 在页表walk过程中，每完成一级非叶PTE读取，更新对应的Walker Cache
+  // level表示刚完成的层级
+
+  如果完成了最高层(root) -&gt; 更新PTWc_1
+  如果完成了第二层 -&gt; 更新PTWc_2
+  如果完成了第三层(仅Sv48) -&gt; 更新PTWc_3
+</code></pre><p><strong>Walker Cache 失效逻辑</strong>（参考架构文档4.5.5）:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>失效触发源:
+  1. DC Cache失效时: 按gscid遍历Walker Cache，失效匹配条目
+  2. PC Cache失效时: 按(gscid, pscid)遍历Walker Cache，失效匹配条目
+  3. 页表修改时(IOTINVAL.VMA): 按(gscid, pscid, iova)失效匹配条目
+  4. 全局失效(IOTINVAL.VMA without GV/PSCIDV/AV): 失效全部条目
+
+失效命令通过 cq_to_cache_inv_fifo 接收，在PTW模块中处理。
+</code></pre><h4 id="582-进程1-ptw_req_thread">5.8.2 进程1: ptw_req_thread </h4>
+<p>处理来自PT Cache的请求，<strong>先查询Walker Cache</strong>，根据命中情况确定walk起始层级，再发起DDR读取。</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>ptw_req_thread:
+  loop:
+    // === 优先处理Cache失效命令 ===
+    如果 cq_to_cache_inv_fifo 有数据 (非阻塞检查):
+      cmd = cq_to_cache_inv_fifo.nb_read()
+      如果 cmd.type == INV_VMA:
+        执行Walker Cache失效:
+          如果 cmd.gv &amp;&amp; cmd.pscidv &amp;&amp; cmd.av:
+            walker_cache.invalidate_by_iova(cmd.gscid, cmd.pscid, cmd.addr)
+          如果 cmd.gv &amp;&amp; cmd.pscidv:
+            walker_cache.invalidate_by_gscid_pscid(cmd.gscid, cmd.pscid)
+          如果 cmd.gv:
+            walker_cache.invalidate_by_gscid(cmd.gscid)
+          否则:
+            walker_cache.invalidate_all()
+      如果 cmd.type == INV_DDT:
+        walker_cache.invalidate_by_gscid(cmd.gscid)
+      continue
+
+    // === 处理页表walk请求 ===
+    task = pt_cache_to_ptw_fifo.read()
+
+    根据task中的iosatp/iohgatp确定walk策略:
+      如果 iosatp.MODE == Bare &amp;&amp; iohgatp.MODE == Bare:
+        pa = iova, 直接完成 -&gt; ptw_to_pt_cache_fifo
+        continue
+      如果 iosatp.MODE == Bare &amp;&amp; iohgatp.MODE != Bare:
+        仅需G-stage walk
+      如果 iosatp.MODE != Bare:
+        需要VS-stage walk, 可能嵌套G-stage
+
+    // ===== V4新增: 查询Walker Cache =====
+    wc_result = walker_cache.lookup(task-&gt;GSCID, task-&gt;PSCID, task-&gt;iova, addr_mode, &amp;ppn)
+
+    如果 wc_result &gt; 0 (Walker Cache命中):
+      // 从命中的中间PPN开始walk，跳过已缓存的层级
+      task-&gt;wc_hit_level = wc_result
+      task-&gt;wc_hit_ppn = ppn
+      根据命中级别计算起始PTE地址:
+        remaining_level = max_level - wc_result
+        addr = ppn * PAGESIZE + vpn[remaining_level] * PTESIZE
+      如果G-stage活跃且需要隐式翻译: 先做隐式G翻译
+      否则: 直接发起PTE读取
+    否则 (Walker Cache未命中):
+      // 从根PPN开始完整walk
+      task-&gt;wc_hit_level = -1
+      计算VPN索引, 设置level
+      addr = root_ppn * PAGESIZE + vpn[max_level-1] * PTESIZE
+      如果G-stage活跃: 先做隐式G翻译
+      否则: 直接发起PTE读取
+
+    初始化walk_ctx
+    分配AXI ID, 记录outstanding表, 发起非阻塞DDR读
+
+    wait(1, SC_NS)
+</code></pre><h4 id="583-进程2-ptw_rsp_thread">5.8.3 进程2: ptw_rsp_thread </h4>
+<p>处理DDR响应，执行叶/非叶判断、权限检查、A/D位更新。<strong>在非叶节点处理时更新Walker Cache</strong>。</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>ptw_rsp_thread:
+  loop:
+    等待内部DDR响应队列非空 (通过sc_event)
+
+    rsp = 内部响应队列.pop()
+    entry = ddr_outstanding_table[rsp.axi_id]
+    task = entry.task
+    释放AXI ID
+
+    根据walk_type分发处理:
+
+      WALK_G_PT_IMPLICIT (VS PTE地址的G-stage隐式翻译):
+        解析G PTE, 权限检查
+        如果非叶: level--, 继续G walk
+        如果叶: 得到SPA, 恢复saved_vs_walk
+          用SPA作为地址发起VS PTE读取
+
+      WALK_VS_PT:
+        解析VS PTE
+        权限检查(V/R/W/X), 叶/非叶判断
+
+        如果非叶:
+          // ===== V4新增: 更新Walker Cache =====
+          // 将当前非叶PTE的PPN作为中间结果更新到Walker Cache
+          已完成的层级数 = max_level - current_level
+          如果 已完成的层级数 == 1:
+            walker_cache.update_ptwc1(gscid, pscid, vpn_high, pte.ppn, mode)
+          如果 已完成的层级数 == 2:
+            walker_cache.update_ptwc2(gscid, pscid, vpn_high, vpn_mid, pte.ppn, mode)
+          如果 已完成的层级数 == 3 &amp;&amp; Sv48:
+            walker_cache.update_ptwc3(gscid, pscid, vpn_high, vpn_mid, vpn_low, pte.ppn, mode)
+
+          level--, 计算新地址
+          如果G-stage活跃: 先做隐式G翻译
+          否则: 直接读下一级PTE
+
+        如果叶:
+          权限检查, 超级页对齐检查
+          **A/D位处理（阻塞原子操作）**:
+            如果需要更新A/D位(SADE==1):
+              使用 b_transport 发起原子读-改-写
+          如果需要G-stage显式翻译: 发起G walk
+          否则完成: -&gt; ptw_to_pt_cache_fifo
+
+      WALK_G_PT (显式G-stage翻译):
+        解析G PTE, 类似VS处理
+        // G-stage walk也可以利用Walker Cache (用于缓存G-stage中间PPN)
+        **G-stage A/D位处理也需要阻塞原子操作**
+        完成后 -&gt; ptw_to_pt_cache_fifo
+
+      如果错误:
+        task-&gt;state = TASK_FAULT -&gt; fault_fifo
+
+    wait(1, SC_NS)
+</code></pre><h3 id="59-forwarderdma数据转发">5.9 Forwarder（DMA数据转发） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>forwarder_thread:
+  loop:
+    task = pt_cache_to_fwd_fifo.read()
+    task-&gt;original_trans-&gt;set_address(task-&gt;pa)
+    // 通过AXI Master 0发起nb_transport_fw转发
+    // 等待nb_transport_bw响应后，通过AXI Slave 0回复
+    释放iommu_task_t
+</code></pre><h3 id="510-msi-forwardermsi结果转发">5.10 MSI Forwarder（MSI结果转发） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>msi_forwarder_thread:
+  loop:
+    task = msipt_cache_to_fwd_fifo.read()
+    如果 task-&gt;is_mrif == 0 (M==3, Basic Translate):
+      通过 axi_stream_to_cmn_rnd_socket -&gt; IMSIC
+    如果 task-&gt;is_mrif == 1 (M==1, MRIF模式):
+      通过 axi_master_1_to_cmn_rnd_socket 使用 b_transport (原子OR写入MRIF)
+    释放iommu_task_t
+</code></pre><h3 id="511-fault-proc全局错误处理">5.11 Fault Proc（全局错误处理） </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>fault_proc_thread:
+  loop:
+    task = fault_fifo.read()
+    生成fault_record (CAUSE, TTYP, iotval, iotval2, DID, PID, PV)
+    如果FQ已满: 设置fqof
+    否则: 使用b_transport写入FQ内存（32字节）, 更新fqt
+    如果中断使能: 触发fault中断
+    如果 task-&gt;original_trans != nullptr: 设置错误响应
+    释放iommu_task_t
+    wait(1, SC_NS)
+</code></pre><h3 id="512-cq-proccommand-queue处理v4补充">5.12 CQ Proc（Command Queue处理）(V4补充) </h3>
+<p><strong>职责</strong>（参考架构文档5.1）:</p>
+<ol>
+<li>处理A核通过Command Queue下发的各种指令</li>
+<li>通过 AXI Master 2 接口读取CQ实体</li>
+<li>通过 AXI Master 1 接口向RP发送ATS Invalidation Request和Page Request Group Response等Msg</li>
+<li>向内部各Cache模块发送Cache Invalidation命令</li>
+</ol>
+<p><strong>内部进程</strong>: 1个（<code>cq_proc_thread</code>）</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>cq_proc_thread:
+  loop:
+    // 检查CQ是否有新的命令（cqh != cqt）
+    如果 cqh == cqt: wait(cq_event), continue
+
+    // 通过AXI Master 2读取CQ条目（16字节）
+    使用b_transport从DDR读取CQ条目
+
+    解析CQ命令 (参考RISC-V IOMMU Spec第4章):
+
+      IOTINVAL.VMA:
+        // 失效PT Cache和Walker Cache中的页表条目
+        构建 cache_inv_cmd_t: type=INV_VMA, 填充gscid/pscid/addr/gv/pscidv/av
+        cq_to_cache_inv_fifo.write(cmd)
+        // PT Cache失效: 根据(gscid, pscid, iova)失效匹配条目
+        // Walker Cache失效: 同步在PTW模块中处理
+
+      IOTINVAL.DDT:
+        // 失效DC Cache + 关联的PC Cache + PT Cache + Walker Cache
+        构建 cache_inv_cmd_t: type=INV_DDT, 填充device_id
+        cq_to_cache_inv_fifo.write(cmd)
+
+      IOFENCE.C:
+        // 等待所有in-flight翻译请求完成
+        等待所有outstanding任务完成
+        更新cqh
+
+      ATS.INVAL:
+        // 通过AXI Master 1向指定RP发送ATS Invalidation Request
+        根据DSEG/RID确定目标RP (参考RPx路由配置)
+        通过 axi_master_2_to_pcie_noc_socket 发送ATS Invalidation Msg
+
+      ATS.PRGR:
+        // 通过AXI Master 1向指定RP发送Page Request Group Response
+        通过 axi_master_2_to_pcie_noc_socket 发送ATS Page Group Response Msg
+
+    更新cqh (CQ Head指针)
+
+    wait(1, SC_NS)
+</code></pre><hr>
+<h2 id="六-ddr端口设计阻塞非阻塞双模式">六、DDR端口设计：阻塞+非阻塞双模式 </h2>
+<h3 id="61-需要阻塞blocking接口的操作">6.1 需要阻塞(blocking)接口的操作 </h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A/D位更新(S/VS-stage)</strong></td>
+<td>CAS原子操作：read_for_AMO + compare + write_back + retry</td>
+</tr>
+<tr>
+<td><strong>A/D位更新(G-stage)</strong></td>
+<td>同上</td>
+</tr>
+<tr>
+<td><strong>MRIF写入</strong></td>
+<td>原子OR写操作</td>
+</tr>
+<tr>
+<td><strong>FQ写入</strong></td>
+<td>32字节fault record原子写入</td>
+</tr>
+<tr>
+<td><strong>PQ写入</strong></td>
+<td>16字节page request record原子写入</td>
+</tr>
+</tbody>
+</table>
+<h3 id="62-可以使用非阻塞nb_transport接口的操作">6.2 可以使用非阻塞(nb_transport)接口的操作 </h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDT/PDT entry读取</td>
+<td>xDTW (8字节)</td>
+</tr>
+<tr>
+<td>DC/PC读取</td>
+<td>xDTW (32/64/16字节)</td>
+</tr>
+<tr>
+<td>VS/G-stage PTE读取</td>
+<td>PTW (8字节)</td>
+</tr>
+<tr>
+<td>MSI PTE读取</td>
+<td>MSIPTW (16字节)</td>
+</tr>
+<tr>
+<td>CQ读取</td>
+<td>CQ Proc (16字节)</td>
+</tr>
+<tr>
+<td>翻译后DMA数据转发</td>
+<td>Forwarder -&gt; AXI Master 0</td>
+</tr>
+</tbody>
+</table>
+<h3 id="63-ddr端口实现">6.3 DDR端口实现 </h3>
+<pre data-role="codeBlock" data-info="cpp" class="language-cpp cpp"><code><span class="token keyword keyword-void">void</span> <span class="token function">send_ddr_nb_read</span><span class="token punctuation">(</span><span class="token keyword keyword-uint64_t">uint64_t</span> addr<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> size<span class="token punctuation">,</span> <span class="token keyword keyword-uint16_t">uint16_t</span> axi_id<span class="token punctuation">,</span> walk_type_t type<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword keyword-void">void</span> <span class="token function">send_ddr_blocking_read</span><span class="token punctuation">(</span><span class="token keyword keyword-uint64_t">uint64_t</span> addr<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> size<span class="token punctuation">,</span> <span class="token keyword keyword-char">char</span><span class="token operator">*</span> data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword keyword-void">void</span> <span class="token function">send_ddr_blocking_write</span><span class="token punctuation">(</span><span class="token keyword keyword-uint64_t">uint64_t</span> addr<span class="token punctuation">,</span> <span class="token keyword keyword-uint8_t">uint8_t</span> size<span class="token punctuation">,</span> <span class="token keyword keyword-char">char</span><span class="token operator">*</span> data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre><h3 id="64-ddr模型改造">6.4 DDR模型改造 </h3>
+<p>DDR模型同时支持b_transport和nb_transport，可配置延迟参数。</p>
+<hr>
+<h2 id="七-数据排序与一致性">七、数据排序与一致性 </h2>
+<h3 id="71-同设备请求排序">7.1 同设备请求排序 </h3>
+<p>Forwarder中按device_id维护per-device排序队列。</p>
+<h3 id="72-cache-invalidation同步">7.2 Cache Invalidation同步 </h3>
+<p>使用 <code>sc_mutex</code> 保护缓存数据结构（DC/PC/TLB/MSIPT/Walker Cache各用一个）。</p>
+<p>CQ Proc执行invalidation时通过 <code>cq_to_cache_inv_fifo</code> 向各模块发送失效命令。IOFENCE命令处理时等待所有in-flight翻译完成。</p>
+<p><strong>Walker Cache失效传播链</strong>（参考架构文档4.5.5）:</p>
+<ul>
+<li>DC Cache失效 → 按gscid失效Walker Cache条目</li>
+<li>PC Cache失效 → 按(gscid, pscid)失效Walker Cache条目</li>
+<li>页表修改(IOTINVAL.VMA) → 按(gscid, pscid, iova)失效Walker Cache条目</li>
+</ul>
+<hr>
+<h2 id="八-文件修改清单">八、文件修改清单 </h2>
+<h3 id="需要新建的文件">需要新建的文件 </h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iommu/iommu_task.hh</code></td>
+<td><code>iommu_task_t</code>, <code>walk_context_t</code>, <code>ddr_response_t</code>, <code>cache_inv_cmd_t</code>, Walker Cache数据结构</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_parser.cc</code></td>
+<td>Parser子模块实现</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_collector.cc</code></td>
+<td>Collector子模块实现（2个进程）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_dc_cache.cc</code></td>
+<td>DC Cache子模块实现</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_pc_cache.cc</code></td>
+<td>PC Cache子模块实现</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_pt_cache.cc</code></td>
+<td>PT Cache子模块实现（3个进程）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_msipt_cache.cc</code></td>
+<td>MSIPT Cache子模块实现（4个进程，含内置MSIPTW）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_xdtw.cc</code></td>
+<td>xDTW子模块实现（2个进程）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_ptw.cc</code></td>
+<td>PTW子模块实现（2个进程，含Walker Cache）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_walker_cache.cc</code></td>
+<td>Walker Cache实现（PTWc_1/2/3, 散列函数, 查询/更新/失效）</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_forwarder.cc</code></td>
+<td>Forwarder + MSI Forwarder实现</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_fault_proc.cc</code></td>
+<td>Fault Proc子模块实现</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_perf_cq_proc.cc</code></td>
+<td>CQ Proc子模块实现（含Cache Invalidation分发）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="需要重大修改的文件">需要重大修改的文件 </h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>修改内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iommu/iommu_top.hh</code></td>
+<td>全部FIFO（含新增cq_to_cache_inv_fifo）、SC_THREAD、Walker Cache实例、AXI ID分配器</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_top.cc</code></td>
+<td>注册SC_THREAD和nb_transport回调</td>
+</tr>
+<tr>
+<td><code>ddr/test_ddr.hh</code></td>
+<td>同时支持b_transport和nb_transport</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_ref_api.cc</code></td>
+<td>阻塞+非阻塞双套DDR访问接口</td>
+</tr>
+</tbody>
+</table>
+<h3 id="需要中等修改的文件">需要中等修改的文件 </h3>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>修改内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iommu/param_trans_def.hh</code></td>
+<td>添加axi_id/walk_type字段</td>
+</tr>
+<tr>
+<td><code>rp/test_rp.hh</code></td>
+<td>socket改nb_transport</td>
+</tr>
+<tr>
+<td><code>rp/test_rp_func.cc</code></td>
+<td>发送函数改非阻塞</td>
+</tr>
+<tr>
+<td><code>rp/test_rp_thread.cc</code></td>
+<td>并发请求</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_struct.hh</code></td>
+<td>扩大缓存大小常量</td>
+</tr>
+<tr>
+<td><code>iommu/iommu_atc.hh</code></td>
+<td>扩大Cache容量, 添加MSIPT/Walker Cache结构</td>
+</tr>
+</tbody>
+</table>
+<h3 id="保留为功能参考不修改">保留为功能参考（不修改） </h3>
+<p><code>iommu_translate.cc/.hh</code>、<code>iommu_device_context.cc</code>、<code>iommu_process_context.cc</code>、<code>iommu_two_stage_trans.cc</code>、<code>iommu_second_stage_trans.cc</code>、<code>iommu_msi_trans.cc</code>、<code>iommu_registers.hh</code>、<code>iommu_data_structures.hh</code>、<code>iommu_fault.hh</code>、<code>iommu_utils.hh/.cc</code>、<code>iommu_hpm.hh/.cc</code>、<code>iommu_interrupt.hh/.cc</code></p>
+<hr>
+<h2 id="九-实施步骤">九、实施步骤 </h2>
+<h3 id="phase-1-基础设施">Phase 1: 基础设施 </h3>
+<ol>
+<li>创建 <code>iommu_task.hh</code> - 所有数据结构（含Walker Cache、cache_inv_cmd_t）</li>
+<li>修改 <code>iommu_top.hh</code> - 全部FIFO、SC_THREAD声明、Walker Cache实例</li>
+<li>修改 <code>param_trans_def.hh</code> 添加 axi_id/walk_type</li>
+<li>修改 <code>iommu_atc.hh</code> 扩大缓存容量</li>
+</ol>
+<h3 id="phase-2-ddr模型改造">Phase 2: DDR模型改造 </h3>
+<ol>
+<li>DDR模型添加 nb_transport_fw 并保留 b_transport</li>
+<li>实现可配置延迟响应</li>
+</ol>
+<h3 id="phase-3-核心管线实现">Phase 3: 核心管线实现 </h3>
+<ol>
+<li>Parser + Forwarder (Bare mode直通)</li>
+<li>DC Cache + PC Cache</li>
+<li>xDTW (2进程)</li>
+<li>Collector (2进程)</li>
+<li>PT Cache (3进程) + PTW (2进程, 含Walker Cache)</li>
+<li>Walker Cache (PTWc_1/2/3, 散列/查询/更新/失效)</li>
+<li>MSIPT Cache (4进程)</li>
+<li>DDR响应路由线程</li>
+<li>Fault Proc + CQ Proc (含Cache Invalidation分发)</li>
+</ol>
+<h3 id="phase-4-rp模型改造与并发测试">Phase 4: RP模型改造与并发测试 </h3>
+<ol>
+<li>RP改为nb_transport</li>
+<li>并发请求发送测试</li>
+</ol>
+<h3 id="phase-5-排序-一致性-错误路径">Phase 5: 排序、一致性、错误路径 </h3>
+<ol>
+<li>per-device响应排序</li>
+<li>Cache Invalidation全链路 (CQ Proc -&gt; DC/PC/PT/Walker Cache)</li>
+<li>IOFENCE处理</li>
+<li>FQ/PQ写入</li>
+<li>Walker Cache命中率统计与验证</li>
+</ol>
+<hr>
+<h2 id="十-验证方法">十、验证方法 </h2>
+<h3 id="101-编译验证">10.1 编译验证 </h3>
+<pre data-role="codeBlock" data-info="bash" class="language-bash bash"><code><span class="token function">make</span> clean <span class="token operator">&amp;&amp;</span> <span class="token function">make</span> <span class="token assign-left variable">DEBUG</span><span class="token operator">=</span><span class="token number">1</span>
+</code></pre><h3 id="102-功能正确性验证">10.2 功能正确性验证 </h3>
+<ul>
+<li>Bare mode直通 / Sv48x4 G-stage / Sv39 S-stage</li>
+<li>MSI翻译(M<mark>1 MRIF + M</mark>3 Basic Translate)</li>
+<li>A/D位更新正确性</li>
+<li><strong>Walker Cache命中路径验证</strong>: 连续相同VPN前缀的翻译请求，第二次应命中Walker Cache</li>
+</ul>
+<h3 id="103-walker-cache专项验证">10.3 Walker Cache专项验证 </h3>
+<ul>
+<li><strong>命中率测试</strong>: 同一设备连续递增IOVA翻译，验证PTWc_1/2/3命中率</li>
+<li><strong>失效正确性</strong>: IOTINVAL.VMA后Walker Cache条目正确失效</li>
+<li><strong>Sv39/Sv48兼容</strong>: Sv39模式下PTWc_3自动关闭</li>
+<li><strong>DDR访问减少</strong>: 对比启用/禁用Walker Cache的DDR访问次数</li>
+</ul>
+<h3 id="104-并发性验证">10.4 并发性验证 </h3>
+<ul>
+<li>多设备同时发送翻译请求</li>
+<li>DC/PC Cache命中/未命中混合场景</li>
+<li>DDR outstanding请求数压力测试</li>
+<li>per-device响应顺序验证</li>
+</ul>
+<h3 id="105-cache-invalidation全链路验证">10.5 Cache Invalidation全链路验证 </h3>
+<ul>
+<li>CQ下发IOTINVAL.DDT -&gt; DC Cache + Walker Cache失效</li>
+<li>CQ下发IOTINVAL.VMA -&gt; PT Cache + Walker Cache失效</li>
+<li>CQ下发IOFENCE.C -&gt; 等待所有in-flight翻译完成</li>
+</ul>
+<h3 id="106-性能指标观测">10.6 性能指标观测 </h3>
+<ul>
+<li>每笔翻译端到端延迟</li>
+<li>DDR访问次数和各级Cache命中率（DC/PC/PT/Walker Cache）</li>
+<li>管线利用率</li>
+</ul>
+<hr>
+<h2 id="十一-风险与注意事项">十一、风险与注意事项 </h2>
+<ol>
+<li>
+<p><strong>各模块重写代码量大</strong>: 各子模块需要重新实现硬件逻辑。</p>
+</li>
+<li>
+<p><strong>嵌套Walk复杂性</strong>: VS-stage每级PTE可能触发完整G-stage walk（最多5x5=25次DDR访问），PTW中需维护双层walk上下文栈。</p>
+</li>
+<li>
+<p><strong>阻塞/非阻塞混用</strong>: 同一个DDR端口混用b_transport和nb_transport时需注意线程安全。建议使用sc_mutex保护阻塞调用。</p>
+</li>
+<li>
+<p><strong>DC+PC并行查询一致性</strong>: Parser同时触发DC和PC查询，Collector需在DC_MISS时忽略PC结果。</p>
+</li>
+<li>
+<p><strong>SystemC协作式线程</strong>: <code>sc_fifo::write()</code>在FIFO满时阻塞。所有FIFO深度需仔细评估。</p>
+</li>
+<li>
+<p><strong>TLM Payload生命周期</strong>: DDR请求需使用独立payload实例。</p>
+</li>
+<li>
+<p><strong>调试复杂度</strong>: 所有子模块的关键步骤应打印task_id用于端到端追踪。</p>
+</li>
+<li>
+<p><strong>fault_fifo并发写入</strong>: 多个模块同时写入，需确保FIFO深度足够。</p>
+</li>
+<li>
+<p><strong>Walker Cache一致性</strong>: Walker Cache更新和失效操作需通过sc_mutex保护，避免与PTW的查询/更新操作产生竞态。Walker Cache失效必须在页表walk开始前生效。</p>
+</li>
+<li>
+<p><strong>Walker Cache与超级页</strong>: 超级页（如2MB/1GB页）在非叶节点即可确定最终映射，Walker Cache中缓存的中间PPN在超级页场景下需要正确处理叶节点标识。</p>
+</li>
+</ol>
+<hr>
+<h2 id="附录a与架构文档51概述对照校验">附录A：与架构文档5.1概述对照校验 </h2>
+<table>
+<thead>
+<tr>
+<th>架构文档5.1模块</th>
+<th>性能模型对应</th>
+<th>校验状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parser: Memory Request分流至地址转换逻辑</td>
+<td>parser_thread → parser_to_collector/dc/pc_cache_fifo</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>Parser: Page Request分流至PQ处理逻辑</td>
+<td>parser_thread → parser_to_pq_fifo</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>Parser: 错误包丢弃和错误上报</td>
+<td>parser_thread → fault_fifo</td>
+<td>V4补充</td>
+</tr>
+<tr>
+<td>DC Cache: 缓存DDT信息，最大64条</td>
+<td>dc_cache_thread (64条LRU)</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>DC Cache: 哈希映射可通过寄存器配置</td>
+<td>lookup_dc_cache散列函数</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>PC Cache: 缓存PDT信息</td>
+<td>pc_cache_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>PT Cache: 缓存页表，miss提交PTW</td>
+<td>pt_cache_query/result/ptw_rsp_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>MSIPT Cache: 缓存MSI页表，内置MSI PTW</td>
+<td>msipt_cache_query/result/msiptw_req/rsp_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>Collector: 收集DC/PC信息，选择PT Cache或xDTW</td>
+<td>collector两个进程</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>xDTW: 通过AXI Master 2访问DDT/PDT</td>
+<td>xdtw_req/rsp_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>PTW: 通过AXI Master 2访问页表</td>
+<td>ptw_req/rsp_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>Walker Cache: 页表walk中间结果缓存</td>
+<td>walker_cache_t (PTWc_1/2/3), 内置于PTW</td>
+<td><strong>V4新增</strong></td>
+</tr>
+<tr>
+<td>CQ Proc: 通过AXI Master 2读CQ</td>
+<td>cq_proc_thread</td>
+<td>V4补充</td>
+</tr>
+<tr>
+<td>CQ Proc: 通过AXI Master 1向RP发Msg</td>
+<td>cq_proc_thread → AXI Master 1</td>
+<td><strong>V4补充</strong></td>
+</tr>
+<tr>
+<td>CQ Proc: 向各Cache发送Invalidation</td>
+<td>cq_to_cache_inv_fifo</td>
+<td><strong>V4新增</strong></td>
+</tr>
+<tr>
+<td>FQ Proc: 收集错误，与A核交互</td>
+<td>fault_proc_thread + fq_proc_thread</td>
+<td>覆盖</td>
+</tr>
+<tr>
+<td>PQ Proc: 从RP接收ATS Msg</td>
+<td>pq_proc_thread</td>
+<td>覆盖</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="附录bthread--fifo-完整映射表">附录B：Thread ↔ FIFO 完整映射表 </h2>
+<table>
+<thead>
+<tr>
+<th>Thread名称</th>
+<th>所属模块</th>
+<th>输入FIFO</th>
+<th>输出FIFO</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>parser_thread</td>
+<td>Parser</td>
+<td>inbound_fifo</td>
+<td>parser_to_collector_fifo, parser_to_dc/pc_cache_query_fifo, parser_to_pq_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>dc_cache_thread</td>
+<td>DC Cache</td>
+<td>parser_to_dc_cache_query_fifo, collector_to_dc_cache_update_fifo</td>
+<td>dc_cache_to_collector_fifo</td>
+</tr>
+<tr>
+<td>pc_cache_thread</td>
+<td>PC Cache</td>
+<td>parser_to_pc_cache_query_fifo, collector_to_pc_cache_update_fifo</td>
+<td>pc_cache_to_collector_fifo</td>
+</tr>
+<tr>
+<td>collector_cache_lookup_result_thread</td>
+<td>Collector</td>
+<td>parser_to_collector_fifo, dc/pc_cache_to_collector_fifo</td>
+<td>collector_to_xdtw/pt_cache/msipt_cache_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>collector_xdtw_response_thread</td>
+<td>Collector</td>
+<td>xdtw_to_collector_fifo</td>
+<td>collector_to_dc/pc_cache_update_fifo, collector_to_xdtw/pt_cache/msipt_cache_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>xdtw_req_thread</td>
+<td>xDTW</td>
+<td>collector_to_xdtw_fifo</td>
+<td>DDR(nb)</td>
+</tr>
+<tr>
+<td>xdtw_rsp_thread</td>
+<td>xDTW</td>
+<td>DDR响应(内部队列)</td>
+<td>xdtw_to_collector_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>pt_cache_query_thread</td>
+<td>PT Cache</td>
+<td>collector_to_pt_cache_query_fifo</td>
+<td>pt_cache_lookup_result_fifo</td>
+</tr>
+<tr>
+<td>pt_cache_result_thread</td>
+<td>PT Cache</td>
+<td>pt_cache_lookup_result_fifo</td>
+<td>pt_cache_to_fwd_fifo, pt_cache_to_ptw_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>pt_cache_ptw_rsp_thread</td>
+<td>PT Cache</td>
+<td>ptw_to_pt_cache_fifo</td>
+<td>pt_cache_to_fwd_fifo</td>
+</tr>
+<tr>
+<td>ptw_req_thread</td>
+<td>PTW+Walker Cache</td>
+<td>pt_cache_to_ptw_fifo, cq_to_cache_inv_fifo</td>
+<td>DDR(nb), ptw_to_pt_cache_fifo(bare)</td>
+</tr>
+<tr>
+<td>ptw_rsp_thread</td>
+<td>PTW+Walker Cache</td>
+<td>DDR响应(内部队列)</td>
+<td>ptw_to_pt_cache_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>msipt_cache_query_thread</td>
+<td>MSIPT Cache</td>
+<td>collector_to_msipt_cache_query_fifo</td>
+<td>msipt_cache_lookup_result_fifo</td>
+</tr>
+<tr>
+<td>msipt_cache_result_thread</td>
+<td>MSIPT Cache</td>
+<td>msipt_cache_lookup_result_fifo</td>
+<td>msipt_cache_to_fwd_fifo, msipt_cache_to_msiptw_fifo</td>
+</tr>
+<tr>
+<td>msiptw_req_thread</td>
+<td>MSIPT(MSIPTW)</td>
+<td>msipt_cache_to_msiptw_fifo</td>
+<td>DDR(nb)</td>
+</tr>
+<tr>
+<td>msiptw_rsp_thread</td>
+<td>MSIPT(MSIPTW)</td>
+<td>DDR响应(内部队列)</td>
+<td>msipt_cache_to_fwd_fifo, fault_fifo</td>
+</tr>
+<tr>
+<td>ddr_rsp_router_thread</td>
+<td>DDR路由</td>
+<td>ddr_rsp_fifo</td>
+<td>xdtw/ptw/msiptw内部响应队列</td>
+</tr>
+<tr>
+<td>forwarder_thread</td>
+<td>Forwarder</td>
+<td>pt_cache_to_fwd_fifo</td>
+<td>AXI Master 0</td>
+</tr>
+<tr>
+<td>msi_forwarder_thread</td>
+<td>MSI Forwarder</td>
+<td>msipt_cache_to_fwd_fifo</td>
+<td>AXI Stream / AXI Master 2</td>
+</tr>
+<tr>
+<td>fault_proc_thread</td>
+<td>Fault处理</td>
+<td>fault_fifo</td>
+<td>FQ(DDR blocking)</td>
+</tr>
+<tr>
+<td>fq_proc_thread</td>
+<td>FQ</td>
+<td>fq内部</td>
+<td>DDR</td>
+</tr>
+<tr>
+<td>pq_proc_thread</td>
+<td>PQ</td>
+<td>parser_to_pq_fifo</td>
+<td>DDR</td>
+</tr>
+<tr>
+<td>cq_proc_thread</td>
+<td>CQ</td>
+<td>cq内部</td>
+<td>DDR(AXI Master 2), AXI Master 1, cq_to_cache_inv_fifo</td>
+</tr>
+</tbody>
+</table>
+
+      </div>
+      
+      
+    
+    
+    
+    
+    
+    
+  
+    </body></html>
