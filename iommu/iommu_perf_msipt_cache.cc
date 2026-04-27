@@ -1,234 +1,231 @@
-//
-// IOMMU 性能模型 - MSIPT Cache 模块实现
-// 按照 SPEC v4 第 5.6 节定义实现
-// 参考：iommu_msi_trans.cc
-//
+// IOMMU Performance Model - MSIPT Cache + MSIPTW Threads (4 threads)
+// SPEC Section 12.15-12.18
+// Corresponds to msi_address_translation() in iommu_msi_trans.cc
 
 #include "iommu_top.hh"
-#include "iommu_perf_model.hh"
+#include <cstdio>
 
-// ============================================================================
-// MSIPT Cache 线程 1: 查询
-// ============================================================================
-
+// ============================================================
+// 12.15 msipt_cache_query_thread - MSIPT Cache Query
+// ============================================================
 void iommu_top::msipt_cache_query_thread() {
-    printf("[MSIPT Cache-1] Query thread started\n");
-    
     while (true) {
-        iommu_task_t* task = nullptr;
-        collector_to_msipt_cache_query_fifo.read(task);
-        
-#ifdef DEBUG_MSIPT_CACHE
-        printf("[MSIPT Cache-1] Query for task %d: msiptp.PPN=0x%lx, iova=0x%lx\n", 
-               task->task_id, task->DC.msiptp.PPN, task->iova);
-#endif
-        
-        // 计算 interrupt_file_num
-        // interrupt_file_num = (iova >> 12) & 0xFF (简化)
-        uint32_t interrupt_file_num = (task->iova >> 12) & 0xFF;
-        
-        // 查找 MSIPT Cache
-        uint64_t msipte_data = 0;
-        uint8_t result = lookup_msipt_cache(task->DC.msiptp.PPN, interrupt_file_num, &msipte_data);
-        
-        if (result) {
-            // Hit
-            task->state = TASK_MSIPT_HIT;
-            // TODO: 解析 msipte_data 填充 task 字段
-#ifdef DEBUG_MSIPT_CACHE
-            printf("[MSIPT Cache-1] Task %d: MSIPT HIT\n", task->task_id);
-#endif
-        } else {
-            // Miss
-            task->state = TASK_MSIPT_MISS;
-#ifdef DEBUG_MSIPT_CACHE
-            printf("[MSIPT Cache-1] Task %d: MSIPT MISS\n", task->task_id);
-#endif
-        }
-        
-        msipt_cache_lookup_result_fifo.write(task);
+        iommu_task_t* task = collector_to_msipt_cache_query_fifo.read();
+        task->state = TASK_MSI_QUERY;
         wait(MSIPT_CACHE_HIT_DELAY, SC_NS);
+
+        // Note: The functional model doesn't have an explicit MSIPT cache.
+        // In the performance model, we always treat MSI PTE lookups as misses
+        // and route to MSIPTW for DDR walk.
+        // Future enhancement: implement actual MSIPT cache with hit/miss logic.
+
+        printf("[MSIPT_CACHE] task_id=%u, gpa=0x%lx -> MISS, route to MSIPTW\n",
+               task->task_id, task->gpa);
+        fflush(stdout);
+
+        // Always miss: route to MSIPTW
+        task->state = TASK_MSI_MISS;
+        msipt_cache_to_msiptw_fifo.write(task);
     }
 }
 
-// ============================================================================
-// MSIPT Cache 线程 2: 结果处理
-// ============================================================================
-
+// ============================================================
+// 12.16 msipt_cache_result_thread - MSIPT Cache Result (PTW return)
+// Receives MSIPTW results, updates cache, forwards to Forwarder
+// ============================================================
 void iommu_top::msipt_cache_result_thread() {
-    printf("[MSIPT Cache-2] Result thread started\n");
-    
     while (true) {
-        iommu_task_t* task = nullptr;
-        msipt_cache_lookup_result_fifo.read(task);
-        
-#ifdef DEBUG_MSIPT_CACHE
-        printf("[MSIPT Cache-2] Processing task %d, state=%d\n", task->task_id, task->state);
-#endif
-        
-        if (task->state == TASK_MSIPT_HIT) {
-            // 命中，执行 MSI 输出路由
-            // TODO: 解析 MSI PTE，判断 M 字段
-            task->state = TASK_FORWARD;
-#ifdef DEBUG_MSIPT_CACHE
-            printf("[MSIPT Cache-2] Task %d: MSIPT HIT -> forwarding\n", task->task_id);
-#endif
-            msipt_cache_to_fwd_fifo.write(task);
-            
-        } else if (task->state == TASK_MSIPT_MISS) {
-            // 未命中，提交 MSIPTW
-#ifdef DEBUG_MSIPT_CACHE
-            printf("[MSIPT Cache-2] Task %d: MSIPT MISS -> sending to MSIPTW\n", task->task_id);
-#endif
-            msipt_cache_to_msiptw_fifo.write(task);
+        iommu_task_t* task = msiptw_to_msipt_cache_fifo.read();
+
+        if (task->state == TASK_FAULT) {
+            printf("[MSIPT_CACHE] task_id=%u -> FAULT, route to fault_handler\n", task->task_id);
+            fflush(stdout);
+            collector_to_fault_fifo.write(task);
+            continue;
         }
-        
+
         wait(MSIPT_CACHE_HIT_DELAY, SC_NS);
+
+        // PBMT aggregation (MSI translations)
+        task->vs_pte.PBMT = (task->vs_pte.PBMT != PMA) ?
+                             task->vs_pte.PBMT : task->g_pte.PBMT;
+
+        printf("[MSIPT_CACHE] task_id=%u, pa=0x%lx, is_mrif=%d -> forwarder\n",
+               task->task_id, task->pa, task->is_mrif);
+        fflush(stdout);
+
+        task->state = TASK_FORWARD;
+        msipt_cache_to_fwd_fifo.write(task);
     }
 }
 
-// ============================================================================
-// MSIPTW 线程 3: 请求
-// ============================================================================
-
+// ============================================================
+// 12.17 msiptw_req_thread - MSIPTW Request Thread (async DDR send)
+// Calculates MSI PTE address, sends DDR read request
+// Corresponds to iommu_msi_trans.cc L57-115
+// ============================================================
 void iommu_top::msiptw_req_thread() {
-    printf("[MSIPTW-3] Request thread started\n");
-    
     while (true) {
-        iommu_task_t* task = nullptr;
-        msipt_cache_to_msiptw_fifo.read(task);
-        
-#ifdef DEBUG_MSIPTW
-        printf("[MSIPTW-3] Task %d: MSI PTW request\n", task->task_id);
-#endif
-        
-        // 计算 interrupt_file_num
-        uint32_t interrupt_file_num = (task->iova >> 12) & 0xFF;
-        
-        // 计算 MSI PTE 地址
-        // addr = msiptp.PPN * PAGESIZE + (interrupt_file_num * 16)
-        uint64_t addr = task->DC.msiptp.PPN * 4096 + (interrupt_file_num * 16);
-        
-#ifdef DEBUG_MSIPTW
-        printf("[MSIPTW-3] Task %d: Reading MSI PTE at 0x%lx (file_num=%d)\n", 
-               task->task_id, addr, interrupt_file_num);
-#endif
-        
-        // 设置 walk 上下文
-        task->walk_ctx.walk_type = WALK_MSI_PT;
-        task->walk_ctx.read_addr = addr;
-        task->walk_ctx.read_size = 16; // MSI PTE 是 16 字节
-        
-        // 分配 AXI ID
-        uint16_t axi_id = axi_id_alloc.alloc_id();
-        task->current_axi_id = axi_id;
-        
-        // 发起非阻塞 DDR 读（16 字节）
-        send_ddr_nb_read(addr, 16, axi_id, WALK_MSI_PT, task);
-        
-        wait(MSIPTW_DELAY_PER_ACCESS, SC_NS);
+        // Flow control
+        while (msiptw_outstanding_task_count >= MSIPTW_MAX_OUTSTANDING_TASKS) {
+            wait(msiptw_task_completed_event);
+        }
+
+        iommu_task_t* task = msipt_cache_to_msiptw_fifo.read();
+        task->state = TASK_MSIPTW_REQ;
+        msiptw_outstanding_task_count++;
+
+        wait(MSIPTW_COMPUTE_DELAY, SC_NS);
+
+        // ========== MSI PTE address calculation ==========
+        // Corresponds to iommu_msi_trans.cc L57-115
+
+        // 1. MGPAW calculation
+        uint64_t mgpaw = iommu_inst.reg_file.capabilities.pas;
+        uint64_t mgpaw_mask = (mgpaw < 64) ? ((1ULL << mgpaw) - 1) : ~0ULL;
+
+        // 2. Extract interrupt file number I
+        uint64_t I = msi_extract((task->gpa >> 12),
+                                  (task->DC.msi_addr_mask.mask & mgpaw_mask));
+
+        // 3. Calculate MSI PTE address
+        uint64_t m = task->DC.msiptp.PPN * PAGESIZE;
+        uint64_t msipte_addr = m | (I * 16);
+
+        // Save walk context
+        task->walk_ctx.walk_phase = MSIPTW_READ_MSIPTE;
+        task->walk_ctx.read_addr = msipte_addr;
+        task->walk_ctx.read_size = 16;  // MSI PTE = 128 bits = 16 bytes
+
+        // Register in active_walks
+        msiptw_walks_mtx.lock();
+        msiptw_active_walks[task->task_id] = task;
+        msiptw_walks_mtx.unlock();
+
+        // Send DDR request
+        ddr_req_entry_t req;
+        req.task_id = task->task_id;
+        req.addr = msipte_addr;
+        req.size = 16;
+        req.is_write = false;
+        task->walk_ctx.ddr_read_count = 1;
+        printf("[MSIPTW_REQ] task_id=%u, msipte_addr=0x%lx, read_count=1 -> ddr_req\n",
+               task->task_id, msipte_addr);
+        fflush(stdout);
+        msiptw_req_ddr_fifo.write(req);
     }
 }
 
-// ============================================================================
-// MSIPTW 线程 4: 响应
-// ============================================================================
-
+// ============================================================
+// 12.18 msiptw_rsp_thread - MSIPTW Response Thread (MSI PTE parse)
+// Parses 16-byte MSI PTE, determines translation or fault
+// Corresponds to iommu_msi_trans.cc L127-293
+// ============================================================
 void iommu_top::msiptw_rsp_thread() {
-    printf("[MSIPTW-4] Response thread started\n");
-    
     while (true) {
-        // 等待 DDR 响应事件
-        wait(msiptw_rsp_evt);
-        
-        while (!msiptw_rsp_queue.empty()) {
-            ddr_response_t rsp = msiptw_rsp_queue.front();
-            msiptw_rsp_queue.pop();
-            
-            // 从 outstanding 表恢复 task
-            auto it = ddr_outstanding_table.find(rsp.axi_id);
-            if (it == ddr_outstanding_table.end()) {
-                printf("[MSIPTW-4] ERROR: AXI ID %d not found\n", rsp.axi_id);
-                continue;
-            }
-            
-            iommu_task_t* task = it->second.task;
-            
-            // 从 outstanding 表移除并释放 AXI ID
-            ddr_outstanding_table.erase(it);
-            axi_id_alloc.free_id(rsp.axi_id);
-            
-            if (rsp.status != 0) {
-                // DDR 错误
-                printf("[MSIPTW-4] Task %d: DDR error\n", task->task_id);
-                task->state = TASK_FAULT;
-                task->cause = 257;
-                fault_fifo.write(task);
-                continue;
-            }
-            
-#ifdef DEBUG_MSIPTW
-            printf("[MSIPTW-4] Task %d: Received MSI PTE data\n", task->task_id);
-#endif
-            
-            // 解析 MSI PTE（16 字节）
-            // msipte 格式：
-            //   bits 63:0:   PPN
-            //   bits 67:64:  M (mode)
-            //   bit 0:       V (valid)
-            uint64_t* ptr = (uint64_t*)rsp.data;
-            uint64_t msipte_low = ptr[0];
-            uint64_t msipte_high = ptr[1];
-            
-            uint8_t V = msipte_low & 0x1;
-            uint8_t M = (msipte_high >> 0) & 0xF; // 简化
-            uint64_t PPN = (msipte_low >> 10) & 0xFFFFFFFFFULL;
-            
-#ifdef DEBUG_MSIPTW
-            printf("[MSIPTW-4] Task %d: MSI PTE V=%d, M=%d, PPN=0x%lx\n", 
-                   task->task_id, V, M, PPN);
-#endif
-            
-            // 检查 V 位
-            if (V == 0) {
-                task->state = TASK_FAULT;
-                task->cause = 261; // MSI PTE not valid
-                fault_fifo.write(task);
-                continue;
-            }
-            
-            // 检查 M 字段
-            if (M == 0 || M == 2) {
-                task->state = TASK_FAULT;
-                task->cause = 263; // Invalid MSI PTE mode
-                fault_fifo.write(task);
-                continue;
-            }
-            
-            // M == 3: Basic Translate
-            if (M == 3) {
-                task->pa = PPN << 12 | (task->gpa & 0xFFF);
+        ddr_rsp_entry_t rsp = msiptw_rsp_ddr_fifo.read();
+        wait(MSIPTW_PARSE_DELAY, SC_NS);
+
+        // Find corresponding task
+        msiptw_walks_mtx.lock();
+        auto it = msiptw_active_walks.find(rsp.task_id);
+        if (it == msiptw_active_walks.end()) {
+            msiptw_walks_mtx.unlock();
+            printf("[MSIPTW] ERROR: task_id %u not found in active_walks\n", rsp.task_id);
+            continue;
+        }
+        iommu_task_t* task = it->second;
+        msiptw_walks_mtx.unlock();
+
+        memcpy(task->walk_ctx.read_buf, rsp.data, rsp.data_length);
+
+        bool walk_complete = false;
+        bool walk_fault = false;
+
+        // ========== Parse 16-byte MSI PTE ==========
+        // Corresponds to iommu_msi_trans.cc L127-293
+        msipte_t msipte;
+        msipte.raw[0] = 0;
+        msipte.raw[1] = 0;
+        memcpy(&msipte.raw[0], task->walk_ctx.read_buf, 16);
+
+        // Validate MSI PTE
+        if (msipte.V == 0) {
+            task->cause = 262;  // MSI PTE not valid
+            walk_fault = true;
+        }
+        else if (msipte.C == 1 || msipte.M == 0 || msipte.M == 2) {
+            task->cause = 263;  // MSI PTE misconfigured
+            walk_fault = true;
+        }
+        else if (msipte.M == 3) {
+            // M=3: Basic Translate/RW mode
+            if (msipte.translate_rw.reserved != 0) {
+                task->cause = 263;
+                walk_fault = true;
+            } else {
+                task->pa = (msipte.translate_rw.PPN * PAGESIZE) |
+                           (task->gpa & 0xFFF);
+                task->g_pte.raw = 0;
+                task->g_pte.PPN = task->gpa / PAGESIZE;
+                task->g_pte.D = task->g_pte.A = task->g_pte.U = 1;
+                task->g_pte.W = task->g_pte.R = task->g_pte.V = 1;
+                task->g_pte.X = 0;
+                task->g_pte.PBMT = PMA;
+                task->page_sz = PAGESIZE;
                 task->is_mrif = 0;
-                task->is_msi = 1;
-                task->state = TASK_MSIPT_WALK_DONE;
-#ifdef DEBUG_MSIPTW
-                printf("[MSIPTW-4] Task %d: M=3 Basic Translate, pa=0x%lx\n", 
-                       task->task_id, task->pa);
-#endif
-                msipt_cache_to_fwd_fifo.write(task);
-            }
-            // M == 1: MRIF 模式
-            else if (M == 1) {
-                // 提取 MRIF 信息
-                // TODO: 从 msipte 中提取 MRIF 地址和 NID
-                task->is_mrif = 1;
-                task->is_msi = 1;
-                task->state = TASK_MSIPT_WALK_DONE;
-#ifdef DEBUG_MSIPTW
-                printf("[MSIPTW-4] Task %d: M=1 MRIF mode\n", task->task_id);
-#endif
-                msipt_cache_to_fwd_fifo.write(task);
+                task->state = TASK_MSIPTW_DONE;
+                walk_complete = true;
             }
         }
+        else if (msipte.M == 1) {
+            // M=1: MRIF mode
+            if (iommu_inst.reg_file.capabilities.msi_mrif == 0) {
+                task->cause = 263;
+                walk_fault = true;
+            } else {
+                task->dest_mrif_addr = msipte.mrif.MRIF_ADDR_55_9 << 9;
+                task->pa = msipte.mrif.NPPN * PAGESIZE;
+                task->mrif_nid = (msipte.mrif.N10 << 10) | msipte.mrif.N90;
+                task->is_mrif = 1;
+                task->g_pte.raw = 0;
+                task->g_pte.PPN = task->gpa / PAGESIZE;
+                task->g_pte.D = task->g_pte.A = task->g_pte.U = 1;
+                task->g_pte.W = task->g_pte.R = task->g_pte.V = 1;
+                task->g_pte.X = 0;
+                task->g_pte.PBMT = PMA;
+                task->page_sz = PAGESIZE;
+                task->state = TASK_MSIPTW_DONE;
+                walk_complete = true;
+            }
+        }
+
+        // Execute permission check for MSI
+        if (walk_complete && task->is_exec == 1 &&
+            task->check_access_perms == 1) {
+            task->cause = 1;  // Instruction access fault
+            walk_complete = false;
+            walk_fault = true;
+        }
+
+        if (walk_fault) {
+            task->state = TASK_FAULT;
+            printf("[MSIPTW_RSP] task_id=%u -> WALK FAULT, cause=%d\n", task->task_id, task->cause);
+            fflush(stdout);
+        } else if (walk_complete) {
+            printf("[MSIPTW_RSP] task_id=%u -> WALK COMPLETE, pa=0x%lx, is_mrif=%d -> msipt_cache\n",
+                   task->task_id, task->pa, task->is_mrif);
+            fflush(stdout);
+        }
+
+        // Cleanup active_walks and release outstanding count
+        msiptw_walks_mtx.lock();
+        msiptw_active_walks.erase(rsp.task_id);
+        msiptw_walks_mtx.unlock();
+        msiptw_outstanding_task_count--;
+        msiptw_task_completed_event.notify(SC_ZERO_TIME);
+
+        // Send to MSIPT Cache result thread
+        msiptw_to_msipt_cache_fifo.write(task);
     }
 }

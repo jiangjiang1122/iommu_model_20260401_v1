@@ -1,141 +1,108 @@
-//
-// IOMMU 性能模型 - DC Cache 和 PC Cache 模块实现
-// 按照 SPEC v4 第 5.3 和 5.4 节定义实现
-//
+// IOMMU Performance Model - DC/PC Cache Threads (4 threads)
+// SPEC Section 12.2-12.5
 
 #include "iommu_top.hh"
-#include "iommu_perf_model.hh"
+#include <cstdio>
 
-// ============================================================================
-// DC Cache 线程实现
-// ============================================================================
-
-void iommu_top::dc_cache_thread() {
-    printf("[DC Cache] Thread started\n");
-    
+// ============================================================
+// 12.2 dc_cache_query_thread - DC Cache Lookup
+// Corresponds to lookup_ioatc_dc() in iommu_atc.cc
+// ============================================================
+void iommu_top::dc_cache_query_thread() {
     while (true) {
-        iommu_task_t* task = nullptr;
-        bool got_data = false;
-        
-        // 检查查询请求 FIFO
-        if (parser_to_dc_cache_query_fifo.num_available() > 0) {
-            // 查询请求
-            parser_to_dc_cache_query_fifo.read(task);
-            
-#ifdef DEBUG_DC_CACHE
-            printf("[DC Cache] Query for device_id %d (task %d)\n", task->device_id, task->task_id);
-#endif
-            
-            device_context_t DC;
-            memset(&DC, 0, sizeof(DC));
-            uint8_t result = lookup_dc_cache(task->device_id, &DC);
-            
-            if (result) {
-                // Hit
-                task->state = TASK_DC_HIT;
-                task->DC = DC;
-#ifdef DEBUG_DC_CACHE
-                printf("[DC Cache] HIT for device_id %d\n", task->device_id);
-#endif
-            } else {
-                // Miss
-                task->state = TASK_DC_MISS;
-#ifdef DEBUG_DC_CACHE
-                printf("[DC Cache] MISS for device_id %d\n", task->device_id);
-#endif
-            }
-            
-            dc_cache_to_collector_fifo.write(task);
-            got_data = true;
-            wait(DC_CACHE_HIT_DELAY, SC_NS);
+        iommu_task_t* task = parser_to_dc_cache_query_fifo.read();
+        wait(DC_CACHE_HIT_DELAY, SC_NS);
+
+        iommu_cache_mtx.lock();
+        uint8_t status = lookup_ioatc_dc(&iommu_inst, task->device_id, &task->DC);
+        iommu_cache_mtx.unlock();
+
+        if (status == IOATC_HIT) {
+            task->dc_valid = 1;
+            task->dc_hit = 1;
+            task->DTF = task->DC.tc.DTF;
+            printf("[DC_CACHE] task_id=%u, device_id=0x%x -> HIT\n", task->task_id, task->device_id);
+        } else {
+            task->dc_valid = 0;
+            task->dc_hit = 0;
+            printf("[DC_CACHE] task_id=%u, device_id=0x%x -> MISS\n", task->task_id, task->device_id);
         }
-        
-        // 检查更新请求 FIFO
-        if (collector_to_dc_cache_update_fifo.num_available() > 0) {
-            // 更新请求
-            collector_to_dc_cache_update_fifo.read(task);
-            
-#ifdef DEBUG_DC_CACHE
-            printf("[DC Cache] Update for device_id %d\n", task->device_id);
-#endif
-            
-            update_dc_cache(task->device_id, &task->DC);
-            got_data = true;
-            wait(DC_CACHE_HIT_DELAY, SC_NS);
-        }
-        
-        // 如果两个 FIFO 都空，等待
-        if (!got_data) {
-            wait(SC_ZERO_TIME);
-        }
+        fflush(stdout);
+
+        dc_cache_to_collector_fifo.write(task);
     }
 }
 
-// ============================================================================
-// PC Cache 线程实现
-// ============================================================================
-
-void iommu_top::pc_cache_thread() {
-    printf("[PC Cache] Thread started\n");
-    
+// ============================================================
+// 12.3 dc_cache_update_thread - DC Cache Update (after xDTW)
+// Corresponds to cache_ioatc_dc() in iommu_atc.cc
+// ============================================================
+void iommu_top::dc_cache_update_thread() {
     while (true) {
-        iommu_task_t* task = nullptr;
-        bool got_data = false;
-        
-        // 检查查询请求 FIFO
-        if (parser_to_pc_cache_query_fifo.num_available() > 0) {
-            // 查询请求
-            parser_to_pc_cache_query_fifo.read(task);
-            
-#ifdef DEBUG_PC_CACHE
-            printf("[PC Cache] Query for device_id %d, process_id %d (task %d)\n", 
-                   task->device_id, task->process_id, task->task_id);
-#endif
-            
-            process_context_t PC;
-            memset(&PC, 0, sizeof(PC));
-            uint8_t result = lookup_pc_cache(task->device_id, task->process_id, &PC);
-            
-            if (result) {
-                // Hit
-                task->state = TASK_PC_HIT;
-                task->PC = PC;
-#ifdef DEBUG_PC_CACHE
-                printf("[PC Cache] HIT for device_id %d, process_id %d\n", 
-                       task->device_id, task->process_id);
-#endif
-            } else {
-                // Miss
-                task->state = TASK_PC_MISS;
-#ifdef DEBUG_PC_CACHE
-                printf("[PC Cache] MISS for device_id %d, process_id %d\n", 
-                       task->device_id, task->process_id);
-#endif
-            }
-            
-            pc_cache_to_collector_fifo.write(task);
-            got_data = true;
-            wait(PC_CACHE_HIT_DELAY, SC_NS);
+        iommu_task_t* task = collector_to_dc_cache_update_fifo.read();
+        wait(DC_CACHE_HIT_DELAY, SC_NS);
+
+        printf("[DC_CACHE_UPD] task_id=%u, device_id=0x%x -> update DC cache\n",
+               task->task_id, task->device_id);
+        fflush(stdout);
+
+        iommu_cache_mtx.lock();
+        cache_ioatc_dc(&iommu_inst, task->device_id, &task->DC);
+        iommu_cache_mtx.unlock();
+
+        // Note: task pointer ownership remains with Collector
+        // dc_cache_update_thread does NOT delete or forward the task
+    }
+}
+
+// ============================================================
+// 12.4 pc_cache_query_thread - PC Cache Lookup
+// Corresponds to lookup_ioatc_pc() in iommu_atc.cc
+// ============================================================
+void iommu_top::pc_cache_query_thread() {
+    while (true) {
+        iommu_task_t* task = parser_to_pc_cache_query_fifo.read();
+        wait(PC_CACHE_HIT_DELAY, SC_NS);
+
+        iommu_cache_mtx.lock();
+        uint8_t status = lookup_ioatc_pc(&iommu_inst, task->device_id,
+                                          task->process_id, &task->PC);
+        iommu_cache_mtx.unlock();
+
+        if (status == IOATC_HIT) {
+            task->pc_valid = 1;
+            task->pc_hit = 1;
+            printf("[PC_CACHE] task_id=%u, device_id=0x%x, pid=%u -> HIT\n",
+                   task->task_id, task->device_id, task->process_id);
+        } else {
+            task->pc_valid = 0;
+            task->pc_hit = 0;
+            printf("[PC_CACHE] task_id=%u, device_id=0x%x, pid=%u -> MISS\n",
+                   task->task_id, task->device_id, task->process_id);
         }
-        
-        // 检查更新请求 FIFO
-        if (collector_to_pc_cache_update_fifo.num_available() > 0) {
-            // 更新请求
-            collector_to_pc_cache_update_fifo.read(task);
-            
-#ifdef DEBUG_PC_CACHE
-            printf("[PC Cache] Update for device_id %d, process_id %d\n", 
-                   task->device_id, task->process_id);
-#endif
-            
-            update_pc_cache(task->device_id, task->process_id, &task->PC);
-            got_data = true;
-            wait(PC_CACHE_HIT_DELAY, SC_NS);
-        }
-        
-        // 如果两个 FIFO 都空，等待
-        if (!got_data) {
-            wait(SC_ZERO_TIME);
-        }
+        fflush(stdout);
+
+        pc_cache_to_collector_fifo.write(task);
+    }
+}
+
+// ============================================================
+// 12.5 pc_cache_update_thread - PC Cache Update (after xDTW)
+// Corresponds to cache_ioatc_pc() in iommu_atc.cc
+// ============================================================
+void iommu_top::pc_cache_update_thread() {
+    while (true) {
+        iommu_task_t* task = collector_to_pc_cache_update_fifo.read();
+        wait(PC_CACHE_HIT_DELAY, SC_NS);
+
+        printf("[PC_CACHE_UPD] task_id=%u, device_id=0x%x, pid=%u -> update PC cache\n",
+               task->task_id, task->device_id, task->process_id);
+        fflush(stdout);
+
+        iommu_cache_mtx.lock();
+        cache_ioatc_pc(&iommu_inst, task->device_id, task->process_id, &task->PC);
+        iommu_cache_mtx.unlock();
+
+        // Note: task pointer ownership remains with Collector
     }
 }

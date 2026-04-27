@@ -16,8 +16,6 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
     , dstAddr       (0)
     , io_id(-1)
     , sequence_id(-1)
-    , axi_id(0)
-    , walk_type(0)
     {
     }
 
@@ -28,8 +26,6 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         e->dstAddr         = dstAddr       ;
         e->io_id = io_id;
         e->sequence_id =sequence_id;
-        e->axi_id = axi_id;
-        e->walk_type = walk_type;
         return e;
     }
 
@@ -39,8 +35,6 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         dstAddr = e.dstAddr;
         io_id = e.io_id;
         sequence_id=e.sequence_id;
-        axi_id = e.axi_id;
-        walk_type = e.walk_type;
     }
 
     virtual void copy_from(tlm::tlm_extension_base const&ext)
@@ -57,10 +51,6 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
     sc_dt::uint64 dstAddr;
     uint32_t io_id;
     uint32_t sequence_id;
-
-    // AXI ID for DDR access tracking
-    uint16_t axi_id;
-    uint8_t walk_type;
 
     // common info
     uint32_t msg_type:8;

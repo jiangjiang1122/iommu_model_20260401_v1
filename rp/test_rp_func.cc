@@ -42,8 +42,8 @@ void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req,
     trans.set_data_ptr(data);
     trans.set_data_length(req->tr.length);
                         
-    // 设置命令为读取或写入
-    tlm_command cmd = (req->no_write == 0) ? TLM_WRITE_COMMAND : TLM_READ_COMMAND;
+    // 设置命令为读取或写入 (基于 read_writeAMO，而不是 no_write)
+    tlm_command cmd = (req->tr.read_writeAMO == READ) ? TLM_READ_COMMAND : TLM_WRITE_COMMAND;
     trans.set_command(cmd);
                         
     // 创建扩展负载
@@ -58,14 +58,15 @@ void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req,
     // 将扩展添加到传输中
     trans.set_extension(ext);
 
-    // 发送传输请求到 IOMMU
-    axi_master_to_pcie_noc_0_socket->b_transport(trans, delay);
+    // 发送传输请求到 IOMMU (AT non-blocking mode)
+    send_translation_request_at(trans);
     
-    cout << "[RP Module] Disallowed transaction test - at:" << ext->at
-                                  << ", pid_valid:" << ext->pid_valid
-                                  << ", exec_req:" << ext->exec_req
-                                  << ", priv_req:" << ext->priv_req
-                                  << ", no_write:" << req->no_write
+    cout << "[RP Module] Transaction completed - at:" << (int)ext->at
+                                  << ", pid_valid:" << (int)ext->pid_valid
+                                  << ", exec_req:" << (int)ext->exec_req
+                                  << ", priv_req:" << (int)ext->priv_req
+                                  << ", no_write:" << (int)req->no_write
+                                  << ", read_writeAMO:" << (int)req->tr.read_writeAMO
                                   << ", response: " << trans.get_response_string() << endl;
     
     // TODO : get resp from trans
@@ -73,6 +74,15 @@ void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req,
     // ext 的生命周期由 TLM 框架管理，或者应该使用智能指针
     // delete ext;  // 已注释，避免 double-free 或使用后释放
                             
+    // 从TLM响应中提取翻译结果
+    rsp_msg->status = (trans.get_response_status() == tlm::TLM_OK_RESPONSE) ? SUCCESS : UNSUPPORTED_REQUEST;
+    rsp_msg->trsp.PPN = trans.get_address() / PAGESIZE;
+    rsp_msg->trsp.R = 1;
+    rsp_msg->trsp.W = 1;
+    
+    printf("[DEBUG_IOVA] TLM response addr=0x%lx, status=%s, extracted PA=0x%lx\n",
+           (uint64_t)trans.get_address(), trans.get_response_string().c_str(), rsp_msg->trsp.PPN * PAGESIZE);
+    fflush(stdout);
     printf("[DEBUG_IOVA] Exiting iommu_translate_iova_rp\n");
     fflush(stdout);
 }

@@ -1,152 +1,196 @@
 #ifndef __IOMMU_PERF_MODEL_HH__
 #define __IOMMU_PERF_MODEL_HH__
 
-#include "iommu_top.hh"
+#include "iommu_struct.hh"
 #include "iommu_task.hh"
-#include "iommu_translate.hh"
-#include "iommu_struct.hh"
-#include "iommu_struct.hh"
 
-using namespace std;
+// ===================== TTYP Classification =====================
+// Corresponds to iommu_translate.cc L46-89
+static inline void classify_ttype_and_attribs(iommu_task_t* task) {
+    // Classify TTYP
+    task->TTYP = TTYPE_NONE;
+    if (task->at == ADDR_TYPE_UNTRANSLATED && task->read_writeAMO == READ) {
+        if (task->exec_req)
+            task->TTYP = UNTRANSLATED_READ_FOR_EXECUTE_TRANSACTION;
+        else
+            task->TTYP = UNTRANSLATED_READ_TRANSACTION;
+    }
+    if (task->at == ADDR_TYPE_UNTRANSLATED && task->read_writeAMO == WRITE)
+        task->TTYP = UNTRANSLATED_WRITE_AMO_TRANSACTION;
+    if (task->at == ADDR_TYPE_TRANSLATED && task->read_writeAMO == READ) {
+        if (task->pid_valid && task->exec_req)
+            task->TTYP = TRANSLATED_READ_FOR_EXECUTE_TRANSACTION;
+        else
+            task->TTYP = TRANSLATED_READ_TRANSACTION;
+    }
+    if (task->at == ADDR_TYPE_TRANSLATED && task->read_writeAMO == WRITE)
+        task->TTYP = TRANSLATED_WRITE_AMO_TRANSACTION;
+    if (task->at == ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST)
+        task->TTYP = PCIE_ATS_TRANSLATION_REQUEST;
 
-// ============================================================================
-// 辅助函数声明
-// ============================================================================
-
-// 从请求中提取访问属性
-inline void get_attribs_from_req(iommu_task_t* task, uint8_t* is_read, uint8_t* is_write, uint8_t* is_exec, uint8_t* priv) {
-    *is_read = (task->read_writeAMO == READ) ? 1 : 0;
-    *is_write = (task->read_writeAMO == WRITE) ? 1 : 0;
-    *is_exec = task->exec_req;
-    *priv = task->priv_req;
+    // Extract access attributes (from get_attribs_from_req logic)
+    task->is_read = (task->read_writeAMO == READ && task->exec_req &&
+                     task->at == ADDR_TYPE_UNTRANSLATED) ?
+                    0 : (task->read_writeAMO == READ) ? 1 : 0;
+    task->is_write = (task->read_writeAMO == WRITE) ? 1 : 0;
+    task->is_write = ((task->at == ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST) &&
+                      (task->no_write == 0)) ? 1 : task->is_write;
+    task->is_exec = (task->read_writeAMO == READ && (task->exec_req &&
+                     (task->at == ADDR_TYPE_UNTRANSLATED || task->pid_valid))) ? 1 : 0;
+    task->priv = (task->pid_valid && task->priv_req) ? S_MODE : U_MODE;
 }
 
-// 提取 DDI 索引
-inline void extract_ddi(iommu_t* iommu, uint32_t device_id, uint8_t* DDI) {
+// ===================== DDI Extraction =====================
+// Corresponds to iommu_translate.cc L143-158
+static inline void extract_DDI(iommu_task_t* task, iommu_t* iommu) {
     if (iommu->reg_file.capabilities.msi_flat == 0) {
-        DDI[0] = get_bits(6,  0, device_id);
-        DDI[1] = get_bits(15, 7, device_id);
-        DDI[2] = get_bits(23, 16, device_id);
+        task->DDI[0] = get_bits(6,  0, task->device_id);
+        task->DDI[1] = get_bits(15, 7, task->device_id);
+        task->DDI[2] = get_bits(23, 16, task->device_id);
     } else {
-        DDI[0] = get_bits(5,  0, device_id);
-        DDI[1] = get_bits(14, 6, device_id);
-        DDI[2] = get_bits(23, 15, device_id);
+        task->DDI[0] = get_bits(5,  0, task->device_id);
+        task->DDI[1] = get_bits(14, 6, task->device_id);
+        task->DDI[2] = get_bits(23, 15, task->device_id);
     }
 }
 
-// 检查设备 ID 宽度
-inline bool check_device_id_width(iommu_t* iommu, uint8_t* DDI) {
-    if (iommu->reg_file.ddtp.iommu_mode == DDT_2LVL && DDI[2] != 0) {
-        return false;
+// ===================== VPN Extraction =====================
+// Extract VPN fields and determine LEVELS/PTESIZE based on iosatp mode and SXL
+static inline void extract_vpn(uint64_t iova, uint8_t mode, uint8_t SXL,
+                                uint16_t vpn[5], uint8_t* LEVELS, uint8_t* PTESIZE) {
+    if (SXL == 1) {
+        // RV32: Sv32
+        vpn[0] = get_bits(21, 12, iova);
+        vpn[1] = get_bits(31, 22, iova);
+        *LEVELS = 2;
+        *PTESIZE = 4;
+    } else {
+        // RV64 modes
+        vpn[0] = get_bits(20, 12, iova);
+        vpn[1] = get_bits(29, 21, iova);
+        vpn[2] = get_bits(38, 30, iova);
+        vpn[3] = get_bits(47, 39, iova);
+        vpn[4] = get_bits(56, 48, iova);
+        *PTESIZE = 8;
+
+        if (mode == IOSATP_Sv39) {
+            *LEVELS = 3;
+        } else if (mode == IOSATP_Sv48) {
+            *LEVELS = 4;
+        } else if (mode == IOSATP_Sv57) {
+            *LEVELS = 5;
+        } else {
+            *LEVELS = 3; // default to Sv39
+        }
     }
-    if (iommu->reg_file.ddtp.iommu_mode == DDT_1LVL && (DDI[2] != 0 || DDI[1] != 0)) {
-        return false;
+}
+
+// ===================== G-stage VPN Extraction =====================
+static inline void extract_gs_vpn(uint64_t gpa, uint8_t mode,
+                                   uint16_t gs_vpn[5], uint8_t* GS_LEVELS) {
+    gs_vpn[0] = get_bits(20, 12, gpa);
+    gs_vpn[1] = get_bits(29, 21, gpa);
+    gs_vpn[2] = get_bits(38, 30, gpa);
+    gs_vpn[3] = get_bits(47, 39, gpa);
+    gs_vpn[4] = get_bits(56, 48, gpa);
+
+    if (mode == IOHGATP_Sv39x4) {
+        *GS_LEVELS = 3;
+    } else if (mode == IOHGATP_Sv48x4) {
+        *GS_LEVELS = 4;
+    } else if (mode == IOHGATP_Sv57x4) {
+        *GS_LEVELS = 5;
+    } else if (mode == IOHGATP_Sv32x4) {
+        *GS_LEVELS = 2;
+    } else {
+        *GS_LEVELS = 3;
+    }
+}
+
+// ===================== Canonical Address Check =====================
+static inline bool check_canonical(uint64_t iova, uint8_t mode, uint8_t SXL) {
+    if (SXL == 1) {
+        // Sv32: check bits above 31
+        return (iova >> 32) == 0;
+    }
+    if (mode == IOSATP_Sv39) {
+        // Check bits 63:39 are all same as bit 38
+        uint64_t sign = (iova >> 38) & 1;
+        uint64_t upper = iova >> 39;
+        return (sign == 0) ? (upper == 0) : (upper == 0x1FFFFFF);
+    }
+    if (mode == IOSATP_Sv48) {
+        uint64_t sign = (iova >> 47) & 1;
+        uint64_t upper = iova >> 48;
+        return (sign == 0) ? (upper == 0) : (upper == 0xFFFF);
+    }
+    if (mode == IOSATP_Sv57) {
+        uint64_t sign = (iova >> 56) & 1;
+        uint64_t upper = iova >> 57;
+        return (sign == 0) ? (upper == 0) : (upper == 0x7F);
     }
     return true;
 }
 
-// 计算 DDT 索引
-inline uint8_t calculate_ddt_index(iommu_t* iommu, uint32_t device_id) {
-    if (iommu->reg_file.capabilities.msi_flat == 0) {
-        return (device_id >> 0) & 0x7F;
-    } else {
-        return (device_id >> 0) & 0x3F;
-    }
+// ===================== Bare Mode Page Size =====================
+static inline uint64_t get_bare_page_size(iommu_t* iommu) {
+    // Use the configured bare page size based on iohgatp mode
+    return iommu->sv39_bare_pg_sz ? iommu->sv39_bare_pg_sz : PAGESIZE;
 }
 
-// 计算 PDT 索引
-inline uint16_t calculate_pdt_index(fsc_t fsc, uint32_t process_id) {
-    if (fsc.pdtp.MODE == PD8) {
-        return process_id & 0xFF;
-    } else if (fsc.pdtp.MODE == PD17) {
-        return (process_id >> 8) & 0x1FF;
-    } else {
-        return (process_id >> 11) & 0x1FF;
-    }
+static inline uint64_t get_gstage_bare_page_size(iommu_t* iommu) {
+    return iommu->sv39x4_bare_pg_sz ? iommu->sv39x4_bare_pg_sz : PAGESIZE;
 }
 
-// 计算 VPN 索引（根据页表模式）
-inline void calculate_vpn_indices(uint64_t iova, uint8_t mode, uint16_t* vpn) {
-    // iova bits: [63:12] = VPN + offset
-    if (mode == IOSATP_Sv39 || mode == IOHGATP_Sv39x4) {
-        // Sv39: 3 级页表 VPN[2:0]
-        vpn[3] = 0;
-        vpn[2] = (iova >> 30) & 0x1FF;  // bits 38:30
-        vpn[1] = (iova >> 21) & 0x1FF;  // bits 29:21
-        vpn[0] = (iova >> 12) & 0x1FF;  // bits 20:12
-    } else if (mode == IOSATP_Sv48 || mode == IOHGATP_Sv48x4) {
-        // Sv48: 4 级页表 VPN[3:0]
-        vpn[3] = (iova >> 39) & 0x1FF;  // bits 47:39
-        vpn[2] = (iova >> 30) & 0x1FF;  // bits 38:30
-        vpn[1] = (iova >> 21) & 0x1FF;  // bits 29:21
-        vpn[0] = (iova >> 12) & 0x1FF;  // bits 20:12
-    } else {
-        // Bare or Sv32
-        vpn[0] = vpn[1] = vpn[2] = vpn[3] = 0;
-    }
-}
-
-// 获取页表 walk 层级数
-inline uint8_t get_page_table_levels(uint8_t mode) {
-    switch (mode) {
-        case 3: // IOSATP_Sv39
-        case 8: // IOHGATP_Sv39x4
-            return 3;
-        case 4: // IOSATP_Sv48
-        case 9: // IOHGATP_Sv48x4
-            return 4;
-        default:
-            return 0;
-    }
-}
-
-// MSI 地址判断
-inline bool is_msi_address(uint64_t gpa, device_context_t* DC) {
-    if (DC->msiptp.MODE == MSIPTP_Off) {
-        return false;
-    }
-    
+// ===================== MSI Address Check =====================
+// Check if a GPA is an MSI address for the given device context
+static inline uint8_t check_is_msi_address(uint64_t gpa, device_context_t* DC, iommu_t* iommu) {
+    if (DC->msiptp.MODE == MSIPTP_Off) return 0;
+    // An incoming write to GPA is recognized as MSI if:
+    // (A >> 12) & ~msi_addr_mask = (msi_addr_pattern & ~msi_addr_mask)
+    uint64_t a_shifted = gpa >> 12;
     uint64_t mask = DC->msi_addr_mask.mask;
     uint64_t pattern = DC->msi_addr_pattern.pattern;
-    
-    // (A >> 12) & ~mask == pattern & ~mask
-    uint64_t gpa_page = gpa >> 12;
-    uint64_t not_mask = ~mask;
-    
-    return (gpa_page & not_mask) == (pattern & not_mask);
+    return ((a_shifted & ~mask) == (pattern & ~mask)) ? 1 : 0;
 }
 
-// PTE 解析辅助函数
-inline uint64_t get_pte_ppn(uint64_t pte_raw) {
-    return (pte_raw >> 10) & 0xFFFFFFFFFULL; // bits 53:10
+// ===================== Guest Fault Cause Helper =====================
+static inline void set_guest_fault_cause(iommu_task_t* task, uint8_t base_fault) {
+    if (task->is_exec) {
+        task->cause = 20; // Instruction guest-page fault
+    } else if (task->is_read) {
+        task->cause = 21; // Load guest-page fault
+    } else {
+        task->cause = 23; // Store/AMO guest-page fault
+    }
 }
 
-inline bool is_pte_leaf(uint64_t pte_raw) {
-    // Leaf PTE has R, W, or X bit set
-    return (pte_raw >> 1) & 0x7; // bits 3:1 = R, W, X
+// ===================== DC Configuration Checks =====================
+// These are declared extern in the functional model headers
+extern uint8_t do_device_context_configuration_checks(iommu_t *iommu, device_context_t *DC);
+extern uint8_t do_process_context_configuration_checks(iommu_t *iommu, device_context_t *DC, process_context_t *PC);
+
+// ===================== MGPAW Calculation for MSI =====================
+static inline uint64_t calculate_mgpaw(iommu_t* iommu) {
+    // MGPAW = capabilities.pas (physical address size in bits)
+    return iommu->reg_file.capabilities.pas;
 }
 
-inline bool is_pte_valid(uint64_t pte_raw) {
-    return pte_raw & 0x1; // V bit
-}
-
-// 虚拟中断文件重叠处理
-inline void handle_virtual_interrupt_file_overlap(device_context_t* DC, uint64_t gpa, uint64_t* gst_page_sz) {
-    // 检查GPA是否落在MSI虚拟中断文件范围内
-    if (DC->msiptp.MODE != MSIPTP_Off) {
-        uint64_t gpa_page = gpa >> 12;
-        uint64_t mask = DC->msi_addr_mask.mask;
-        uint64_t pattern = DC->msi_addr_pattern.pattern;
-        uint64_t not_mask = ~mask;
-        
-        // 检查是否匹配MSI地址模式
-        if ((gpa_page & not_mask) == (pattern & not_mask)) {
-            // 如果页面大小大于4KB，限制为4KB以避免与其他页面重叠
-            if (*gst_page_sz > 4096) {
-                *gst_page_sz = 4096;
+// ===================== MSI Extract Function =====================
+// Extract bits from a value using a mask pattern
+// This implements the extract() function from iommu_msi_trans.cc
+static inline uint64_t msi_extract(uint64_t value, uint64_t mask) {
+    uint64_t result = 0;
+    uint8_t bit_pos = 0;
+    for (int i = 0; i < 52; i++) {
+        if (mask & (1ULL << i)) {
+            if (value & (1ULL << i)) {
+                result |= (1ULL << bit_pos);
             }
+            bit_pos++;
         }
     }
+    return result;
 }
 
 #endif // __IOMMU_PERF_MODEL_HH__

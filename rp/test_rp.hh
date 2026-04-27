@@ -15,7 +15,7 @@ using namespace tlm;
 using namespace tlm_utils;
 
 int test_num = 0;
-// 全局变量声明
+// Global variable declarations
 ats_msg_t exp_msg;
 ats_msg_t rcvd_msg;
 uint8_t exp_msg_received;
@@ -53,40 +53,104 @@ extern uint64_t next_free_gpage[65536];
 
 class RP_Module : public sc_module {
 public:
-    // 与IOMMU模块的target socket对应的initiator socket (master)
+    // Initiator socket (master) - to IOMMU target socket
     simple_initiator_socket<RP_Module, 64> axi_master_to_pcie_noc_0_socket;
 
+    // Target socket for ATS responses from IOMMU
     simple_target_socket<RP_Module, 64> axi_slave_to_pcie_noc_0_socket;
 
-    // 指向IOMMU和DDR模块的指针，用于直接操作
+    // Pointers to IOMMU and DDR modules for direct operations
     iommu_top* iommu_ptr;
     DDR_Module* ddr_ptr;
+
+    // AT response synchronization
+    sc_event response_event;
+    tlm::tlm_generic_payload* pending_response_trans;
+
+    // Concurrent test synchronization
+    sc_event concurrent_test_event;
 
     SC_HAS_PROCESS(RP_Module);
 
     RP_Module(sc_module_name name, iommu_top* iommu_module, DDR_Module* ddr_module) :
-        sc_module(name), iommu_ptr(iommu_module), ddr_ptr(ddr_module) {
-        //SC_THREAD(send_translation_request_0_thread);
+        sc_module(name), iommu_ptr(iommu_module), ddr_ptr(ddr_module),
+        pending_response_trans(nullptr)
+    {
+        // Register nb_transport_bw for receiving AT responses from IOMMU
+        axi_master_to_pcie_noc_0_socket.register_nb_transport_bw(
+            this, &RP_Module::nb_transport_bw);
+
+        // Register b_transport for ATS target socket (receives ATS messages)
+        axi_slave_to_pcie_noc_0_socket.register_b_transport(
+            this, &RP_Module::ats_slave_b_transport);
+
         SC_THREAD(send_translation_request_1_thread);
+        SC_THREAD(send_translation_request_2_thread);
+        SC_THREAD(send_translation_request_3_thread);
     }
 
-    //void send_translation_request_0_thread();
+    // nb_transport_bw callback: receives AT responses from IOMMU
+    tlm::tlm_sync_enum nb_transport_bw(
+        tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+    {
+        if (phase == tlm::BEGIN_RESP) {
+            printf("[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x%lx, status=%s\n",
+                   (uint64_t)trans.get_address(), trans.get_response_string().c_str());
+            fflush(stdout);
+            // Save response and notify waiting thread
+            pending_response_trans = &trans;
+            response_event.notify(SC_ZERO_TIME);
+            // Send END_RESP
+            phase = tlm::END_RESP;
+            return tlm::TLM_COMPLETED;
+        }
+        return tlm::TLM_ACCEPTED;
+    }
+
+    // ATS slave b_transport (for receiving ATS messages from IOMMU master_2)
+    void ats_slave_b_transport(tlm_generic_payload& trans, sc_time& delay) {
+        // Handle ATS invalidation completion and page group responses
+        trans.set_response_status(tlm::TLM_OK_RESPONSE);
+    }
+
+    // Send translation request using AT (non-blocking) method
+    void send_translation_request_at(tlm_generic_payload& trans) {
+        tlm::tlm_phase phase = tlm::BEGIN_REQ;
+        sc_time delay = SC_ZERO_TIME;
+
+        // Send non-blocking request
+        tlm::tlm_sync_enum status =
+            axi_master_to_pcie_noc_0_socket->nb_transport_fw(trans, phase, delay);
+
+        if (status == TLM_UPDATED && phase == END_REQ) {
+            // Request accepted, wait for response
+            wait(response_event);
+        } else if (status == TLM_COMPLETED) {
+            // Transaction completed immediately (shouldn't happen in AT)
+        } else {
+            // TLM_ACCEPTED: wait for response
+            wait(response_event);
+        }
+    }
+
     void send_translation_request_1_thread();
-    
-    // 添加函数声明  
+    void send_translation_request_2_thread();
+    void send_translation_request_3_thread();
+
+    // Function declarations
     void send_translation_request_rp(iommu_top *iommu, uint32_t did, uint8_t pid_valid, uint32_t pid, uint8_t no_write,uint8_t exec_req,
                                     uint8_t priv_req, uint8_t is_cxl_dev, uint8_t at, uint64_t iova,uint32_t length,
                                     uint8_t read_writeAMO,hb_to_iommu_req_t *req, iommu_to_hb_rsp_t *rsp);
     void iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req, iommu_to_hb_rsp_t *rsp_msg);
     uint8_t read_memory_test_rp(uint64_t addr, uint8_t size, char *data);
     uint8_t write_memory_test_rp(char *data, uint64_t addr, uint32_t size);
-    int8_t check_faults_rp(iommu_top *iommu,uint16_t cause, uint8_t  exp_PV, uint32_t exp_PID, uint8_t  exp_PRIV,uint32_t exp_DID, 
+    int8_t check_faults_rp(iommu_top *iommu,uint16_t cause, uint8_t  exp_PV, uint32_t exp_PID, uint8_t  exp_PRIV,uint32_t exp_DID,
                            uint64_t exp_iotval, uint8_t ttyp, uint64_t exp_iotval2);
     int8_t check_rsp_and_faults_rp(iommu_top *iommu,hb_to_iommu_req_t *req,iommu_to_hb_rsp_t *rsp,status_t status,uint16_t cause,uint64_t exp_iotval2);
     uint64_t add_device(iommu_top *iommu, uint32_t device_id, uint32_t gscid, uint8_t en_ats, uint8_t en_pri, uint8_t t2gpa,uint8_t dtf, uint8_t prpr,
                         uint8_t gade, uint8_t sade, uint8_t dpe, uint8_t sbe, uint8_t sxl,uint8_t iohgatp_mode, uint8_t iosatp_mode, uint8_t pdt_mode,
                         uint8_t msiptp_mode, uint8_t msiptp_pages, uint64_t msi_addr_mask,uint64_t msi_addr_pattern);
-    uint64_t get_free_ppn(uint64_t num_ppn); 
+    uint64_t get_free_ppn(uint64_t num_ppn);
     uint64_t get_free_gppn(uint64_t num_gppn, iohgatp_t iohgatp);
     uint64_t add_g_stage_pte (iommu_top *iommu,iohgatp_t iohgatp, uint64_t gpa, gpte_t gpte, uint8_t add_level) ;
     uint64_t add_dev_context(iommu_top *iommu,device_context_t *DC, uint32_t device_id) ;

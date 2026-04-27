@@ -1,169 +1,155 @@
-//
-// IOMMU 性能模型 - PT Cache (IOTLB) 模块实现
-// 按照 SPEC v4 第 5.5 节定义实现
-//
+// IOMMU Performance Model - PT Cache Threads (3 threads)
+// SPEC Section 12.10-12.12
+// Corresponds to lookup_ioatc_iotlb() + cache_ioatc_iotlb() + MSI check
 
 #include "iommu_top.hh"
-#include "iommu_perf_model.hh"
+#include <cstdio>
 
-// ============================================================================
-// PT Cache 线程 1: 查询
-// ============================================================================
-
+// ============================================================
+// 12.10 pt_cache_query_thread - IOTLB Query
+// Corresponds to lookup_ioatc_iotlb() in iommu_atc.cc
+// ============================================================
 void iommu_top::pt_cache_query_thread() {
-    printf("[PT Cache-1] Query thread started\n");
-    
     while (true) {
-        iommu_task_t* task = nullptr;
-        collector_to_pt_cache_query_fifo.read(task);
-        
-#ifdef DEBUG_PT_CACHE
-        printf("[PT Cache-1] Query for task %d: iova=0x%lx, PSCV=%d, PSCID=%d, GV=%d, GSCID=%d\n",
-               task->task_id, task->iova, task->PSCV, task->PSCID, task->GV, task->GSCID);
-#endif
-
-        uint32_t cause = 0;
-        uint64_t pa = 0;
-        uint64_t page_sz = 0;
-        spte_t vs_pte;
-        gpte_t g_pte;
-        vs_pte.raw = 0;
-        g_pte.raw = 0;
-        
-        // 调用 IOTLB 查找函数
-        // 参数：iova, check_access_perms, priv, is_read, is_write, is_exec, SUM, 
-        //      PSCV, PSCID, GV, GSCID, cause, pa, page_sz, vs_pte, g_pte
-        uint8_t result = lookup_iotlb(
-            task->iova, 
-            0,  // check_access_perms = 0 (在 Cache 查询时不检查权限)
-            task->priv, 
-            task->is_read, 
-            task->is_write, 
-            task->is_exec, 
-            task->SUM, 
-            task->PSCV, 
-            task->PSCID, 
-            task->GV, 
-            task->GSCID,
-            &cause, 
-            &pa, 
-            &page_sz, 
-            &vs_pte, 
-            &g_pte
-        );
-        
-        task->vs_pte = vs_pte;
-        task->g_pte = g_pte;
-        
-        if (result == IOATC_HIT) {
-            // TLB Hit
-            task->state = TASK_TLB_HIT;
-            task->pa = pa;
-            task->page_sz = page_sz;
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-1] Task %d: TLB HIT, pa=0x%lx, page_sz=%lu\n", 
-                   task->task_id, pa, page_sz);
-#endif
-        } else if (result == IOATC_MISS) {
-            // TLB Miss
-            task->state = TASK_TLB_MISS;
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-1] Task %d: TLB MISS\n", task->task_id);
-#endif
-        } else {
-            // Fault
-            task->state = TASK_FAULT;
-            task->cause = cause;
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-1] Task %d: FAULT, cause=%d\n", task->task_id, cause);
-#endif
-        }
-        
-        // 发送到内部结果 FIFO
-        pt_cache_lookup_result_fifo.write(task);
+        iommu_task_t* task = collector_to_pt_cache_query_fifo.read();
+        task->state = TASK_TLB_QUERY;
         wait(PT_CACHE_HIT_DELAY, SC_NS);
-    }
-}
 
-// ============================================================================
-// PT Cache 线程 2: 结果处理
-// ============================================================================
+        iommu_cache_mtx.lock();
+        uint8_t ioatc_status = lookup_ioatc_iotlb(
+            &iommu_inst, task->iova, task->check_access_perms,
+            task->priv, task->is_read, task->is_write, task->is_exec,
+            task->SUM, task->PSCV, task->PSCID, task->GV, task->GSCID,
+            &task->cause, &task->pa, &task->page_sz,
+            &task->vs_pte, &task->g_pte, &task->is_msi);
+        iommu_cache_mtx.unlock();
 
-void iommu_top::pt_cache_result_thread() {
-    printf("[PT Cache-2] Result thread started\n");
-    
-    while (true) {
-        iommu_task_t* task = nullptr;
-        pt_cache_lookup_result_fifo.read(task);
-        
-#ifdef DEBUG_PT_CACHE
-        printf("[PT Cache-2] Processing task %d, state=%d\n", task->task_id, task->state);
-#endif
-        
-        if (task->state == TASK_TLB_HIT) {
-            // 命中，直接转发
+        if (ioatc_status == IOATC_HIT) {
+            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB HIT, pa=0x%lx -> forwarder\n",
+                   task->task_id, task->iova, task->pa);
+            fflush(stdout);
+            task->is_mrif = 0;
             task->state = TASK_FORWARD;
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-2] Task %d: Forwarding (TLB HIT)\n", task->task_id);
-#endif
             pt_cache_to_fwd_fifo.write(task);
-            
-        } else if (task->state == TASK_TLB_MISS) {
-            // 未命中，提交 PTW 进行页表 walk
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-2] Task %d: Sending to PTW (TLB MISS)\n", task->task_id);
-#endif
-            pt_cache_to_ptw_fifo.write(task);
-            
-        } else if (task->state == TASK_FAULT) {
-            // 错误上报
-#ifdef DEBUG_PT_CACHE
-            printf("[PT Cache-2] Task %d: Reporting fault (cause=%d)\n", task->task_id, task->cause);
-#endif
-            fault_fifo.write(task);
         }
-        
-        wait(PT_CACHE_HIT_DELAY, SC_NS);
+        else if (ioatc_status == IOATC_FAULT) {
+            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB FAULT\n", task->task_id, task->iova);
+            fflush(stdout);
+            task->state = TASK_FAULT;
+            collector_to_fault_fifo.write(task);
+        }
+        else {
+            // IOATC_MISS: send to PTW
+            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB MISS -> PTW\n", task->task_id, task->iova);
+            fflush(stdout);
+            task->state = TASK_TLB_MISS;
+            pt_cache_to_ptw_fifo.write(task);
+        }
     }
 }
 
-// ============================================================================
-// PT Cache 线程 3: PTW 响应处理
-// ============================================================================
-
-void iommu_top::pt_cache_ptw_rsp_thread() {
-    printf("[PT Cache-3] PTW response thread started\n");
-    
+// ============================================================
+// 12.11 pt_cache_result_thread
+// Note: In SPEC, this thread's functionality is merged into
+// pt_cache_query_thread (query + immediate routing).
+// This thread serves as a placeholder for future separation.
+// ============================================================
+void iommu_top::pt_cache_result_thread() {
     while (true) {
-        iommu_task_t* task = nullptr;
-        ptw_to_pt_cache_fifo.read(task);
-        
-#ifdef DEBUG_PT_CACHE
-        printf("[PT Cache-3] Received PTW response for task %d, pa=0x%lx, page_sz=%lu\n", 
-               task->task_id, task->pa, task->page_sz);
-#endif
+        // This thread is a placeholder - routing is done in pt_cache_query_thread
+        // Wait indefinitely (never executes meaningful work)
+        wait(SC_ZERO_TIME);
+        wait(1, SC_SEC);
+    }
+}
 
-        // 更新 IOTLB
-        update_iotlb(
-            task->iova, 
-            task->vs_pte, 
-            task->g_pte, 
-            task->pa, 
-            task->page_sz,
-            task->PSCV, 
-            task->PSCID, 
-            task->GV, 
-            task->GSCID
-        );
-        
-#ifdef DEBUG_PT_CACHE
-        printf("[PT Cache-3] Updated IOTLB for task %d\n", task->task_id);
-#endif
-        
-        // 转发
+// ============================================================
+// 12.12 pt_cache_ptw_rsp_thread - PTW Response Processing
+// Processes PTW results: MSI check, PBMT aggregation, IOTLB fill
+// Corresponds to iommu_translate.cc L388-492 (steps 18-19 post-processing)
+// ============================================================
+void iommu_top::pt_cache_ptw_rsp_thread() {
+    while (true) {
+        iommu_task_t* task = ptw_to_pt_cache_fifo.read();
+
+        // Fault from PTW: forward to fault handler
+        if (task->state == TASK_FAULT) {
+            collector_to_fault_fifo.write(task);
+            continue;
+        }
+
+        wait(PT_CACHE_HIT_DELAY, SC_NS);
+
+        // Step 18: MSI address translation check
+        // Corresponds to iommu_translate.cc L388-418
+        if (task->DC.msiptp.MODE != MSIPTP_Off) {
+            uint8_t is_msi_addr = check_is_msi_address(task->gpa, &task->DC, &iommu_inst);
+            if (is_msi_addr) {
+                printf("[PT_CACHE_PTW] task_id=%u, gpa=0x%lx -> MSI address, route to MSIPT cache\n",
+                       task->task_id, task->gpa);
+                fflush(stdout);
+                task->is_msi = 1;
+                task->state = TASK_MSI_QUERY;
+                collector_to_msipt_cache_query_fifo.write(task);
+                continue;
+            }
+        }
+
+        // Step 19 post-processing: PBMT aggregation + page size merge
+        // Corresponds to iommu_translate.cc L442-456
+        task->vs_pte.PBMT = (task->vs_pte.PBMT != PMA) ?
+                             task->vs_pte.PBMT : task->g_pte.PBMT;
+        task->page_sz = (task->gst_page_sz < task->page_sz) ?
+                         task->gst_page_sz : task->page_sz;
+        task->pa = (task->pa & ~(task->page_sz - 1)) |
+                   (task->iova & (task->page_sz - 1));
+
+        // IOTLB cache fill
+        // Corresponds to iommu_translate.cc L458-492
+        uint64_t napot_ppn = (((task->pa & ~(task->page_sz - 1)) |
+                              ((task->page_sz / 2) - 1)) / PAGESIZE);
+        uint64_t napot_iova = (((task->iova & ~(task->page_sz - 1)) |
+                               ((task->page_sz / 2) - 1)) / PAGESIZE);
+        uint64_t napot_gpa = (((task->gpa & ~(task->page_sz - 1)) |
+                              ((task->page_sz / 2) - 1)) / PAGESIZE);
+
+        if (task->at == ADDR_TYPE_UNTRANSLATED &&
+            (task->is_msi == 0 || (task->is_msi == 1 && task->is_mrif == 0))) {
+            iommu_cache_mtx.lock();
+            cache_ioatc_iotlb(&iommu_inst, napot_iova, task->GV, task->PSCV,
+                              task->iohgatp.GSCID, task->PSCID,
+                              &task->vs_pte, &task->g_pte, napot_ppn,
+                              ((task->page_sz > PAGESIZE) ? 1 : 0), task->is_msi);
+            iommu_cache_mtx.unlock();
+        }
+
+        // ATS translation: cache fill with T2GPA consideration
+        if (task->TTYP == PCIE_ATS_TRANSLATION_REQUEST &&
+            (task->is_msi == 0 || (task->is_msi == 1 && task->is_mrif == 0)) &&
+            ((task->DC.tc.T2GPA == 1 &&
+              ((iommu_inst.fill_ats_trans_in_ioatc & FILL_IOATC_ATS_T2GPA) != 0)) ||
+             ((iommu_inst.fill_ats_trans_in_ioatc & FILL_IOATC_ATS_ALWAYS) != 0))) {
+            iommu_cache_mtx.lock();
+            cache_ioatc_iotlb(&iommu_inst,
+                              (task->DC.tc.T2GPA == 1) ? napot_gpa : napot_iova,
+                              task->GV,
+                              (task->DC.tc.T2GPA == 1) ? 0 : task->PSCV,
+                              task->iohgatp.GSCID,
+                              (task->DC.tc.T2GPA == 1) ? 0 : task->PSCID,
+                              &task->vs_pte, &task->g_pte, napot_ppn,
+                              ((task->page_sz > PAGESIZE) ? 1 : 0), task->is_msi);
+            iommu_cache_mtx.unlock();
+
+            // Return GPA as translation response if T2GPA is 1
+            if (task->DC.tc.T2GPA == 1) {
+                task->pa = task->gpa;
+            }
+        }
+
+        printf("[PT_CACHE_PTW] task_id=%u, iova=0x%lx -> PTW DONE, pa=0x%lx -> forwarder\n",
+               task->task_id, task->iova, task->pa);
+        fflush(stdout);
         task->state = TASK_FORWARD;
         pt_cache_to_fwd_fifo.write(task);
-        
-        wait(PT_CACHE_HIT_DELAY, SC_NS);
     }
 }

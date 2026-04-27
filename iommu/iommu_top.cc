@@ -1,11 +1,8 @@
 #include "iommu_top.hh"
-#include <cstring>
 #include <cstdio>
 
-using namespace std;
-
 /**********************************************/
-//
+// before_end_of_elaboration - IOMMU reset and initialization
 /**********************************************/
 void iommu_top::before_end_of_elaboration()
 {
@@ -33,63 +30,32 @@ void iommu_top::before_end_of_elaboration()
                            sv32x4_bare_sz);
     if (reset_result < 0) {
         printf("\x1B[31mFAIL. Line %d\x1B[0m\n", __LINE__);
-    }  
-                           
-    // 将IOMMU模式设置为DDB_Bare，允许简单的地址直通
+    }
+
     iommu_inst.reg_file.ddtp.iommu_mode = DDT_1LVL;
 }
 
-// ============================================================================
-// Socket 回调实现
-// ============================================================================
-
-tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport(
-    tlm::tlm_generic_payload& trans,
-    tlm::tlm_phase& phase,
-    sc_time& delay
-) {
-    printf("[AXI_NB_TRANSPORT] AXI slave transport called, phase: %d\n", (int)phase);
-    fflush(stdout);
-    
-    if (phase == tlm::BEGIN_REQ) {
-        tlm::tlm_generic_payload* payload_ptr = &trans;
-        
-        printf("[AXI_NB_TRANSPORT] BEGIN_REQ phase, IOVA: 0x%lx\n", trans.get_address());
-        fflush(stdout);
-        
-        if (inbound_fifo.num_free() > 0) {
-            inbound_fifo.write(payload_ptr);
-            phase = tlm::END_REQ;
-            delay = sc_time(PARSER_DELAY, SC_NS);
-            
-            printf("[AXI_NB_TRANSPORT] Payload written to inbound_fifo, delay: %ld ns\n", PARSER_DELAY);
-            fflush(stdout);
-            
-            return tlm::TLM_ACCEPTED;
-        } else {
-            delay = sc_time(10, SC_NS);
-            printf("[AXI_NB_TRANSPORT] inbound_fifo full, returning TLM_UPDATED\n");
-            fflush(stdout);
-            return tlm::TLM_UPDATED;
-        }
-    }
-    printf("[AXI_NB_TRANSPORT] Non-BEGIN_REQ phase, returning TLM_ACCEPTED\n");
-    fflush(stdout);
-    return tlm::TLM_ACCEPTED;
-}
-
-void iommu_top::ahb_slave_b_transport(tlm::tlm_generic_payload& trans, sc_time& delay) {
+/**********************************************/
+// AHB slave b_transport - register access (non-performance path)
+/**********************************************/
+void iommu_top::ahb_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay)
+{
     tlm::tlm_command cmd = trans.get_command();
     sc_dt::uint64 addr = trans.get_address();
     unsigned char *data = trans.get_data_ptr();
     unsigned int len = trans.get_data_length();
 
-    if (cmd == tlm::TLM_READ_COMMAND) {
+    if (cmd == tlm::TLM_READ_COMMAND)
+    {
         uint16_t offset = addr - IOMMU_BASE_ADDR;
         uint8_t num_bytes = 4;
         uint64_t reg_value = read_register(&iommu_inst, offset, num_bytes);
         memcpy(data, (unsigned char *)&reg_value, len);
-    } else if (cmd == tlm::TLM_WRITE_COMMAND) {
+        printf("%s:%d Read addr 0x%04llx, val 0x%08x\n", __func__, __LINE__,
+               (unsigned long long)addr, *(unsigned int *)data);
+    }
+    else if (cmd == tlm::TLM_WRITE_COMMAND)
+    {
         uint64_t val = 0;
         memcpy(&val, data, len);
         uint16_t offset = addr - IOMMU_BASE_ADDR;
@@ -97,256 +63,345 @@ void iommu_top::ahb_slave_b_transport(tlm::tlm_generic_payload& trans, sc_time& 
         write_register(&iommu_inst, offset, num_bytes, val);
     }
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
-    delay = sc_time(100, SC_NS);
 }
 
-tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
-    tlm::tlm_generic_payload& trans,
-    tlm::tlm_phase& phase,
-    sc_time& delay
-) {
-    if (phase == tlm::BEGIN_RESP) {
+/**********************************************/
+// Legacy axi_slave_b_transport - kept for backward compatibility
+// In performance model, nb_transport_fw is the primary path
+/**********************************************/
+void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay)
+{
+    // In performance model, this path is deprecated.
+    // Redirect to nb_transport path by creating a task and pushing to inbound_fifo
+    PayloadExtention *ext = nullptr;
+    trans.get_extension(ext);
+    if (!ext) {
+        trans.set_response_status(tlm::TLM_GENERIC_ERROR_RESPONSE);
+        return;
+    }
+
+    // For backward compatibility with RP test thread that still uses b_transport
+    // Create task and process synchronously
+    iommu_task_t* task = new iommu_task_t();
+
+    task_id_mtx.lock();
+    task->task_id = next_task_id++;
+    task_id_mtx.unlock();
+
+    task->tlm_trans_ptr = &trans;
+    task->device_id = ext->requester_id;
+    task->pid_valid = ext->pid_valid;
+    task->process_id = ext->process_id;
+    task->exec_req = ext->exec_req;
+    task->priv_req = ext->priv_req;
+    task->no_write = ext->no_write;
+    task->is_cxl_dev = 0;
+    task->iova = trans.get_address();
+    task->length = trans.get_data_length();
+    task->read_writeAMO = (trans.get_command() == tlm::TLM_READ_COMMAND) ? READ : WRITE;
+
+    if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
+    else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
+    else if (ext->at == 2) task->at = ADDR_TYPE_TRANSLATED;
+
+    task->timestamp = sc_time_stamp();
+    task->state = TASK_INIT;
+
+    // Push to inbound FIFO for pipeline processing
+    inbound_fifo.write(task);
+
+    // For b_transport compatibility, we need to wait for completion
+    // The forwarder/fault thread will signal completion through the response event
+    // We use a simple polling approach with wait
+    while (task->state != TASK_DONE) {
+        wait(1, SC_NS);
+    }
+
+    trans.set_response_status(tlm::TLM_OK_RESPONSE);
+}
+
+/**********************************************/
+// Inbound AT nb_transport_fw callback (RP -> IOMMU)
+/**********************************************/
+tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
+    tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+{
+    if (phase == tlm::BEGIN_REQ) {
+        // 1. Extract PayloadExtention
         PayloadExtention* ext = nullptr;
         trans.get_extension(ext);
-        if (!ext) {
+
+        // 2. Create task and fill fields
+        iommu_task_t* task = new iommu_task_t();
+
+        task_id_mtx.lock();
+        task->task_id = next_task_id++;
+        task_id_mtx.unlock();
+
+        task->tlm_trans_ptr = &trans;
+        task->iova = trans.get_address();
+        task->length = trans.get_data_length();
+        task->read_writeAMO = (trans.get_command() == tlm::TLM_READ_COMMAND) ? READ : WRITE;
+
+        if (ext) {
+            task->device_id = ext->requester_id;
+            task->pid_valid = ext->pid_valid;
+            task->process_id = ext->process_id;
+            task->exec_req = ext->exec_req;
+            task->priv_req = ext->priv_req;
+            task->no_write = ext->no_write;
+            task->is_cxl_dev = 0;
+
+            if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
+            else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
+            else if (ext->at == 2) task->at = ADDR_TYPE_TRANSLATED;
+        }
+
+        task->timestamp = sc_time_stamp();
+        task->state = TASK_INIT;
+
+        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo\n",
+               task->task_id, task->device_id, task->iova, task->at);
+        fflush(stdout);
+
+        // 3. Push to inbound_fifo
+        inbound_fifo.nb_write(task);
+
+        // 4. Return END_REQ (request accepted)
+        phase = tlm::END_REQ;
+        return tlm::TLM_UPDATED;
+    }
+    else if (phase == tlm::END_RESP) {
+        // Initiator confirmed receiving response
+        return tlm::TLM_COMPLETED;
+    }
+    return tlm::TLM_ACCEPTED;
+}
+
+/**********************************************/
+// DDR response AT nb_transport_bw callback (DDR -> IOMMU)
+/**********************************************/
+tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
+    tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+{
+    if (phase == tlm::BEGIN_RESP) {
+        // Pop from ddr_pending_queue head (FIFO ordering guarantee)
+        ddr_queue_mtx.lock();
+        if (ddr_pending_queue.empty()) {
+            ddr_queue_mtx.unlock();
+            printf("[IOMMU] ERROR: DDR response received but pending queue is empty!\n");
+            fflush(stdout);
+            phase = tlm::END_RESP;
             return tlm::TLM_COMPLETED;
         }
+        ddr_pending_entry_t pending = ddr_pending_queue.front();
+        ddr_pending_queue.pop();
+        ddr_queue_mtx.unlock();
 
-        uint16_t axi_id = ext->axi_id;
-        walk_type_t walk_type = (walk_type_t)ext->walk_type;
+        // Construct response entry
+        ddr_rsp_entry_t rsp;
+        rsp.task_id = pending.task_id;
+        rsp.data_length = trans.get_data_length();
+        if (rsp.data_length > sizeof(rsp.data)) rsp.data_length = sizeof(rsp.data);
+        memcpy(rsp.data, trans.get_data_ptr(), rsp.data_length);
+        rsp.error = (trans.get_response_status() != tlm::TLM_OK_RESPONSE);
 
-        auto it = ddr_outstanding_table.find(axi_id);
-        if (it == ddr_outstanding_table.end()) {
-            return tlm::TLM_COMPLETED;
-        }
-
-        ddr_outstanding_entry_t entry = it->second;
-        iommu_task_t* task = entry.task;
-
-        ddr_response_t rsp;
-        rsp.axi_id = axi_id;
-        rsp.walk_type = walk_type;
-        rsp.task_id = task->task_id;
-        rsp.status = (trans.is_response_ok()) ? 0 : 1;
-        rsp.data_size = entry.expected_size;
-        memcpy(rsp.data, trans.get_data_ptr(), min((uint32_t)64, (uint32_t)entry.expected_size));
-
-        switch (walk_type) {
-            case WALK_DDT:
-            case WALK_PDT:
-                xdtw_rsp_queue.push(rsp);
-                xdtw_rsp_evt.notify();
+        // Route to corresponding rsp_ddr_fifo based on source_module
+        switch (pending.source_module) {
+            case DDR_SRC_XDTW:
+                xdtw_rsp_ddr_fifo.nb_write(rsp);
                 break;
-            case WALK_VS_PT:
-            case WALK_G_PT:
-            case WALK_G_PT_IMPLICIT:
-                ptw_rsp_queue.push(rsp);
-                ptw_rsp_evt.notify();
+            case DDR_SRC_PTW:
+                ptw_rsp_ddr_fifo.nb_write(rsp);
                 break;
-            case WALK_MSI_PT:
-                msiptw_rsp_queue.push(rsp);
-                msiptw_rsp_evt.notify();
+            case DDR_SRC_MSIPTW:
+                msiptw_rsp_ddr_fifo.nb_write(rsp);
                 break;
-            default:
+            case DDR_SRC_CTRL_PATH:
+                // Control path: copy data to ctrl_path_rsp_buf and notify
+                memcpy(ctrl_path_rsp_buf, rsp.data, rsp.data_length);
+                ctrl_path_rsp_event.notify(SC_ZERO_TIME);
                 break;
         }
 
-        axi_id_alloc.free_id(axi_id);
-        ddr_outstanding_table.erase(it);
+        // Free TLM payload allocated by arbiter
+        if (pending.trans_ptr) {
+            if (pending.trans_ptr->get_data_ptr()) {
+                delete[] pending.trans_ptr->get_data_ptr();
+            }
+            delete pending.trans_ptr;
+        }
 
+        // Notify arbiter that a slot is freed
+        ddr_pending_freed_event.notify(SC_ZERO_TIME);
+
+        // Send END_RESP confirmation
         phase = tlm::END_RESP;
         return tlm::TLM_COMPLETED;
     }
     return tlm::TLM_ACCEPTED;
 }
 
-// ============================================================================
-// DDR 访问辅助函数
-// ============================================================================
+/**********************************************/
+// DDR Arbiter Thread
+/**********************************************/
+void iommu_top::ddr_arbiter_thread() {
+    uint8_t rr_index = 0;  // round-robin rotation index
+    while (true) {
+        // Wait for any req_ddr_fifo to have data
+        wait(ctrl_path_req_ddr_fifo.data_written_event() |
+             xdtw_req_ddr_fifo.data_written_event() |
+             ptw_req_ddr_fifo.data_written_event() |
+             msiptw_req_ddr_fifo.data_written_event());
 
-void iommu_top::send_ddr_nb_read(uint64_t addr, uint8_t size, uint16_t axi_id, walk_type_t type, iommu_task_t* task) {
-    tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload;
-    trans->set_command(TLM_READ_COMMAND);
-    trans->set_address(addr);
-    trans->set_data_length(size);
-    trans->set_streaming_width(size);
-    trans->set_data_ptr(new unsigned char[size]);
-    trans->set_byte_enable_ptr(0);
-    trans->set_dmi_allowed(false);
-    trans->set_response_status(TLM_INCOMPLETE_RESPONSE);
+        // Process all available requests
+        bool processed_any = true;
+        while (processed_any) {
+            processed_any = false;
 
-    PayloadExtention* ext = new PayloadExtention();
-    ext->axi_id = axi_id;
-    ext->walk_type = type;
-    trans->set_extension(ext);
+            // Flow control: check global outstanding count
+            if (ddr_pending_queue.size() >= DDR_MAX_OUTSTANDING) {
+                wait(ddr_pending_freed_event);
+            }
 
-    ddr_outstanding_entry_t entry;
-    entry.task = task;
-    entry.walk_type = type;
-    entry.expected_addr = addr;
-    entry.expected_size = size;
-    ddr_outstanding_table[axi_id] = entry;
+            ddr_req_entry_t req;
+            uint8_t source_module = 0;
+            bool found = false;
 
-    tlm::tlm_phase phase = tlm::BEGIN_REQ;
+            // Priority: ctrl_path > round-robin(xDTW, PTW, MSIPTW)
+            if (ctrl_path_req_ddr_fifo.num_available() > 0) {
+                ctrl_path_ddr_req_t ctrl_req = ctrl_path_req_ddr_fifo.read();
+                req.task_id = 0;  // control path has no task_id
+                req.addr = ctrl_req.addr;
+                req.size = ctrl_req.size;
+                req.is_write = ctrl_req.is_write;
+                if (ctrl_req.is_write) {
+                    memcpy(req.write_data, ctrl_req.write_data, ctrl_req.size);
+                }
+                source_module = DDR_SRC_CTRL_PATH;
+                found = true;
+            } else {
+                // Round-robin arbitration: xDTW(0), PTW(1), MSIPTW(2)
+                sc_fifo<ddr_req_entry_t>* fifos[3] = {
+                    &xdtw_req_ddr_fifo, &ptw_req_ddr_fifo, &msiptw_req_ddr_fifo
+                };
+                for (int k = 0; k < 3; k++) {
+                    uint8_t idx = (rr_index + k) % 3;
+                    if (fifos[idx]->num_available() > 0) {
+                        req = fifos[idx]->read();
+                        source_module = idx;  // 0=XDTW, 1=PTW, 2=MSIPTW
+                        rr_index = (idx + 1) % 3;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) break;
+            processed_any = true;
+
+            const char* src_name = (source_module == DDR_SRC_XDTW) ? "XDTW" :
+                                   (source_module == DDR_SRC_PTW) ? "PTW" :
+                                   (source_module == DDR_SRC_MSIPTW) ? "MSIPTW" : "CTRL";
+            printf("[DDR_ARBITER] Route %s request: task_id=%u, addr=0x%lx, size=%d, is_write=%d -> DDR\n",
+                   src_name, req.task_id, req.addr, req.size, req.is_write);
+            fflush(stdout);
+
+            // Construct ddr_pending_entry and enqueue
+            ddr_pending_entry_t pending;
+            pending.task_id = req.task_id;
+            pending.source_module = source_module;
+            pending.addr = req.addr;
+            pending.size = req.size;
+
+            // Allocate TLM payload
+            tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload();
+            trans->set_address(req.addr);
+            trans->set_data_length(req.size);
+            trans->set_streaming_width(req.size);
+            trans->set_byte_enable_ptr(nullptr);
+            trans->set_dmi_allowed(false);
+            trans->set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
+
+            uint8_t* data_buf = new uint8_t[req.size];
+            if (req.is_write) {
+                trans->set_command(tlm::TLM_WRITE_COMMAND);
+                memcpy(data_buf, req.write_data, req.size);
+            } else {
+                trans->set_command(tlm::TLM_READ_COMMAND);
+                memset(data_buf, 0, req.size);
+            }
+            trans->set_data_ptr(data_buf);
+            pending.trans_ptr = trans;
+
+            ddr_queue_mtx.lock();
+            ddr_pending_queue.push(pending);
+            ddr_queue_mtx.unlock();
+
+            // Send nb_transport_fw to DDR
+            tlm::tlm_phase phase = tlm::BEGIN_REQ;
+            sc_time delay = SC_ZERO_TIME;
+            axi_master_1_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
+        }
+    }
+}
+
+/**********************************************/
+// send_response_to_initiator - send AT response back to RP
+/**********************************************/
+void iommu_top::send_response_to_initiator(iommu_task_t* task) {
+    tlm::tlm_generic_payload* trans = task->tlm_trans_ptr;
+    if (!trans) return;
+
+    // Set translation result into payload
+    trans->set_address(task->pa);
+
+    printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d\n",
+           task->task_id, task->pa, task->state);
+    fflush(stdout);
+
+    // Send nb_transport_bw to notify initiator
+    tlm::tlm_phase phase = tlm::BEGIN_RESP;
     sc_time delay = SC_ZERO_TIME;
-    axi_master_1_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
+    axi_slave_from_pcie_noc_0_socket->nb_transport_bw(*trans, phase, delay);
 }
 
-void iommu_top::send_ddr_blocking_read(uint64_t addr, uint8_t size, char* data) {
-    tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload;
-    trans->set_command(TLM_READ_COMMAND);
-    trans->set_address(addr);
-    trans->set_data_length(size);
-    trans->set_data_ptr((unsigned char*)data);
-    
-    sc_time delay = sc_time(DDR_READ_LATENCY, SC_NS);
-    axi_master_1_to_cmn_rnd_socket->b_transport(*trans, delay);
-    delete trans;
+/**********************************************/
+// configure_and_route - common routing after DC/PC configuration
+/**********************************************/
+void iommu_top::configure_and_route(iommu_task_t* task) {
+    // Configure translation parameters
+    task->PSCV = (task->iosatp.MODE == IOSATP_Bare) ? 0 : 1;
+    task->GV = (task->iohgatp.MODE == IOHGATP_Bare) ? 0 : 1;
+    task->GSCID = (task->GV == 0) ? 0 : task->iohgatp.GSCID;
+    task->PSCID = (task->PSCV == 0) ? 0 : task->PSCID;
+    task->check_access_perms =
+        (task->TTYP != PCIE_ATS_TRANSLATION_REQUEST) ? 1 : 0;
+
+    // Check for MSI address
+    if (task->DC.msiptp.MODE != MSIPTP_Off) {
+        // MSI check happens after PTW, route to PT cache first
+    }
+
+    task->state = TASK_ROUTE_DECISION;
+
+    // Route to PT Cache for IOTLB lookup
+    collector_to_pt_cache_query_fifo.write(task);
 }
 
-void iommu_top::send_ddr_blocking_write(uint64_t addr, uint8_t size, char* data) {
-    tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload;
-    trans->set_command(TLM_WRITE_COMMAND);
-    trans->set_address(addr);
-    trans->set_data_length(size);
-    trans->set_data_ptr((unsigned char*)data);
-    
-    sc_time delay = sc_time(DDR_WRITE_LATENCY, SC_NS);
-    axi_master_1_to_cmn_rnd_socket->b_transport(*trans, delay);
-    delete trans;
-}
-
-void iommu_top::send_ddr_blocking_atomic_or(uint64_t addr, uint64_t or_value, uint8_t size) {
-    char read_data[8] = {0};
-    send_ddr_blocking_read(addr, size, read_data);
-    uint64_t* ptr = (uint64_t*)read_data;
-    *ptr |= or_value;
-    send_ddr_blocking_write(addr, size, read_data);
-}
-
-// ============================================================================
-// Cache 辅助函数
-// ============================================================================
-
-uint8_t iommu_top::lookup_dc_cache(uint32_t device_id, device_context_t* DC) {
-    return lookup_ioatc_dc(&iommu_inst, device_id, DC);
-}
-
-void iommu_top::update_dc_cache(uint32_t device_id, device_context_t* DC) {
-    cache_ioatc_dc(&iommu_inst, device_id, DC);
-}
-
-uint8_t iommu_top::lookup_pc_cache(uint32_t device_id, uint32_t process_id, process_context_t* PC) {
-    return lookup_ioatc_pc(&iommu_inst, device_id, process_id, PC);
-}
-
-void iommu_top::update_pc_cache(uint32_t device_id, uint32_t process_id, process_context_t* PC) {
-    cache_ioatc_pc(&iommu_inst, device_id, process_id, PC);
-}
-
-uint8_t iommu_top::lookup_iotlb(uint64_t iova, uint8_t PSCV, uint32_t PSCID, uint8_t GV, uint16_t GSCID,
-                                uint8_t priv, uint8_t is_read, uint8_t is_write, uint8_t is_exec, uint8_t SUM,
-                                uint32_t* cause, uint64_t* pa, uint64_t* page_sz, spte_t* vs_pte, gpte_t* g_pte) {
-    uint8_t is_msi;
-    return lookup_ioatc_iotlb(&iommu_inst, iova, 0, priv, is_read, is_write, is_exec, SUM, PSCV, PSCID, GV, GSCID,
-                              cause, pa, page_sz, vs_pte, g_pte, &is_msi);
-}
-
-void iommu_top::update_iotlb(uint64_t iova, spte_t vs_pte, gpte_t g_pte, uint64_t pa, uint64_t page_sz,
-                             uint8_t PSCV, uint32_t PSCID, uint8_t GV, uint16_t GSCID) {
-    uint64_t vpn = iova >> 12;
-    cache_ioatc_iotlb(&iommu_inst, vpn, GV, PSCV, GSCID, PSCID, &vs_pte, &g_pte, pa >> 12, (page_sz > 4096) ? 1 : 0, 0);
-}
-
-uint8_t iommu_top::lookup_msipt_cache(uint64_t msiptp_ppn, uint32_t interrupt_file_num, uint64_t* msipte_data) {
-    return 0;
-}
-
-void iommu_top::update_msipt_cache(uint64_t msiptp_ppn, uint32_t interrupt_file_num, uint64_t msipte_data) {
-}
-
-// 空实现性能模型线程函数 - 保持链接兼容性
-void iommu_top::parser_thread() {
-    // 在功能模型中，这个线程不会被激活，所以只需一个空实现
-    wait(SC_ZERO_TIME); // 避免无限循环
-}
-
-void iommu_top::collector_cache_lookup_result_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::collector_xdtw_response_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::dc_cache_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::pc_cache_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::pt_cache_query_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::pt_cache_result_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::pt_cache_ptw_rsp_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::msipt_cache_query_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::msipt_cache_result_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::msiptw_req_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::msiptw_rsp_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::xdtw_req_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::xdtw_rsp_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::ptw_req_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::ptw_rsp_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::ddr_rsp_router_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::forwarder_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::msi_forwarder_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::fault_proc_thread() {
-    wait(SC_ZERO_TIME);
-}
-
-void iommu_top::cq_proc_thread() {
-    wait(SC_ZERO_TIME);
+/**********************************************/
+// init_gstage_walk - initialize G-stage walk context
+/**********************************************/
+void iommu_top::init_gstage_walk(iommu_task_t* task, uint64_t gpa) {
+    // Corresponds to iommu_second_stage_trans.cc L80-139
+    uint16_t gs_vpn[5];
+    uint8_t GS_LEVELS;
+    extract_gs_vpn(gpa, task->iohgatp.MODE, gs_vpn, &GS_LEVELS);
+    for (int k = 0; k < 5; k++) task->walk_ctx.gs_vpn[k] = gs_vpn[k];
+    task->walk_ctx.gs_level = GS_LEVELS - 1;
+    task->walk_ctx.gs_base_addr = task->iohgatp.PPN * PAGESIZE;
+    uint64_t gs_pte_addr = task->walk_ctx.gs_base_addr +
+                           gs_vpn[GS_LEVELS - 1] * 8; // G-stage PTESIZE=8
+    task->walk_ctx.read_addr = gs_pte_addr;
+    task->walk_ctx.read_size = 8;
 }

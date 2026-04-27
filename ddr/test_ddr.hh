@@ -4,8 +4,9 @@
 #include "systemc.h"
 #include "tlm.h"
 #include "tlm_utils/simple_target_socket.h"
-#include "param_trans_def.hh"  // 包含 PayloadExtention 定义
-#include <cstring>
+#include "tlm_utils/simple_initiator_socket.h"
+#include <cstring>  // for memcpy and memset
+#include "../iommu/iommu_perf_params.hh"
 
 using namespace std;
 using namespace sc_core;
@@ -14,90 +15,110 @@ using namespace tlm_utils;
 
 class DDR_Module : public sc_module {
 public:
-    // 模拟 DDR 存储器的数组 - 1MB 存储空间
+    // Simulated DDR memory - 1MB storage space
     unsigned char memory[1024 * 1024]; // 1MB of simulated memory
 
 public:
-    // 与 IOMMU 模块的 initiator socket 对应的 target socket (slave)
+    // Target sockets (slave) - corresponding to IOMMU initiator sockets
     simple_target_socket<DDR_Module, 64> axi_slave_from_cmn_rnd_socket;
     simple_target_socket<DDR_Module, 64> axi_slave_from_pcie_noc_0_socket;
     simple_target_socket<DDR_Module, 64> axi_slave_from_cmn_rnd_1_socket;
 
+    // Internal request FIFO for non-blocking processing
+    sc_fifo<tlm_generic_payload*> ddr_req_fifo;
+
     SC_HAS_PROCESS(DDR_Module);
 
-    DDR_Module(sc_module_name name) : sc_module(name) {
-        // 初始化模拟内存
+    DDR_Module(sc_module_name name) : sc_module(name),
+        ddr_req_fifo("ddr_req_fifo", 16)
+    {
+        // Initialize simulated memory
         memset(memory, 0, sizeof(memory));
-        
-        // 只注册阻塞传输处理函数
+
+        // Register nb_transport_fw for the main DDR socket (from IOMMU arbiter)
+        axi_slave_from_cmn_rnd_1_socket.register_nb_transport_fw(
+            this, &DDR_Module::nb_transport_fw);
+
+        // Keep b_transport for the other sockets (used by RP direct memory access)
         axi_slave_from_cmn_rnd_socket.register_b_transport(this, &DDR_Module::b_transport);
         axi_slave_from_pcie_noc_0_socket.register_b_transport(this, &DDR_Module::b_transport);
-        axi_slave_from_cmn_rnd_1_socket.register_b_transport(this, &DDR_Module::b_transport);
+
+        SC_THREAD(ddr_process_thread);
     }
-    
-    // 处理 DDR 访问
-    void process_ddr_access(tlm_generic_payload& trans) {
+
+    // Non-blocking transport forward (AT mode - for IOMMU DDR arbiter)
+    tlm::tlm_sync_enum nb_transport_fw(
+        tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+    {
+        if (phase == tlm::BEGIN_REQ) {
+            // Enqueue request payload pointer for processing by ddr_process_thread
+            ddr_req_fifo.nb_write(&trans);
+            phase = tlm::END_REQ;
+            return tlm::TLM_UPDATED;
+        }
+        else if (phase == tlm::END_RESP) {
+            return tlm::TLM_COMPLETED;
+        }
+        return tlm::TLM_ACCEPTED;
+    }
+
+    // DDR processing thread - simulates DDR latency
+    void ddr_process_thread() {
+        while (true) {
+            tlm_generic_payload* trans = ddr_req_fifo.read();
+
+            // Simulate DDR read/write latency
+            if (trans->get_command() == tlm::TLM_READ_COMMAND) {
+                wait(DDR_READ_LATENCY, SC_NS);
+            } else {
+                wait(DDR_WRITE_LATENCY, SC_NS);
+            }
+
+            // Execute memory read/write
+            process_memory_access(*trans);
+
+            // Return response via nb_transport_bw
+            tlm::tlm_phase phase = tlm::BEGIN_RESP;
+            sc_time delay = SC_ZERO_TIME;
+            axi_slave_from_cmn_rnd_1_socket->nb_transport_bw(*trans, phase, delay);
+        }
+    }
+
+    // Shared memory access logic
+    void process_memory_access(tlm_generic_payload& trans) {
         tlm_command cmd = trans.get_command();
         sc_dt::uint64 addr = trans.get_address();
         unsigned char* data = trans.get_data_ptr();
         unsigned int len = trans.get_data_length();
-        
-        // 检查地址是否超出模拟内存范围
+
+        // Check address range
         if (addr + len > sizeof(memory)) {
-            printf("[DDR] ERROR: Address 0x%lx + len %d exceeds memory size %zu\n", addr, len, sizeof(memory));
+            printf("[DDR] ERROR: Address 0x%lx + len %d exceeds memory size %zu\n",
+                   (unsigned long)addr, len, sizeof(memory));
             trans.set_response_status(TLM_ADDRESS_ERROR_RESPONSE);
             return;
         }
-        
-        printf("[DDR] %s transaction - addr=0x%lx, len=%d\n", 
-               (cmd == TLM_READ_COMMAND) ? "READ" : "WRITE", addr, len);
-        fflush(stdout);
-        
+
         if (cmd == TLM_READ_COMMAND) {
-            // 执行读操作：从模拟内存中复制数据到传输的数据指针
             memcpy(data, &memory[addr], len);
-            
-            // 打印读取的数据（前 16 字节）
-            printf("[DDR] READ data from 0x%lx: ", addr);
-            for (int i = 0; i < min(len, 16U); i++) {
-                printf("%02x", memory[addr + i]);
-                if ((i + 1) % 8 == 0) printf(" ");
-            }
-            printf("\n");
+#ifdef DEBUG_TRANSLATION
+            printf("[DDR] READ addr=0x%lx, len=%d\n", (unsigned long)addr, len);
             fflush(stdout);
-            
-            // 如果是读取 DC（64 字节），打印详细结构
-            if (len == 64) {
-                uint64_t* ptr = (uint64_t*)&memory[addr];
-                printf("[DDR] DC data at 0x%lx: [0]=0x%lx, [1]=0x%lx\n", addr, ptr[0], ptr[1]);
-            }
+#endif
         } else if (cmd == TLM_WRITE_COMMAND) {
-            // 执行写操作：从传输的数据指针复制数据到模拟内存
             memcpy(&memory[addr], data, len);
-            
-            // 打印写入的数据（前 16 字节）
-            printf("[DDR] WRITE data to 0x%lx: ", addr);
-            for (int i = 0; i < min(len, 16U); i++) {
-                printf("%02x", data[i]);
-                if ((i + 1) % 8 == 0) printf(" ");
-            }
-            printf("\n");
+#ifdef DEBUG_TRANSLATION
+            printf("[DDR] WRITE addr=0x%lx, len=%d\n", (unsigned long)addr, len);
             fflush(stdout);
-            
-            // 如果是写入 DC（64 字节），打印详细结构
-            if (len == 64) {
-                uint64_t* ptr = (uint64_t*)data;
-                printf("[DDR] DC data at 0x%lx: [0]=0x%lx, [1]=0x%lx\n", addr, ptr[0], ptr[1]);
-            }
+#endif
         }
-        
+
         trans.set_response_status(TLM_OK_RESPONSE);
     }
-    
+
+    // Blocking transport (for RP direct memory access and other non-performance paths)
     void b_transport(tlm_generic_payload& trans, sc_time& delay) {
-        // 阻塞模式处理
-        process_ddr_access(trans);
-        delay = sc_time(10, SC_NS);  // 10ns 延迟
+        process_memory_access(trans);
     }
 };
 #endif

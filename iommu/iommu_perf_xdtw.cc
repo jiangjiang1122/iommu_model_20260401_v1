@@ -1,232 +1,334 @@
-//
-// IOMMU 性能模型 - xDTW (DDT/PDT Walker) 模块实现
-// 按照 SPEC v4 第 5.7 节定义实现
-// 参考：iommu_device_context.cc, iommu_process_context.cc
-//
+// IOMMU Performance Model - xDTW Threads (2 threads)
+// SPEC Section 12.8-12.9
+// Corresponds to locate_device_context() and locate_process_context()
 
 #include "iommu_top.hh"
-#include "iommu_perf_model.hh"
+#include <cstdio>
 
-// ============================================================================
-// xDTW 线程 1: 请求
-// ============================================================================
-
+// ============================================================
+// 12.8 xdtw_req_thread - xDTW Request Thread (async DDR send)
+// Initializes walk context, sends first DDR request
+// ============================================================
 void iommu_top::xdtw_req_thread() {
-    printf("[xDTW-1] Request thread started\n");
-    
     while (true) {
-        iommu_task_t* task = nullptr;
-        collector_to_xdtw_fifo.read(task);
-        
-        // 判断 walk 类型（DDT 或 PDT）
-        walk_type_t walk_type;
-        uint64_t base_addr;
-        uint8_t index;
-        
-        if (task->state == TASK_DC_MISS || !task->dc_valid) {
-            // DDT walk
-            walk_type = WALK_DDT;
-            base_addr = iommu_inst.reg_file.ddtbase.PPN * 4096;
-            
-            // 计算 DDI 索引
-            index = calculate_ddt_index(&iommu_inst, task->device_id);
-            
-#ifdef DEBUG_XDTW
-            printf("[xDTW-1] Task %d: DDT walk for device_id %d, index=%d, base=0x%lx\n", 
-                   task->task_id, task->device_id, index, base_addr);
-#endif
-        } else {
-            // PDT walk
-            walk_type = WALK_PDT;
-            base_addr = task->DC.fsc.pdtp.PPN * 4096;
-            
-            // 计算 PDI 索引
-            index = calculate_pdt_index(task->DC.fsc, task->process_id);
-            
-#ifdef DEBUG_XDTW
-            printf("[xDTW-1] Task %d: PDT walk for process_id %d, index=%d, base=0x%lx\n", 
-                   task->task_id, task->process_id, index, base_addr);
-#endif
+        // Flow control: wait for outstanding count below limit
+        while (xdtw_outstanding_task_count >= XDTW_MAX_OUTSTANDING_TASKS) {
+            wait(xdtw_task_completed_event);
         }
-        
-        // 初始化 walk 上下文
-        task->walk_ctx.walk_type = walk_type;
-        task->walk_ctx.level = 0;
-        task->walk_ctx.max_levels = 1; // DDT/PDT 只有 1 级
-        task->walk_ctx.base_addr = base_addr;
-        task->walk_ctx.index[0] = index;
-        task->walk_ctx.pte_size = 8; // 8 字节 entry
-        task->walk_ctx.read_addr = base_addr + index * 8;
-        task->walk_ctx.read_size = 8;
-        
-        // 分配 AXI ID
-        uint16_t axi_id = axi_id_alloc.alloc_id();
-        task->current_axi_id = axi_id;
-        
-#ifdef DEBUG_XDTW
-        printf("[xDTW-1] Task %d: Alloc AXI ID %d for %s entry at 0x%lx\n", 
-               task->task_id, axi_id, (walk_type == WALK_DDT) ? "DDT" : "PDT", 
-               task->walk_ctx.read_addr);
-#endif
 
-        // 发起非阻塞 DDR 读
-        send_ddr_nb_read(task->walk_ctx.read_addr, 8, axi_id, walk_type, task);
-        
-        wait(XDTW_DELAY_PER_ACCESS, SC_NS);
+        iommu_task_t* task = collector_to_xdtw_fifo.read();
+        task->state = TASK_XDTW_REQ;
+        xdtw_outstanding_task_count++;
+
+        wait(XDTW_COMPUTE_DELAY, SC_NS);
+
+        if (task->walk_ctx.walk_type == WALK_DDT) {
+            // ========== DDT Walk Initialization ==========
+            // Corresponds to iommu_device_context.cc L96-109
+            uint64_t a = iommu_inst.reg_file.ddtp.ppn * PAGESIZE;
+            uint8_t LEVELS;
+            if (iommu_inst.reg_file.ddtp.iommu_mode == DDT_3LVL) LEVELS = 3;
+            else if (iommu_inst.reg_file.ddtp.iommu_mode == DDT_2LVL) LEVELS = 2;
+            else LEVELS = 1;
+
+            task->walk_ctx.max_levels = LEVELS;
+            task->walk_ctx.level = LEVELS - 1;
+            task->walk_ctx.base_addr = a;
+            task->walk_ctx.indexes[0] = task->DDI[0];
+            task->walk_ctx.indexes[1] = task->DDI[1];
+            task->walk_ctx.indexes[2] = task->DDI[2];
+
+            if (LEVELS > 1) {
+                task->walk_ctx.walk_phase = XDTW_DDT_NON_LEAF;
+                uint64_t read_addr = a + (task->DDI[LEVELS - 1] * 8);
+                task->walk_ctx.read_addr = read_addr;
+                task->walk_ctx.read_size = 8;
+            } else {
+                // 1-level DDT: directly read DC
+                task->walk_ctx.walk_phase = XDTW_DDT_READ_DC;
+                uint8_t DC_SIZE = (iommu_inst.reg_file.capabilities.msi_flat == 1) ?
+                                  EXT_FORMAT_DC_SIZE : BASE_FORMAT_DC_SIZE;
+                uint64_t dc_addr = a + (task->DDI[0] * DC_SIZE);
+                task->walk_ctx.read_addr = dc_addr;
+                task->walk_ctx.read_size = DC_SIZE;
+            }
+        }
+        else if (task->walk_ctx.walk_type == WALK_PDT) {
+            // ========== PDT Walk Initialization ==========
+            // Corresponds to iommu_process_context.cc L35-78
+            uint16_t PDI[3];
+            PDI[0] = get_bits(7,  0, task->process_id);
+            PDI[1] = get_bits(16, 8, task->process_id);
+            PDI[2] = get_bits(19, 17, task->process_id);
+
+            uint64_t a = task->DC.fsc.pdtp.PPN * PAGESIZE;
+            uint8_t LEVELS;
+            if (task->DC.fsc.pdtp.MODE == PD20) LEVELS = 3;
+            else if (task->DC.fsc.pdtp.MODE == PD17) LEVELS = 2;
+            else LEVELS = 1;
+
+            task->walk_ctx.max_levels = LEVELS;
+            task->walk_ctx.level = LEVELS - 1;
+            task->walk_ctx.base_addr = a;
+            task->walk_ctx.indexes[0] = PDI[0];
+            task->walk_ctx.indexes[1] = PDI[1];
+            task->walk_ctx.indexes[2] = PDI[2];
+
+            if (LEVELS > 1) {
+                task->walk_ctx.walk_phase = XDTW_PDT_NON_LEAF;
+                uint64_t read_addr = a + PDI[LEVELS - 1] * 8;
+                task->walk_ctx.read_addr = read_addr;
+                task->walk_ctx.read_size = 8;
+            } else {
+                task->walk_ctx.walk_phase = XDTW_PDT_READ_PC;
+                uint64_t pc_addr = a + PDI[0] * 16;
+                task->walk_ctx.read_addr = pc_addr;
+                task->walk_ctx.read_size = 16;
+            }
+        }
+
+        // Register task in active_walks
+        xdtw_walks_mtx.lock();
+        xdtw_active_walks[task->task_id] = task;
+        xdtw_walks_mtx.unlock();
+
+        // Send first DDR request
+        ddr_req_entry_t req;
+        req.task_id = task->task_id;
+        req.addr = task->walk_ctx.read_addr;
+        req.size = task->walk_ctx.read_size;
+        req.is_write = false;
+        task->walk_ctx.ddr_read_count = 1;
+
+        printf("[XDTW_REQ] task_id=%u, walk_type=%s, level=%d, addr=0x%lx, size=%d, read_count=1 -> ddr_req\n",
+               task->task_id, (task->walk_ctx.walk_type == WALK_DDT) ? "DDT" : "PDT",
+               task->walk_ctx.level, req.addr, req.size);
+        fflush(stdout);
+
+        xdtw_req_ddr_fifo.write(req);
     }
 }
 
-// ============================================================================
-// xDTW 线程 2: 响应
-// ============================================================================
-
+// ============================================================
+// 12.9 xdtw_rsp_thread - xDTW Response Thread (state machine)
+// Processes DDR responses, advances walk or completes
+// ============================================================
 void iommu_top::xdtw_rsp_thread() {
-    printf("[xDTW-2] Response thread started\n");
-    
     while (true) {
-        // 等待 DDR 响应事件
-        wait(xdtw_rsp_evt);
-        
-        while (!xdtw_rsp_queue.empty()) {
-            ddr_response_t rsp = xdtw_rsp_queue.front();
-            xdtw_rsp_queue.pop();
-            
-            // 从 outstanding 表恢复 task
-            auto it = ddr_outstanding_table.find(rsp.axi_id);
-            if (it == ddr_outstanding_table.end()) {
-                printf("[xDTW-2] ERROR: AXI ID %d not found in outstanding table\n", rsp.axi_id);
-                continue;
+        ddr_rsp_entry_t rsp = xdtw_rsp_ddr_fifo.read();
+        wait(XDTW_PARSE_DELAY, SC_NS);
+
+        // Find corresponding task
+        xdtw_walks_mtx.lock();
+        auto it = xdtw_active_walks.find(rsp.task_id);
+        if (it == xdtw_active_walks.end()) {
+            xdtw_walks_mtx.unlock();
+            printf("[XDTW] ERROR: task_id %u not found in active_walks\n", rsp.task_id);
+            continue;
+        }
+        iommu_task_t* task = it->second;
+        xdtw_walks_mtx.unlock();
+
+        // Copy DDR response data
+        memcpy(task->walk_ctx.read_buf, rsp.data, rsp.data_length);
+
+        bool walk_complete = false;
+        bool walk_fault = false;
+        bool need_next_ddr = false;
+
+        switch (task->walk_ctx.walk_phase) {
+
+        case XDTW_DDT_NON_LEAF: {
+            // DDT non-leaf level processing
+            // Corresponds to iommu_device_context.cc L112-169
+            printf("[XDTW_RSP] task_id=%u, DDT_NON_LEAF: read_count=%u, level=%d, addr=0x%lx\n",
+                   task->task_id, task->walk_ctx.ddr_read_count, task->walk_ctx.level, task->walk_ctx.read_addr);
+            fflush(stdout);
+
+            ddte_t ddte;
+            ddte.raw = 0;
+            memcpy(&ddte.raw, task->walk_ctx.read_buf, 8);
+
+            if (ddte.V == 0) {
+                task->cause = 258;  // DDT entry not valid
+                walk_fault = true;
+                break;
             }
-            
-            iommu_task_t* task = it->second.task;
-            walk_type_t walk_type = it->second.walk_type;
-            
-            // 从 outstanding 表移除并释放 AXI ID
-            ddr_outstanding_table.erase(it);
-            axi_id_alloc.free_id(rsp.axi_id);
-            
-            if (rsp.status != 0) {
-                // DDR 错误
-                printf("[xDTW-2] Task %d: DDR error\n", task->task_id);
-                task->state = TASK_FAULT;
-                task->cause = 257; // DDR access error
-                xdtw_to_collector_fifo.write(task);
-                continue;
+            if (ddte.reserved0 != 0 || ddte.reserved1 != 0) {
+                task->cause = 259;  // DDT entry misconfigured
+                walk_fault = true;
+                break;
             }
-            
-            if (walk_type == WALK_DDT) {
-                // DDT walk 处理
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Processing DDT entry\n", task->task_id);
-#endif
-                
-                ddte_t ddte;
-                ddte.raw = *((uint64_t*)rsp.data);
-                
-                if (!ddte.V) {
-                    // DDT entry 无效
-#ifdef DEBUG_XDTW
-                    printf("[xDTW-2] Task %d: DDT entry invalid (V=0)\n", task->task_id);
-#endif
-                    task->state = TASK_FAULT;
-                    task->cause = 258; // DDT not valid
-                    xdtw_to_collector_fifo.write(task);
-                    continue;
-                }
-                
-                // DDT entry 有效，获取 DC 地址并发起第二次 DDR 读
-                uint64_t dc_addr = ddte.PPN * 4096;
-                
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Reading DC from 0x%lx\n", task->task_id, dc_addr);
-#endif
-                
-                // 分配新的 AXI ID 读取 DC
-                uint16_t new_axi_id = axi_id_alloc.alloc_id();
-                task->current_axi_id = new_axi_id;
-                
-                // 将当前任务保存到 outstanding 表，等待 DC 读取完成
-                ddr_outstanding_table[new_axi_id] = {task, WALK_DDT_DC_READ, dc_addr, (uint8_t)sizeof(device_context_t)};
-                
-                // 发起 DC 读取
-                send_ddr_nb_read(dc_addr, sizeof(device_context_t), new_axi_id, WALK_DDT_DC_READ, task);
-                
-                continue; // 等待 DC 读取完成
-                
-            } else if (walk_type == WALK_PDT) {
-                // PDT walk 处理
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Processing PDT entry\n", task->task_id);
-#endif
-                
-                pdte_t pdte;
-                pdte.raw = *((uint64_t*)rsp.data);
-                
-                if (!pdte.V) {
-                    // PDT entry 无效
-#ifdef DEBUG_XDTW
-                    printf("[xDTW-2] Task %d: PDT entry invalid (V=0)\n", task->task_id);
-#endif
-                    task->state = TASK_FAULT;
-                    task->cause = 259; // PDT not valid
-                    xdtw_to_collector_fifo.write(task);
-                    continue;
-                }
-                
-                // PDT entry 有效，获取 PC 地址并发起第二次 DDR 读
-                uint64_t pc_addr = pdte.PPN * 4096;
-                
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Reading PC from 0x%lx\n", task->task_id, pc_addr);
-#endif
-                
-                // 分配新的 AXI ID 读取 PC
-                uint16_t new_axi_id_pc = axi_id_alloc.alloc_id();
-                task->current_axi_id = new_axi_id_pc;
-                
-                // 将当前任务保存到 outstanding 表，等待 PC 读取完成
-                ddr_outstanding_table[new_axi_id_pc] = {task, WALK_PDT_PC_READ, pc_addr, (uint8_t)sizeof(process_context_t)};
-                
-                // 发起 PC 读取
-                send_ddr_nb_read(pc_addr, sizeof(process_context_t), new_axi_id_pc, WALK_PDT_PC_READ, task);
-                
-                continue; // 等待 PC 读取完成
-            } else if (walk_type == WALK_DDT_DC_READ) {
-                // 处理从 DDT 读取回来的 DC 数据
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Processing DC data from DDT\n", task->task_id);
-#endif
-                // 将读取的数据复制到 task 的 DC 结构中
-                for(int i = 0; i < sizeof(device_context_t); i++) {
-                    ((char*)&task->DC)[i] = rsp.data[i];
-                }
-                task->DC.tc.V = 1; // 标记 DC 有效
-                task->state = TASK_DC_WALK_DONE;
-                
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: DC walk done, DTF=%d, PDTV=%d\n", 
-                       task->task_id, task->DC.tc.DTF, task->DC.tc.PDTV);
-#endif
-            } else if (walk_type == WALK_PDT_PC_READ) {
-                // 处理从 PDT 读取回来的 PC 数据
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: Processing PC data from PDT\n", task->task_id);
-#endif
-                // 将读取的数据复制到 task 的 PC 结构中
-                for(int i = 0; i < sizeof(process_context_t); i++) {
-                    ((char*)&task->PC)[i] = rsp.data[i];
-                }
-                task->PC.ta.V = 1; // 标记 PC 有效
-                task->state = TASK_PC_WALK_DONE;
-                
-#ifdef DEBUG_XDTW
-                printf("[xDTW-2] Task %d: PC walk done, PSCID=%d, SUM=%d\n", 
-                       task->task_id, task->PC.ta.PSCID, task->PC.ta.SUM);
-#endif
+
+            task->walk_ctx.base_addr = ddte.PPN * PAGESIZE;
+            task->walk_ctx.level--;
+
+            if (task->walk_ctx.level > 0) {
+                // More non-leaf levels: continue walk
+                uint64_t next_addr = task->walk_ctx.base_addr +
+                    (task->walk_ctx.indexes[task->walk_ctx.level] * 8);
+                task->walk_ctx.read_addr = next_addr;
+                task->walk_ctx.read_size = 8;
+                task->walk_ctx.ddr_read_count++;
+                need_next_ddr = true;
+                printf("[XDTW_RSP] task_id=%u, DDT_NON_LEAF -> next level=%d, read_count=%u, addr=0x%lx\n",
+                       task->task_id, task->walk_ctx.level, task->walk_ctx.ddr_read_count, next_addr);
+                fflush(stdout);
+            } else {
+                // Reached leaf level: read DC next
+                task->walk_ctx.walk_phase = XDTW_DDT_READ_DC;
+                uint8_t DC_SIZE = (iommu_inst.reg_file.capabilities.msi_flat == 1) ?
+                                  EXT_FORMAT_DC_SIZE : BASE_FORMAT_DC_SIZE;
+                uint64_t dc_addr = task->walk_ctx.base_addr +
+                    (task->walk_ctx.indexes[0] * DC_SIZE);
+                task->walk_ctx.read_addr = dc_addr;
+                task->walk_ctx.read_size = DC_SIZE;
+                task->walk_ctx.ddr_read_count++;
+                need_next_ddr = true;
+                printf("[XDTW_RSP] task_id=%u, DDT_NON_LEAF -> READ_DC (read_count=%u), dc_addr=0x%lx, DC_SIZE=%d\n",
+                       task->task_id, task->walk_ctx.ddr_read_count, dc_addr, DC_SIZE);
+                fflush(stdout);
             }
-            
-            // 发送结果给 Collector
+            break;
+        }
+
+        case XDTW_DDT_READ_DC: {
+            // Read and validate DC
+            // Corresponds to iommu_device_context.cc L182-228
+            uint8_t DC_SIZE = task->walk_ctx.read_size;
+            printf("[XDTW_RSP] task_id=%u, DDT_READ_DC: read_count=%u, addr=0x%lx, DC_SIZE=%d\n",
+                   task->task_id, task->walk_ctx.ddr_read_count, task->walk_ctx.read_addr, DC_SIZE);
+            fflush(stdout);
+            memcpy(&task->DC, task->walk_ctx.read_buf, DC_SIZE);
+
+            if (task->DC.tc.V == 0) {
+                task->cause = 258;  // DDT entry not valid
+                walk_fault = true;
+            } else if (do_device_context_configuration_checks(&iommu_inst, &task->DC)) {
+                task->cause = 259;  // DDT entry misconfigured
+                walk_fault = true;
+            } else {
+                task->state = TASK_XDTW_DONE;
+                walk_complete = true;
+            }
+            break;
+        }
+
+        case XDTW_PDT_NON_LEAF: {
+            // PDT non-leaf level processing
+            // Corresponds to iommu_process_context.cc L81-157
+            printf("[XDTW_RSP] task_id=%u, PDT_NON_LEAF: read_count=%u, level=%d, addr=0x%lx\n",
+                   task->task_id, task->walk_ctx.ddr_read_count, task->walk_ctx.level, task->walk_ctx.read_addr);
+            fflush(stdout);
+
+            pdte_t pdte;
+            pdte.raw = 0;
+            memcpy(&pdte.raw, task->walk_ctx.read_buf, 8);
+
+            if (pdte.V == 0) {
+                task->cause = 266;  // PDT entry not valid
+                walk_fault = true;
+                break;
+            }
+            if (pdte.reserved0 || pdte.reserved1) {
+                task->cause = 267;  // PDT entry misconfigured
+                walk_fault = true;
+                break;
+            }
+
+            task->walk_ctx.base_addr = pdte.PPN * PAGESIZE;
+            task->walk_ctx.level--;
+
+            if (task->walk_ctx.level > 0) {
+                uint64_t next_addr = task->walk_ctx.base_addr +
+                    task->walk_ctx.indexes[task->walk_ctx.level] * 8;
+                task->walk_ctx.read_addr = next_addr;
+                task->walk_ctx.read_size = 8;
+                task->walk_ctx.ddr_read_count++;
+                need_next_ddr = true;
+                printf("[XDTW_RSP] task_id=%u, PDT_NON_LEAF -> next level=%d, read_count=%u, addr=0x%lx\n",
+                       task->task_id, task->walk_ctx.level, task->walk_ctx.ddr_read_count, next_addr);
+                fflush(stdout);
+            } else {
+                // Read final PC
+                task->walk_ctx.walk_phase = XDTW_PDT_READ_PC;
+                uint64_t pc_addr = task->walk_ctx.base_addr +
+                    task->walk_ctx.indexes[0] * 16;
+                task->walk_ctx.read_addr = pc_addr;
+                task->walk_ctx.read_size = 16;
+                task->walk_ctx.ddr_read_count++;
+                need_next_ddr = true;
+                printf("[XDTW_RSP] task_id=%u, PDT_NON_LEAF -> READ_PC (read_count=%u), pc_addr=0x%lx\n",
+                       task->task_id, task->walk_ctx.ddr_read_count, pc_addr);
+                fflush(stdout);
+            }
+            break;
+        }
+
+        case XDTW_PDT_GS_IMPLICIT: {
+            // PDT G-stage implicit translation
+            // Simplified: restore PDT walk context after G-stage translation
+            printf("[XDTW_RSP] task_id=%u, PDT_GS_IMPLICIT: read_count=%u\n",
+                   task->task_id, task->walk_ctx.ddr_read_count);
+            fflush(stdout);
+            task->walk_ctx.walk_phase = XDTW_PDT_NON_LEAF;
+            task->walk_ctx.ddr_read_count++;
+            need_next_ddr = true;
+            break;
+        }
+
+        case XDTW_PDT_READ_PC: {
+            // Read and validate PC
+            // Corresponds to iommu_process_context.cc L159-196
+            printf("[XDTW_RSP] task_id=%u, PDT_READ_PC: read_count=%u, addr=0x%lx\n",
+                   task->task_id, task->walk_ctx.ddr_read_count, task->walk_ctx.read_addr);
+            fflush(stdout);
+            memcpy(&task->PC, task->walk_ctx.read_buf, 16);
+
+            if (task->PC.ta.V == 0) {
+                task->cause = 266;  // PDT entry not valid
+                walk_fault = true;
+            } else if (do_process_context_configuration_checks(
+                           &iommu_inst, &task->DC, &task->PC)) {
+                task->cause = 267;  // PDT entry misconfigured
+                walk_fault = true;
+            } else {
+                task->state = TASK_XDTW_DONE;
+                walk_complete = true;
+            }
+            break;
+        }
+
+        } // end switch
+
+        if (walk_fault) {
+            task->state = TASK_FAULT;
+            xdtw_walks_mtx.lock();
+            xdtw_active_walks.erase(rsp.task_id);
+            xdtw_walks_mtx.unlock();
+            xdtw_outstanding_task_count--;
+            xdtw_task_completed_event.notify(SC_ZERO_TIME);
             xdtw_to_collector_fifo.write(task);
+        }
+        else if (walk_complete) {
+            printf("[XDTW_RSP] task_id=%u, walk_type=%s -> DONE, total_ddr_reads=%u, return to collector\n",
+                   task->task_id, (task->walk_ctx.walk_type == WALK_DDT) ? "DDT" : "PDT",
+                   task->walk_ctx.ddr_read_count);
+            fflush(stdout);
+            xdtw_walks_mtx.lock();
+            xdtw_active_walks.erase(rsp.task_id);
+            xdtw_walks_mtx.unlock();
+            xdtw_outstanding_task_count--;
+            xdtw_task_completed_event.notify(SC_ZERO_TIME);
+            xdtw_to_collector_fifo.write(task);
+        }
+        else if (need_next_ddr) {
+            ddr_req_entry_t req;
+            req.task_id = task->task_id;
+            req.addr = task->walk_ctx.read_addr;
+            req.size = task->walk_ctx.read_size;
+            req.is_write = false;
+            xdtw_req_ddr_fifo.write(req);
         }
     }
 }

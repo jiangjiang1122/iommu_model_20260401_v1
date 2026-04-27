@@ -44,21 +44,18 @@ CXX_SOURCES = \
     iommu/iommu_two_stage_trans.cc \
     iommu/iommu_translate.cc \
     iommu/iommu_top.cc \
+    iommu/iommu_perf_parser.cc \
+    iommu/iommu_perf_dc_pc_cache.cc \
+    iommu/iommu_perf_collector.cc \
+    iommu/iommu_perf_xdtw.cc \
+    iommu/iommu_perf_pt_cache.cc \
+    iommu/iommu_perf_ptw.cc \
+    iommu/iommu_perf_msipt_cache.cc \
+    iommu/iommu_perf_forwarder_fault_cq.cc \
     rp/test_rp_func.cc \
     rp/test_rp_thread.cc \
     pcienoc/test_pcienoc.cc \
     ddr/test_ddr.cc 
-
-# Performance model source files (temporarily disabled due to compatibility issues)
-# CXX_SOURCES += \
-#     iommu/iommu_perf_parser.cc \
-#     iommu/iommu_perf_collector.cc \
-#     iommu/iommu_perf_dc_pc_cache.cc \
-#     iommu/iommu_perf_pt_cache.cc \
-#     iommu/iommu_perf_msipt_cache.cc \
-#     iommu/iommu_perf_xdtw.cc \
-#     iommu/iommu_perf_ptw.cc \
-#     iommu/iommu_perf_forwarder_fault_cq.cc
 
 # CXX_SOURCES = \
 #     iommu_top.cc  # Exclude due to missing header files

@@ -48,68 +48,37 @@ uint8_t write_memory(iommu_t *iommu, char *data, uint64_t address, uint32_t size
 uint8_t read_memory_test(iommu_t *iommu, uint64_t addr, uint8_t size, char *data)
 {
     printf("[IOMMU_REF_API] read_memory_test: addr = 0x%lx, size = %d\n",addr,size);
-    // 创建 TLM 通用负载
-    tlm::tlm_generic_payload trans;
-    sc_time delay = SC_ZERO_TIME;
 
-    // 设置负载属性
-    trans.set_command(tlm::TLM_READ_COMMAND);
-    trans.set_address(addr);
-    trans.set_data_ptr(reinterpret_cast<unsigned char*>(data));
-    trans.set_data_length(size);
-    trans.set_streaming_width(size);
-    trans.set_byte_enable_ptr(nullptr);
-    trans.set_dmi_allowed(false);
-    trans.set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
+    // v2: Route through ctrl_path_req_ddr_fifo for non-blocking DDR access
+    ctrl_path_ddr_req_t req;
+    req.addr = addr;
+    req.size = size;
+    req.is_write = false;
+    memset(req.write_data, 0, sizeof(req.write_data));
 
-    // 调用 b_transport - this should trigger DDR read
-    printf("[IOMMU_REF_API] About to call b_transport on axi_master_1_to_cmn_rnd_socket\n");
-    iommu->top->axi_master_1_to_cmn_rnd_socket->b_transport(trans, delay);
-    
-    printf("[IOMMU_REF_API] After TLM READ - data[0-7]: 0x%lx\n", *(uint64_t*)data);
-    printf("[IOMMU_REF_API] Response status: %d\n", trans.get_response_status());
+    iommu->top->ctrl_path_req_ddr_fifo.write(req);
+    wait(iommu->top->ctrl_path_rsp_event);
 
-    // 检查响应状态
-    if (trans.get_response_status() != tlm::TLM_OK_RESPONSE) {
-        // 处理错误
-        return 1; // 假设 ACCESS_FAULT 是已定义的错误码
-    }
+    // Copy response data from ctrl_path_rsp_buf
+    memcpy(data, iommu->top->ctrl_path_rsp_buf, size);
 
-    // 将trans的ptr部分赋值给char* data
-    unsigned char* trans_data_ptr = trans.get_data_ptr();
-    if (trans_data_ptr != reinterpret_cast<unsigned char*>(data)) {
-        // 如果trans的data ptr与传入的data不同，则复制数据
-        memcpy(data, trans_data_ptr, size);
-    }
-
+    printf("[IOMMU_REF_API] After ctrl_path READ - data[0-7]: 0x%lx\n", *(uint64_t*)data);
     return 0;
 }
 
 uint8_t write_memory_test(iommu_t *iommu, char *data, uint64_t address, uint32_t size)
 {
-    printf("IOMMU:write_memory_test: addr = 0x%x, size = %d\n",address,size);
-    // 创建 TLM 通用负载
-    tlm::tlm_generic_payload trans;
-    sc_time delay = SC_ZERO_TIME;
+    printf("IOMMU:write_memory_test: addr = 0x%lx, size = %d\n",(unsigned long)address,size);
 
-    // 设置负载属性
-    trans.set_command(tlm::TLM_WRITE_COMMAND);
-    trans.set_address(address);
-    trans.set_data_ptr(reinterpret_cast<unsigned char*>(data));
-    trans.set_data_length(size);
-    trans.set_streaming_width(size);
-    trans.set_byte_enable_ptr(nullptr);
-    trans.set_dmi_allowed(false);
-    trans.set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
+    // v2: Route through ctrl_path_req_ddr_fifo for non-blocking DDR access
+    ctrl_path_ddr_req_t req;
+    req.addr = address;
+    req.size = size;
+    req.is_write = true;
+    memcpy(req.write_data, data, (size <= 64) ? size : 64);
 
-    // 调用 b_transport
-    iommu->top->axi_master_1_to_cmn_rnd_socket->b_transport(trans, delay);
-
-    // 检查响应状态
-    if (trans.get_response_status() != tlm::TLM_OK_RESPONSE) {
-        // 处理错误
-        return 1; // 假设 ACCESS_FAULT 是已定义的错误码
-    }
+    iommu->top->ctrl_path_req_ddr_fifo.write(req);
+    wait(iommu->top->ctrl_path_rsp_event);
 
     return 0;
 }
