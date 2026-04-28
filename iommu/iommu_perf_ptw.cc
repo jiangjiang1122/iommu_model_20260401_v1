@@ -232,6 +232,31 @@ void iommu_top::ptw_rsp_thread() {
                 for (int j = 0; j < task->walk_ctx.level; j++) {
                     task->page_sz *= (task->walk_ctx.ptesize == 8) ? 512 : 1024;
                 }
+
+                // Step 6: Misaligned superpage check
+                // If i > 0 and pte.ppn[i-1:0] != 0, this is a misaligned superpage
+                if (task->walk_ctx.level > 0) {
+                    uint8_t misaligned = 0;
+                    if (task->iosatp.MODE == IOSATP_Sv32 && task->SXL == 1) {
+                        // Sv32: PPN[0] is 10 bits
+                        if ((pte.PPN & 0x3FF) != 0) misaligned = 1;
+                    } else {
+                        // Sv39/Sv48/Sv57: PPN subfields are 9 bits each
+                        if ((pte.PPN & 0x1FF) != 0) misaligned = 1;
+                        if (task->walk_ctx.level >= 2 && ((pte.PPN >> 9) & 0x1FF) != 0) misaligned = 1;
+                        if (task->walk_ctx.level >= 3 && ((pte.PPN >> 18) & 0x1FF) != 0) misaligned = 1;
+                        if (task->walk_ctx.level >= 4 && ((pte.PPN >> 27) & 0x1FF) != 0) misaligned = 1;
+                    }
+                    if (misaligned) {
+                        task->cause = (task->is_exec ? 12 : task->is_read ? 13 : 15);
+                        walk_fault = true;
+                        printf("[PTW_RSP] task_id=%u -> FAULT: misaligned superpage at level=%d, PPN=0x%lx\n",
+                               task->task_id, task->walk_ctx.level, (uint64_t)pte.PPN);
+                        fflush(stdout);
+                        break;
+                    }
+                }
+
                 printf("[PTW_RSP] task_id=%u, VS_WALK leaf: level=%d, page_sz=0x%lx, PPN=0x%lx, total_reads=%u\n",
                        task->task_id, task->walk_ctx.level, task->page_sz, pte.PPN, task->walk_ctx.ddr_read_count);
                 fflush(stdout);
@@ -474,10 +499,29 @@ void iommu_top::ptw_rsp_thread() {
                     }
                 }
 
-                // PA calculation
+                // G-stage superpage size calculation
                 task->gst_page_sz = PAGESIZE;
                 for (int j = 0; j < task->walk_ctx.gs_level; j++)
                     task->gst_page_sz *= 512;
+
+                // Misaligned G-stage superpage check
+                if (task->walk_ctx.gs_level > 0) {
+                    uint8_t gs_misaligned = 0;
+                    if ((gs_pte.PPN & 0x1FF) != 0) gs_misaligned = 1;
+                    if (task->walk_ctx.gs_level >= 2 && ((gs_pte.PPN >> 9) & 0x1FF) != 0) gs_misaligned = 1;
+                    if (task->walk_ctx.gs_level >= 3 && ((gs_pte.PPN >> 18) & 0x1FF) != 0) gs_misaligned = 1;
+                    if (task->walk_ctx.gs_level >= 4 && ((gs_pte.PPN >> 27) & 0x1FF) != 0) gs_misaligned = 1;
+                    if (gs_misaligned) {
+                        set_guest_fault_cause(task, 0);
+                        task->iotval2 = (task->gpa & ~0x3ULL);
+                        walk_fault = true;
+                        printf("[PTW_RSP] task_id=%u -> FAULT: misaligned G-stage superpage at level=%d, PPN=0x%lx\n",
+                               task->task_id, task->walk_ctx.gs_level, (uint64_t)gs_pte.PPN);
+                        fflush(stdout);
+                        break;
+                    }
+                }
+
                 task->pa = ((gs_pte.PPN * PAGESIZE) & ~(task->gst_page_sz - 1)) |
                            (task->gpa & (task->gst_page_sz - 1));
                 task->g_pte = gs_pte;

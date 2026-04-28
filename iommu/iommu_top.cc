@@ -106,6 +106,7 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
 
     task->timestamp = sc_time_stamp();
     task->state = TASK_INIT;
+    task->is_b_transport = 1;
 
     // Push to inbound FIFO for pipeline processing
     inbound_fifo.write(task);
@@ -118,6 +119,7 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
     }
 
     trans.set_response_status(tlm::TLM_OK_RESPONSE);
+    delete task;
 }
 
 /**********************************************/
@@ -355,6 +357,11 @@ void iommu_top::send_response_to_initiator(iommu_task_t* task) {
 
     // Set translation result into payload
     trans->set_address(task->pa);
+
+    // For b_transport tasks, skip nb_transport_bw (response returned via b_transport return path)
+    if (task->is_b_transport) {
+        return;
+    }
 
     printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d\n",
            task->task_id, task->pa, task->state);

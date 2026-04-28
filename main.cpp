@@ -74,7 +74,7 @@ int sc_main(int argc, char *argv[]) {
 
     // 运行仿真，设置仿真时间为1000纳秒
     printf("IOMMU simulation start\n");
-    sc_core::sc_start(2000, sc_core::SC_NS);
+    sc_core::sc_start(3000, sc_core::SC_NS);
 
     // 清理内存
     delete pcienoc;

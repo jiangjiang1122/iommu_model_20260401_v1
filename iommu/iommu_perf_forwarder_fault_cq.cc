@@ -71,7 +71,9 @@ void iommu_top::forwarder_thread() {
 
         // Release task (ownership endpoint for normal completion path)
         task->state = TASK_DONE;
-        delete task;
+        if (!task->is_b_transport) {
+            delete task;
+        }
     }
 }
 
@@ -136,6 +138,8 @@ void iommu_top::fault_cq_proc_thread() {
 
         // 4. Release task (ownership endpoint for fault path)
         task->state = TASK_DONE;
-        delete task;
+        if (!task->is_b_transport) {
+            delete task;
+        }
     }
 }

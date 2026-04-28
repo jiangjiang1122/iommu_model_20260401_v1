@@ -77,6 +77,7 @@ void RP_Module::iommu_translate_iova_rp(iommu_top *iommu,hb_to_iommu_req_t *req,
     // 从TLM响应中提取翻译结果
     rsp_msg->status = (trans.get_response_status() == tlm::TLM_OK_RESPONSE) ? SUCCESS : UNSUPPORTED_REQUEST;
     rsp_msg->trsp.PPN = trans.get_address() / PAGESIZE;
+    rsp_msg->trsp.pa = trans.get_address();
     rsp_msg->trsp.R = 1;
     rsp_msg->trsp.W = 1;
     

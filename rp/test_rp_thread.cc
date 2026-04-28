@@ -382,6 +382,120 @@ void RP_Module::send_translation_request_1_thread()
         wait(500, SC_NS);
 
         printf("\n[TEST] Concurrent two-stage translation test completed!\n");
+
+        // ============================================================
+        // ========== Megapage (2MB) Test - Page Offset Verification ==========
+        // ============================================================
+        printf("\n========== Megapage (2MB) Translation Test ==========\n");
+
+        // Use next_free_page < 256 to stay within 1MB DDR (1024*1024 = 0x100000)
+        next_free_page = 230;
+
+        // Configure device 0x09 with iohgatp=Bare, iosatp=Sv39
+        uint64_t dc5_addr = add_device(iommu_ptr, 0x09, 1, 0, 0, 0, 0, 0,
+                                       1, 1, 0, 0, 0,
+                                       IOHGATP_Bare, IOSATP_Sv39, PDTP_Bare,
+                                       MSIPTP_Off, 0, 0, 0);
+        read_memory_test_rp(dc5_addr, sizeof(device_context_t), (char*)&DC);
+        printf("[DEV5] DC addr: 0x%lx, iohgatp.MODE=%d (Bare), iosatp.MODE=%d (Sv39)\n",
+               dc5_addr, DC.iohgatp.MODE, DC.fsc.iosatp.MODE);
+
+        next_free_page = 232;
+
+        // Setup 2MB megapage at level=1: IOVA 0x201234 -> PA 0x401234
+        // IOVA 0x201234 is in VPN[1]=1 region (0x200000-0x3FFFFF)
+        // PPN=0x400 has PPN[0]=0 (aligned for 2MB superpage)
+        pte.raw = 0;
+        pte.V = 1;
+        pte.R = 1;
+        pte.W = 1;
+        pte.X = 0;
+        pte.U = 1;
+        pte.G = 0;
+        pte.A = 1;
+        pte.D = 1;
+        pte.PBMT = PMA;
+        pte.PPN = 0x400;  // 2MB aligned: PA base = 0x400 * 4KB = 0x400000
+
+        uint64_t test_iova5 = 0x201234;  // offset within 2MB page = 0x1234
+        uint64_t expected_pa5 = 0x401234; // 0x400000 + 0x1234
+
+        uint64_t mp_pte_addr = add_s_stage_pte(DC.fsc.iosatp, test_iova5, pte, 1, DC.tc.SXL);
+        if (mp_pte_addr == (uint64_t)-1) {
+            printf("[DEV5] ERROR: add_s_stage_pte (megapage) failed!\n");
+            return;
+        }
+        printf("[DEV5] Added level-1 leaf PTE (megapage) at addr 0x%lx, IOVA 0x%lx -> PA 0x%lx (PPN=0x%lx)\n",
+               mp_pte_addr, test_iova5, expected_pa5, pte.PPN);
+
+        // Invalidate caches for megapage test
+        printf("\n[TEST] Invalidating IOMMU caches for megapage test...\n");
+        iodir(iommu_ptr, INVAL_DDT, 1, 0x09, 0);
+        iotinval(iommu_ptr, VMA, 0, 0, 0, 0, 0, 0);
+
+        // Send megapage translation request
+        printf("\n========== Megapage Translation Request ==========\n");
+        printf("[TEST] Starting megapage translation: device_id=0x09, IOVA=0x%lx (expect PA=0x%lx)\n",
+               test_iova5, expected_pa5);
+        fflush(stdout);
+
+        send_translation_request_rp(iommu_ptr, 0x09,
+                                    0, 0, 0, 0, 0, 0, 0,
+                                    test_iova5, 16, READ,
+                                    &req, &rsp);
+
+        printf("[TEST] Request returned, status=0x%x\n", rsp.status);
+        if (rsp.status == SUCCESS) {
+            uint64_t result_pa = rsp.trsp.pa;
+            printf("[TEST] Translation SUCCESS! PA=0x%lx\n", result_pa);
+            if (result_pa == expected_pa5) {
+                printf("[TEST] PASS: Megapage PA matches expected! Page offset 0x%lx correctly preserved.\n",
+                       test_iova5 & 0x1FFFFF);
+            } else {
+                printf("[TEST] FAIL: PA=0x%lx != expected PA=0x%lx\n",
+                       result_pa, expected_pa5);
+            }
+        } else {
+            printf("[TEST] Translation FAILED with status=0x%x\n", rsp.status);
+        }
+
+        // ============================================================
+        // ========== Misaligned Megapage Fault Test ==========
+        // ============================================================
+        printf("\n========== Misaligned Megapage Fault Test ==========\n");
+
+        // PPN=0x401 has PPN[0]=1 (misaligned for 2MB superpage)
+        pte.PPN = 0x401;
+        uint64_t test_iova6 = 0x401234;
+
+        uint64_t mis_pte_addr = add_s_stage_pte(DC.fsc.iosatp, test_iova6, pte, 1, DC.tc.SXL);
+        if (mis_pte_addr == (uint64_t)-1) {
+            printf("[DEV5] ERROR: add_s_stage_pte (misaligned) failed!\n");
+            return;
+        }
+        printf("[DEV5] Added misaligned level-1 leaf PTE at addr 0x%lx, PPN=0x%lx (PPN[0]=1)\n",
+               mis_pte_addr, pte.PPN);
+
+        // Invalidate caches
+        iotinval(iommu_ptr, VMA, 0, 0, 0, 0, 0, 0);
+
+        printf("[TEST] Starting misaligned megapage translation: device_id=0x09, IOVA=0x%lx\n", test_iova6);
+        fflush(stdout);
+
+        send_translation_request_rp(iommu_ptr, 0x09,
+                                    0, 0, 0, 0, 0, 0, 0,
+                                    test_iova6, 16, READ,
+                                    &req, &rsp);
+
+        printf("[TEST] Request returned, status=0x%x\n", rsp.status);
+        if (rsp.status != SUCCESS) {
+            printf("[TEST] PASS: Misaligned megapage correctly faulted!\n");
+        } else {
+            printf("[TEST] FAIL: Misaligned megapage should have faulted but got PA=0x%lx\n",
+                   rsp.trsp.pa);
+        }
+
+        printf("\n[TEST] All page offset tests completed!\n");
         return;
     }
 }

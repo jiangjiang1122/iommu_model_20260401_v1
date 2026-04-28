@@ -167,6 +167,7 @@ struct iommu_task_t {
     uint64_t iotval;
     uint64_t iotval2;
     uint8_t is_bare_translation;
+    uint8_t is_b_transport;         // 1 if task created via b_transport (don't delete in forwarder)
 
     // Pipeline state
     task_state_t state;

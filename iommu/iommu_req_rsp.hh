@@ -93,6 +93,7 @@ typedef struct {
     uint64_t dest_mrif_addr;
     uint32_t mrif_nid;
     uint8_t is_bare_mode;  // Flag to indicate Bare mode translation (IOVA=PA)
+    uint64_t pa;           // Full translated physical address (for test/debug)
 } iommu_trans_rsp_t;
 
 // IOMMU response to requests from the IO bridge
