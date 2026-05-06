@@ -76,7 +76,7 @@ static const uint16_t MAX_AXI_IDS = 256;            // 最大AXI ID数量
 static const uint16_t AXI_ID_POOL_INIT_SIZE = 64;   // 初始可用ID池大小
 
 // ===================== DDR性能参数 =====================
-static const uint32_t DDR_MAX_OUTSTANDING = 512;    // 最大未完成请求数，必须≥所有walker outstanding之和
+static const uint32_t DDR_MAX_OUTSTANDING = 512;    // 最大未完成请求数，必须≥所有walker outstanding之和（建议值：≥448）
 static const uint32_t DDR_READ_LATENCY = 10;        // DDR读延迟(ns)
 static const uint32_t DDR_WRITE_LATENCY = 8;        // DDR写延迟(ns)
 static const uint32_t DDR_BANDWIDTH_GBPS = 128;     // DDR带宽(GB/s)
