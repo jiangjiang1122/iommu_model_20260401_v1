@@ -46,7 +46,8 @@ public:
     sc_fifo<iommu_task_t*> parser_to_pc_cache_query_fifo;
     sc_fifo<iommu_task_t*> dc_cache_to_collector_fifo;
     sc_fifo<iommu_task_t*> pc_cache_to_collector_fifo;
-    sc_fifo<iommu_task_t*> collector_to_xdtw_fifo;
+    sc_fifo<iommu_task_t*> collector_to_xdtw_dc_fifo;
+    sc_fifo<iommu_task_t*> collector_to_xdtw_pc_fifo;
     sc_fifo<iommu_task_t*> collector_to_dc_cache_update_fifo;
     sc_fifo<iommu_task_t*> collector_to_pc_cache_update_fifo;
     sc_fifo<iommu_task_t*> collector_to_pt_cache_query_fifo;
@@ -85,8 +86,16 @@ public:
     // ===================== Walker Active Walks =====================
     std::map<uint32_t, iommu_task_t*> xdtw_active_walks;
     sc_mutex xdtw_walks_mtx;
-    int xdtw_outstanding_task_count;
-    sc_event xdtw_task_completed_event;
+    int xdtw_dc_outstanding_task_count;
+    int xdtw_pc_outstanding_task_count;
+    sc_event xdtw_dc_task_completed_event;
+    sc_event xdtw_pc_task_completed_event;
+
+    // Collector walk outstanding counters
+    int collector_dc_walk_outstanding;
+    int collector_pc_walk_outstanding;
+    sc_event collector_dc_walk_completed_event;
+    sc_event collector_pc_walk_completed_event;
 
     std::map<uint32_t, iommu_task_t*> ptw_active_walks;
     sc_mutex ptw_walks_mtx;
@@ -181,7 +190,8 @@ public:
         parser_to_pc_cache_query_fifo("parser_to_pc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY),
         dc_cache_to_collector_fifo("dc_cache_to_collector_fifo", FIFO_DEPTH_DC_CACHE_TO_COLLECTOR),
         pc_cache_to_collector_fifo("pc_cache_to_collector_fifo", FIFO_DEPTH_PC_CACHE_TO_COLLECTOR),
-        collector_to_xdtw_fifo("collector_to_xdtw_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
+        collector_to_xdtw_dc_fifo("collector_to_xdtw_dc_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
+        collector_to_xdtw_pc_fifo("collector_to_xdtw_pc_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
         collector_to_dc_cache_update_fifo("collector_to_dc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE),
         collector_to_pc_cache_update_fifo("collector_to_pc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE),
         collector_to_pt_cache_query_fifo("collector_to_pt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY),
@@ -204,7 +214,10 @@ public:
         ctrl_path_req_ddr_fifo("ctrl_path_req_ddr_fifo", FIFO_DEPTH_CTRL_PATH_REQ_DDR),
         // State initialization
         next_task_id(1),
-        xdtw_outstanding_task_count(0),
+        xdtw_dc_outstanding_task_count(0),
+        xdtw_pc_outstanding_task_count(0),
+        collector_dc_walk_outstanding(0),
+        collector_pc_walk_outstanding(0),
         ptw_outstanding_task_count(0),
         msiptw_outstanding_task_count(0)
     {

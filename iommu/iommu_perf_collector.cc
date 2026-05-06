@@ -12,9 +12,14 @@
 // ============================================================
 void iommu_top::collector_cache_lookup_result_thread() {
     while (true) {
-        wait(parser_to_collector_fifo.data_written_event() |
-             dc_cache_to_collector_fifo.data_written_event() |
-             pc_cache_to_collector_fifo.data_written_event());
+        // Check if data already available before waiting (avoid missing edge-triggered events)
+        if (parser_to_collector_fifo.num_available() == 0 &&
+            dc_cache_to_collector_fifo.num_available() == 0 &&
+            pc_cache_to_collector_fifo.num_available() == 0) {
+            wait(parser_to_collector_fifo.data_written_event() |
+                 dc_cache_to_collector_fifo.data_written_event() |
+                 pc_cache_to_collector_fifo.data_written_event());
+        }
 
         // --- Process parser_to_collector_fifo ---
         while (parser_to_collector_fifo.num_available() > 0) {
@@ -69,7 +74,11 @@ void iommu_top::collector_cache_lookup_result_thread() {
                 fflush(stdout);
                 task->walk_ctx.walk_type = WALK_DDT;
                 task->state = TASK_DC_MISS;
-                collector_to_xdtw_fifo.write(task);
+                while (collector_dc_walk_outstanding >= COLLECTOR_MAX_DC_WALK_OUTSTANDING) {
+                    wait(collector_dc_walk_completed_event);
+                }
+                collector_dc_walk_outstanding++;
+                collector_to_xdtw_dc_fifo.write(task);
                 collector_mtx.lock();
                 continue;
             }
@@ -202,7 +211,11 @@ void iommu_top::collector_cache_lookup_result_thread() {
                 task->walk_ctx.walk_type = WALK_PDT;
                 task->need_pc = 1;
                 task->state = TASK_PC_MISS;
-                collector_to_xdtw_fifo.write(task);
+                while (collector_pc_walk_outstanding >= COLLECTOR_MAX_PC_WALK_OUTSTANDING) {
+                    wait(collector_pc_walk_completed_event);
+                }
+                collector_pc_walk_outstanding++;
+                collector_to_xdtw_pc_fifo.write(task);
                 collector_mtx.lock();
                 continue;
             }
@@ -254,6 +267,13 @@ void iommu_top::collector_xdtw_response_thread() {
             printf("[COLLECTOR_XDTW] task_id=%u -> FAULT from xDTW, cause=%d\n",
                    task->task_id, task->cause);
             fflush(stdout);
+            if (task->walk_ctx.walk_type == WALK_DDT) {
+                collector_dc_walk_outstanding--;
+                collector_dc_walk_completed_event.notify(SC_ZERO_TIME);
+            } else if (task->walk_ctx.walk_type == WALK_PDT) {
+                collector_pc_walk_outstanding--;
+                collector_pc_walk_completed_event.notify(SC_ZERO_TIME);
+            }
             collector_to_fault_fifo.write(task);
             continue;
         }
@@ -263,6 +283,8 @@ void iommu_top::collector_xdtw_response_thread() {
             printf("[COLLECTOR_XDTW] task_id=%u, device_id=0x%x -> DDT walk DONE, DC valid\n",
                    task->task_id, task->device_id);
             fflush(stdout);
+            collector_dc_walk_outstanding--;
+            collector_dc_walk_completed_event.notify(SC_ZERO_TIME);
             task->dc_valid = 1;
             task->dc_hit = 1;
             task->DTF = task->DC.tc.DTF;
@@ -367,13 +389,19 @@ void iommu_top::collector_xdtw_response_thread() {
             task->walk_ctx.walk_type = WALK_PDT;
             task->need_pc = 1;
             task->state = TASK_PC_MISS;
-            collector_to_xdtw_fifo.write(task);
+            while (collector_pc_walk_outstanding >= COLLECTOR_MAX_PC_WALK_OUTSTANDING) {
+                wait(collector_pc_walk_completed_event);
+            }
+            collector_pc_walk_outstanding++;
+            collector_to_xdtw_pc_fifo.write(task);
         }
         else if (task->walk_ctx.walk_type == WALK_PDT) {
             // PDT walk completed: PC is now valid
             printf("[COLLECTOR_XDTW] task_id=%u, device_id=0x%x, pid=%u -> PDT walk DONE, PC valid\n",
                    task->task_id, task->device_id, task->process_id);
             fflush(stdout);
+            collector_pc_walk_outstanding--;
+            collector_pc_walk_completed_event.notify(SC_ZERO_TIME);
             task->pc_valid = 1;
             task->pc_hit = 1;
 

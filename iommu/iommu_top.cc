@@ -252,10 +252,16 @@ void iommu_top::ddr_arbiter_thread() {
     uint8_t rr_index = 0;  // round-robin rotation index
     while (true) {
         // Wait for any req_ddr_fifo to have data
-        wait(ctrl_path_req_ddr_fifo.data_written_event() |
-             xdtw_req_ddr_fifo.data_written_event() |
-             ptw_req_ddr_fifo.data_written_event() |
-             msiptw_req_ddr_fifo.data_written_event());
+        // Check if data already available before waiting (avoid missing edge-triggered events)
+        if (ctrl_path_req_ddr_fifo.num_available() == 0 &&
+            xdtw_req_ddr_fifo.num_available() == 0 &&
+            ptw_req_ddr_fifo.num_available() == 0 &&
+            msiptw_req_ddr_fifo.num_available() == 0) {
+            wait(ctrl_path_req_ddr_fifo.data_written_event() |
+                 xdtw_req_ddr_fifo.data_written_event() |
+                 ptw_req_ddr_fifo.data_written_event() |
+                 msiptw_req_ddr_fifo.data_written_event());
+        }
 
         // Process all available requests
         bool processed_any = true;

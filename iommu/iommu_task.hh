@@ -288,11 +288,6 @@ inline std::ostream& operator<<(std::ostream& os, const ctrl_path_ddr_req_t& e) 
 #define DDR_SRC_MSIPTW     2
 #define DDR_SRC_CTRL_PATH  3
 
-// ===================== Walker Outstanding Params =====================
-static const int XDTW_MAX_OUTSTANDING_TASKS  = 4;
-static const int PTW_MAX_OUTSTANDING_TASKS   = 4;
-static const int MSIPTW_MAX_OUTSTANDING_TASKS = 2;
-
 // ===================== Processing Delay Params =====================
 static const int XDTW_COMPUTE_DELAY  = 1;  // ns
 static const int XDTW_PARSE_DELAY    = 1;  // ns

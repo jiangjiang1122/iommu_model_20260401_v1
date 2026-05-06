@@ -5,37 +5,37 @@
 
 // ===================== FIFO深度参数 =====================
 // Parser输出
-static const uint32_t FIFO_DEPTH_PARSER_TO_COLLECTOR = 256;
-static const uint32_t FIFO_DEPTH_PARSER_TO_PQ = 256;
-static const uint32_t FIFO_DEPTH_PARSER_TO_DC_CACHE_QUERY = 256;
-static const uint32_t FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY = 256;
+static const uint32_t FIFO_DEPTH_PARSER_TO_COLLECTOR = 4;
+static const uint32_t FIFO_DEPTH_PARSER_TO_PQ = 4;
+static const uint32_t FIFO_DEPTH_PARSER_TO_DC_CACHE_QUERY = 4;
+static const uint32_t FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY = 4;
 
 // Collector到Cache
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE = 256;
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE = 256;
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY = 256;
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY = 256;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE = 4;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE = 4;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY = 4;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY = 4;
 
 // Collector到Walker
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_XDTW = 128;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_XDTW = 4;
 
 // Cache到Walker
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 256;
-static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 64;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 4;
+static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 4;
 
 // Walker返回Collector/Cache
-static const uint32_t FIFO_DEPTH_XDTW_TO_COLLECTOR = 128;
-static const uint32_t FIFO_DEPTH_PTW_TO_PT_CACHE = 256;
-static const uint32_t FIFO_DEPTH_MSIPTW_TO_MSIPT_CACHE = 64;
+static const uint32_t FIFO_DEPTH_XDTW_TO_COLLECTOR = 4;
+static const uint32_t FIFO_DEPTH_PTW_TO_PT_CACHE = 4;
+static const uint32_t FIFO_DEPTH_MSIPTW_TO_MSIPT_CACHE = 4;
 
 // Cache返回Collector
-static const uint32_t FIFO_DEPTH_DC_CACHE_TO_COLLECTOR = 256;
-static const uint32_t FIFO_DEPTH_PC_CACHE_TO_COLLECTOR = 256;
+static const uint32_t FIFO_DEPTH_DC_CACHE_TO_COLLECTOR = 4;
+static const uint32_t FIFO_DEPTH_PC_CACHE_TO_COLLECTOR = 4;
 
 // 最终输出路径
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 256;
-static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_FWD = 256;
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_FAULT = 256;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 4;
+static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_FWD = 4;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_FAULT = 4;
 
 // DDR FIFO深度
 static const uint32_t FIFO_DEPTH_DDR_RSP = 256;
@@ -48,7 +48,7 @@ static const uint32_t FIFO_DEPTH_MSIPTW_RSP_DDR = 64;
 static const uint32_t FIFO_DEPTH_CTRL_PATH_REQ_DDR = 32;
 
 // 入站缓冲
-static const uint32_t FIFO_DEPTH_INBOUND = 256;
+static const uint32_t FIFO_DEPTH_INBOUND = 4;
 
 // ===================== 缓存参数 =====================
 // DC Cache (Device Context Cache)
@@ -81,6 +81,16 @@ static const uint32_t DDR_READ_LATENCY = 10;        // DDR读延迟(ns)
 static const uint32_t DDR_WRITE_LATENCY = 8;        // DDR写延迟(ns)
 static const uint32_t DDR_BANDWIDTH_GBPS = 128;     // DDR带宽(GB/s)
 
+// ===================== Walker Outstanding 限制 =====================
+static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
+static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
+static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 256;        // PTW总outstanding任务数
+static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
+
+// ===================== Collector Outstanding 限制 =====================
+static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限
+static const uint32_t COLLECTOR_MAX_PC_WALK_OUTSTANDING = 64;   // Collector PC walk outstanding上限
+
 // ===================== 处理延迟参数 ===================
 // 各模块处理延迟(ns)
 static const uint32_t PARSER_DELAY = 1;             // Parser解析延迟
@@ -96,8 +106,8 @@ static const uint32_t FORWARDER_DELAY = 2;          // Forwarder转发延迟
 
 // ===================== 系统参数 =====================
 static const uint32_t MAX_CONCURRENT_TASKS = 256;   // 最大并发任务数
-static const uint32_t MAX_DEVICES = 1024;           // 最大设备数
-static const uint32_t MAX_PROCESSES = 65536;        // 最大进程数
+static const uint32_t MAX_DEVICES = 64;           // 最大设备数
+static const uint32_t MAX_PROCESSES = 64;        // 最大进程数
 static const uint32_t MAX_DEVID_WIDTH = 24;         // 设备ID最大位宽
 
 #endif // __IOMMU_PERF_PARAMS_HH__

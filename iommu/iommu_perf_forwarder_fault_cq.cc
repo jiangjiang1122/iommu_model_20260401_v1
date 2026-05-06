@@ -12,8 +12,12 @@
 void iommu_top::forwarder_thread() {
     while (true) {
         // Wait on both input FIFOs using OR-list
-        wait(pt_cache_to_fwd_fifo.data_written_event() |
-             msipt_cache_to_fwd_fifo.data_written_event());
+        // Check if data already available before waiting (avoid missing edge-triggered events)
+        if (pt_cache_to_fwd_fifo.num_available() == 0 &&
+            msipt_cache_to_fwd_fifo.num_available() == 0) {
+            wait(pt_cache_to_fwd_fifo.data_written_event() |
+                 msipt_cache_to_fwd_fifo.data_written_event());
+        }
 
         iommu_task_t* task = nullptr;
 

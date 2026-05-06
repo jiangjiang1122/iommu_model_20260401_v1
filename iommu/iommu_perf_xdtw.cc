@@ -11,14 +11,36 @@
 // ============================================================
 void iommu_top::xdtw_req_thread() {
     while (true) {
-        // Flow control: wait for outstanding count below limit
-        while (xdtw_outstanding_task_count >= XDTW_MAX_OUTSTANDING_TASKS) {
-            wait(xdtw_task_completed_event);
+        // Flow control: wait until at least one walk type has room
+        while (xdtw_dc_outstanding_task_count >= XDTW_MAX_DC_OUTSTANDING_TASKS &&
+               xdtw_pc_outstanding_task_count >= XDTW_MAX_PC_OUTSTANDING_TASKS) {
+            wait(xdtw_dc_task_completed_event | xdtw_pc_task_completed_event);
         }
 
-        iommu_task_t* task = collector_to_xdtw_fifo.read();
+        iommu_task_t* task = nullptr;
+
+        // Try to read from the fifo that matches available capacity
+        if (xdtw_dc_outstanding_task_count < XDTW_MAX_DC_OUTSTANDING_TASKS &&
+            collector_to_xdtw_dc_fifo.num_available() > 0) {
+            task = collector_to_xdtw_dc_fifo.read();
+        } else if (xdtw_pc_outstanding_task_count < XDTW_MAX_PC_OUTSTANDING_TASKS &&
+                   collector_to_xdtw_pc_fifo.num_available() > 0) {
+            task = collector_to_xdtw_pc_fifo.read();
+        } else {
+            // Wait for data or completion event
+            wait(collector_to_xdtw_dc_fifo.data_written_event() |
+                 collector_to_xdtw_pc_fifo.data_written_event() |
+                 xdtw_dc_task_completed_event |
+                 xdtw_pc_task_completed_event);
+            continue;
+        }
+
         task->state = TASK_XDTW_REQ;
-        xdtw_outstanding_task_count++;
+        if (task->walk_ctx.walk_type == WALK_DDT) {
+            xdtw_dc_outstanding_task_count++;
+        } else {
+            xdtw_pc_outstanding_task_count++;
+        }
 
         wait(XDTW_COMPUTE_DELAY, SC_NS);
 
@@ -306,8 +328,13 @@ void iommu_top::xdtw_rsp_thread() {
             xdtw_walks_mtx.lock();
             xdtw_active_walks.erase(rsp.task_id);
             xdtw_walks_mtx.unlock();
-            xdtw_outstanding_task_count--;
-            xdtw_task_completed_event.notify(SC_ZERO_TIME);
+            if (task->walk_ctx.walk_type == WALK_DDT) {
+                xdtw_dc_outstanding_task_count--;
+                xdtw_dc_task_completed_event.notify(SC_ZERO_TIME);
+            } else {
+                xdtw_pc_outstanding_task_count--;
+                xdtw_pc_task_completed_event.notify(SC_ZERO_TIME);
+            }
             xdtw_to_collector_fifo.write(task);
         }
         else if (walk_complete) {
@@ -318,8 +345,13 @@ void iommu_top::xdtw_rsp_thread() {
             xdtw_walks_mtx.lock();
             xdtw_active_walks.erase(rsp.task_id);
             xdtw_walks_mtx.unlock();
-            xdtw_outstanding_task_count--;
-            xdtw_task_completed_event.notify(SC_ZERO_TIME);
+            if (task->walk_ctx.walk_type == WALK_DDT) {
+                xdtw_dc_outstanding_task_count--;
+                xdtw_dc_task_completed_event.notify(SC_ZERO_TIME);
+            } else {
+                xdtw_pc_outstanding_task_count--;
+                xdtw_pc_task_completed_event.notify(SC_ZERO_TIME);
+            }
             xdtw_to_collector_fifo.write(task);
         }
         else if (need_next_ddr) {
