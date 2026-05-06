@@ -30,7 +30,7 @@ public:
     SC_HAS_PROCESS(DDR_Module);
 
     DDR_Module(sc_module_name name) : sc_module(name),
-        ddr_req_fifo("ddr_req_fifo", 16)
+        ddr_req_fifo("ddr_req_fifo", 1024)
     {
         // Initialize simulated memory
         memset(memory, 0, sizeof(memory));

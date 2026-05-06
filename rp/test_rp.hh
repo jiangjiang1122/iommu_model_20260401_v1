@@ -70,11 +70,15 @@ public:
     // Concurrent test synchronization
     sc_event concurrent_test_event;
 
+    // Multi-request response tracking
+    int response_count;
+    sc_event response_count_event;
+
     SC_HAS_PROCESS(RP_Module);
 
     RP_Module(sc_module_name name, iommu_top* iommu_module, DDR_Module* ddr_module) :
         sc_module(name), iommu_ptr(iommu_module), ddr_ptr(ddr_module),
-        pending_response_trans(nullptr)
+        pending_response_trans(nullptr), response_count(0)
     {
         // Register nb_transport_bw for receiving AT responses from IOMMU
         axi_master_to_pcie_noc_0_socket.register_nb_transport_bw(
@@ -100,6 +104,9 @@ public:
             // Save response and notify waiting thread
             pending_response_trans = &trans;
             response_event.notify(SC_ZERO_TIME);
+            // Increment multi-request response counter
+            response_count++;
+            response_count_event.notify(SC_ZERO_TIME);
             // Send END_RESP
             phase = tlm::END_RESP;
             return tlm::TLM_COMPLETED;

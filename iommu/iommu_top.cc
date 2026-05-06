@@ -167,7 +167,7 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         fflush(stdout);
 
         // 3. Push to inbound_fifo
-        inbound_fifo.nb_write(task);
+        inbound_fifo.write(task);
 
         // 4. Return END_REQ (request accepted)
         phase = tlm::END_REQ;
@@ -209,15 +209,16 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
         rsp.error = (trans.get_response_status() != tlm::TLM_OK_RESPONSE);
 
         // Route to corresponding rsp_ddr_fifo based on source_module
+        // Use blocking write() to prevent silent drop when fifo is full
         switch (pending.source_module) {
             case DDR_SRC_XDTW:
-                xdtw_rsp_ddr_fifo.nb_write(rsp);
+                xdtw_rsp_ddr_fifo.write(rsp);
                 break;
             case DDR_SRC_PTW:
-                ptw_rsp_ddr_fifo.nb_write(rsp);
+                ptw_rsp_ddr_fifo.write(rsp);
                 break;
             case DDR_SRC_MSIPTW:
-                msiptw_rsp_ddr_fifo.nb_write(rsp);
+                msiptw_rsp_ddr_fifo.write(rsp);
                 break;
             case DDR_SRC_CTRL_PATH:
                 // Control path: copy data to ctrl_path_rsp_buf and notify

@@ -1,0 +1,2534 @@
+
+        SystemC 2.3.3-Accellera --- Mar 17 2022 13:55:26
+        Copyright (c) 1996-2018 by all Contributors,
+        ALL RIGHTS RESERVED
+2.3.3-Accellera
+Copyright (c) 1996-2018 by all Contributors,
+ALL RIGHTS RESERVED
+Starting RISC-V IOMMU SystemC Model
+IOMMU simulation start
+
+========== IOMMU Single-Request Single-Level Test ==========
+[DEBUG] Reading DDTP register at offset 0x10, value: 0x2
+[DEBUG] DDTP register details - iommu_mode: 2, ppn: 0x0, busy: 0
+[DEBUG] Current IOMMU mode before enable_iommu: 2
+[DEBUG] Reading DDTP register at offset 0x10, value: 0x2
+[DEBUG] DDTP register details - iommu_mode: 2, ppn: 0x0, busy: 0
+[WRITE_MEMORY_RP] Writing to addr=0x138, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x140, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x148, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x150, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x158, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x160, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x168, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x170, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x178, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x180, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x188, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x190, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x198, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1a0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1a8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1b0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1b8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1c0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1c8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1d0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1d8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1e0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1e8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1f0, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x1f8, size=8, data[0]=0x0
+[WRITE_MEMORY_RP] Writing to addr=0x200, size=8, data[0]=0x0
+[DEBUG] Writing to DDTP register at offset 0x10, data: 0x2
+[DEBUG] Writing DDTP register details - iommu_mode: 2, ppn: 0x0, busy: 0
+[DEBUG] Reading DDTP register at offset 0x10, value: 0x2
+[DEBUG] DDTP register details - iommu_mode: 2, ppn: 0x0, busy: 0
+[DEBUG] Reading DDTP register at offset 0x10, value: 0x2
+[DEBUG] DDTP register details - iommu_mode: 2, ppn: 0x0, busy: 0
+[DEBUG] IOMMU mode after enable_iommu: 2 (expect 2 for DDT_1LVL)
+
+========== Config Device (device_id=0x05, Bare+Sv39) ==========
+[ADD_DEVICE] Called with iohgatp_mode=0, iosatp_mode=8
+[ADD_DEVICE] Set DC.iohgatp.MODE=0, PPN=0x0
+[ADD_DEV_CONTEXT] Writing DC for device_id=0x5, DDI[0]=5, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x140
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x140
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x0
+[WRITE_MEMORY_RP] Writing to addr=0x140, size=64, data[0]=0x181
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x140
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x0
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV] DC addr: 0x140, iohgatp.MODE=0 (Bare), iosatp.MODE=8 (Sv39), iosatp.PPN=0xa
+
+[DEV] Setting up S-stage page table (Sv39)...
+[DEV] Added S-stage PTE at addr 0x15050, IOVA 0xa000 -> PA 0x12000 (PPN=0x12)
+
+[TEST] Invalidating IOMMU caches...
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+
+========== Single Translation Request ==========
+[TEST] Starting translation: device_id=0x05, IOVA=0xa000 (expect PA=0x12000 via Sv39)
+[SEND_REQ] Entering send_translation_request_rp, IOVA=0xa000
+[SEND_REQ_COUT] IOVA=0xa000
+[DEBUG_IOVA] Entering iommu_translate_iova_rp
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=1, device_id=0x5, iova=0xa000, at=0 -> inbound_fifo
+[PARSER] task_id=1 popped from inbound_fifo
+[PARSER] task_id=1, device_id=0x5, iova=0xa000, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=1, device_id=0x5 -> MISS
+[PC_CACHE] task_id=1, device_id=0x5, pid=0 -> MISS
+[COLLECTOR] task_id=1, device_id=0x5 -> DC MISS, route to xDTW(DDT walk)
+[XDTW_REQ] task_id=1, walk_type=DDT, level=0, addr=0x140, size=64, read_count=1 -> ddr_req
+[DDR_ARBITER] Route XDTW request: task_id=1, addr=0x140, size=64, is_write=0 -> DDR
+[DDR] READ addr=0x140, len=64
+[XDTW_RSP] task_id=1, DDT_READ_DC: read_count=1, addr=0x140, DC_SIZE=64
+[XDTW_RSP] task_id=1, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=1, device_id=0x5 -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=1, device_id=0x5 -> update DC cache
+[PT_CACHE] task_id=1, iova=0xa000 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=1, iova=0xa000, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=1, walk_phase=0, addr=0xa000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0xa000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xa000, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=1, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=1, VS_WALK non-leaf -> next addr=0x14000, read_count=2
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0x14000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0x14000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x14000, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=1, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=1, VS_WALK non-leaf -> next addr=0x15050, read_count=3
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0x15050, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0x15050, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x15050, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=1, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x12, total_reads=3
+[PTW_RSP] task_id=1, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=1, -> AD_UPDATE (read_count=4), addr=0x15050
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0x15050, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0x15050, size=8, is_write=1 -> DDR
+[DDR] WRITE addr=0x15050, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=1, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=1, AD_UPDATE -> DONE, total_reads=4, pa=0x12000
+[PTW_RSP] task_id=1 -> WALK COMPLETE, pa=0x12000, total_reads=4 -> pt_cache
+[PT_CACHE_PTW] task_id=1, iova=0xa000 -> PTW DONE, pa=0x12000 -> forwarder
+[FORWARDER] task_id=1, iova=0xa000, pa=0x12000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=1, pa=0x12000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x12000, status=TLM_OK_RESPONSE
+[RP Module] Transaction completed - at:0, pid_valid:0, exec_req:0, priv_req:0, no_write:0, read_writeAMO:0, response: TLM_OK_RESPONSE
+[DEBUG_IOVA] TLM response addr=0x12000, status=TLM_OK_RESPONSE, extracted PA=0x12000
+[DEBUG_IOVA] Exiting iommu_translate_iova_rp
+[SEND_REQ] Exiting send_translation_request_rp, status=0x0
+[SEND_REQ_COUT] Status=0x0
+[TEST] Request returned, status=0x0
+[TEST] Translation SUCCESS! PA=0x12000
+
+[TEST] Single-request test completed!
+
+========== Two-Stage Translation Test ==========
+[ADD_DEVICE] Called with iohgatp_mode=8, iosatp_mode=8
+[ADD_DEVICE] Allocated iohgatp PPN=0x64 for mode 8
+[ADD_DEVICE] Set DC.iohgatp.MODE=8, PPN=0x64
+[ADD_G_STAGE_PTE] GPA=0x32000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=50, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0x64000 (PPN=0x64)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0x64000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0x69 for level 2
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0x69000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0x69000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0x6a for level 1
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0x6a000
+[ADD_DEV_CONTEXT] Writing DC for device_id=0x6, DDI[0]=6, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x180
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x180
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x8000100000000064
+[WRITE_MEMORY_RP] Writing to addr=0x180, size=64, data[0]=0x181
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x180
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x8000100000000064
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV2] DC addr: 0x180, iohgatp.MODE=8 (Sv39x4), iosatp.MODE=8 (Sv39), iosatp.PPN=0x32
+[ADD_G_STAGE_PTE] GPA=0x33000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=51, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0x64000 (PPN=0x64)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0x64000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x1a401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0x69000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0x69000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x1a801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0x6a000
+[ADD_G_STAGE_PTE] GPA=0x34000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=52, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0x64000 (PPN=0x64)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0x64000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x1a401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0x69000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0x69000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x1a801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0x6a000
+[DEV2] Added VS-stage PTE at addr 0x79058, IOVA 0xb000 -> GPA 0x19000 (PPN=0x19)
+[ADD_G_STAGE_PTE] GPA=0x19000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=25, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0x64000 (PPN=0x64)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0x64000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x1a401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0x69000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0x69000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x1a801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0x6a000
+[DEV2] Added G-stage PTE at addr 0x6a0c8, GPA 0x19000 -> SPA 0x32000 (PPN=0x32)
+[DEV2] Pure functional model: translate_gpa(GPA=0x19000) -> SPA=0x32000, PTE_addr=0x6a0c8
+
+[TEST] Invalidating IOMMU caches for two-stage test...
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+
+========== Two-Stage Translation Request ==========
+[TEST] Starting two-stage translation: device_id=0x06, IOVA=0xb000
+[TEST] Expected flow: IOVA 0xb000 -> VS-stage -> GPA 0x19000 -> G-stage -> SPA 0x32000
+[SEND_REQ] Entering send_translation_request_rp, IOVA=0xb000
+[SEND_REQ_COUT] IOVA=0xb000
+[DEBUG_IOVA] Entering iommu_translate_iova_rp
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=2, device_id=0x6, iova=0xb000, at=0 -> inbound_fifo
+[PARSER] task_id=2 popped from inbound_fifo
+[PARSER] task_id=2, device_id=0x6, iova=0xb000, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=2, device_id=0x6 -> MISS
+[PC_CACHE] task_id=2, device_id=0x6, pid=0 -> MISS
+[COLLECTOR] task_id=2, device_id=0x6 -> DC MISS, route to xDTW(DDT walk)
+[XDTW_REQ] task_id=2, walk_type=DDT, level=0, addr=0x180, size=64, read_count=1 -> ddr_req
+[DDR_ARBITER] Route XDTW request: task_id=2, addr=0x180, size=64, is_write=0 -> DDR
+[DDR] READ addr=0x180, len=64
+[XDTW_RSP] task_id=2, DDT_READ_DC: read_count=1, addr=0x180, DC_SIZE=64
+[XDTW_RSP] task_id=2, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=2, device_id=0x6 -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=2, device_id=0x6 -> update DC cache
+[PT_CACHE] task_id=2, iova=0xb000 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=2, iova=0xb000, iosatp.MODE=8, GV=1 -> start walk
+[PTW_REQ] task_id=2, walk_phase=1, addr=0x64000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x64000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x64000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=2), addr=0x69000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x69000, size=8, phase=1, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x69000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x69000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=3), addr=0x6a190
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x6a190, size=8, phase=1, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x6a190, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x6a190, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=2, GS_IMPLICIT leaf -> VS_WALK (read_count=4), spa=0x68000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x68000, size=8, phase=0, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x68000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x68000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=2, VS_WALK non-leaf: level=2 -> next level 1, read_count=4
+[PTW_RSP] task_id=2, VS_WALK non-leaf -> next addr=0x64000, read_count=5
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x64000, size=8, phase=1, read_count=5
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x64000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x64000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=5
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=6), addr=0x69000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x69000, size=8, phase=1, read_count=6
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x69000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x69000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=6
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=7), addr=0x6a198
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x6a198, size=8, phase=1, read_count=7
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x6a198, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x6a198, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=7
+[PTW_RSP] task_id=2, GS_IMPLICIT leaf -> VS_WALK (read_count=8), spa=0x78000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x78000, size=8, phase=0, read_count=8
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x78000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x78000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=8
+[PTW_RSP] task_id=2, VS_WALK non-leaf: level=1 -> next level 0, read_count=8
+[PTW_RSP] task_id=2, VS_WALK non-leaf -> next addr=0x64000, read_count=9
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x64000, size=8, phase=1, read_count=9
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x64000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x64000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=9
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=10), addr=0x69000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x69000, size=8, phase=1, read_count=10
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x69000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x69000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=10
+[PTW_RSP] task_id=2, GS_IMPLICIT non-leaf -> next (read_count=11), addr=0x6a1a0
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x6a1a0, size=8, phase=1, read_count=11
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x6a1a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x6a1a0, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=11
+[PTW_RSP] task_id=2, GS_IMPLICIT leaf -> VS_WALK (read_count=12), spa=0x79058
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x79058, size=8, phase=0, read_count=12
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x79058, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x79058, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=12
+[PTW_RSP] task_id=2, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x19, total_reads=12
+[PTW_RSP] task_id=2, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=12
+[PTW_RSP] task_id=2, -> AD_UPDATE (read_count=13), addr=0x34058
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x34058, size=8, phase=3, read_count=13
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x34058, size=8, is_write=1 -> DDR
+[DDR] WRITE addr=0x34058, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=13
+[PTW_RSP] task_id=2, AD_UPDATE completed, read_count=13
+[PTW_RSP] task_id=2, AD_UPDATE -> GS_EXPLICIT (read_count=14)
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x64000, size=8, phase=2, read_count=14
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x64000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x64000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=14
+[PTW_RSP] task_id=2, GS_EXPLICIT non-leaf -> next (read_count=15), addr=0x69000
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x69000, size=8, phase=2, read_count=15
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x69000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x69000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=15
+[PTW_RSP] task_id=2, GS_EXPLICIT non-leaf -> next (read_count=16), addr=0x6a0c8
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0x6a0c8, size=8, phase=2, read_count=16
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0x6a0c8, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x6a0c8, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=16
+[PTW_RSP] task_id=2, GS_EXPLICIT leaf -> DONE, total_reads=16, pa=0x32000
+[PTW_RSP] task_id=2 -> WALK COMPLETE, pa=0x32000, total_reads=16 -> pt_cache
+[PT_CACHE_PTW] task_id=2, iova=0xb000 -> PTW DONE, pa=0x32000 -> forwarder
+[FORWARDER] task_id=2, iova=0xb000, pa=0x32000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=2, pa=0x32000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x32000, status=TLM_OK_RESPONSE
+[RP Module] Transaction completed - at:0, pid_valid:0, exec_req:0, priv_req:0, no_write:0, read_writeAMO:0, response: TLM_OK_RESPONSE
+[DEBUG_IOVA] TLM response addr=0x32000, status=TLM_OK_RESPONSE, extracted PA=0x32000
+[DEBUG_IOVA] Exiting iommu_translate_iova_rp
+[SEND_REQ] Exiting send_translation_request_rp, status=0x0
+[SEND_REQ_COUT] Status=0x0
+[TEST] Request returned, status=0x0
+[TEST] Translation SUCCESS! PA=0x32000
+[TEST] PASS: Performance model PA matches pure functional model expected SPA!
+
+[TEST] Two-stage translation test completed!
+
+========== Concurrent Two-Stage Translation Test ==========
+[ADD_DEVICE] Called with iohgatp_mode=8, iosatp_mode=8
+[ADD_DEVICE] Allocated iohgatp PPN=0xc8 for mode 8
+[ADD_DEVICE] Set DC.iohgatp.MODE=8, PPN=0xc8
+[ADD_G_STAGE_PTE] GPA=0x64000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=100, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xc8000 (PPN=0xc8)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xc8000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0xcd for level 2
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xcd000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xcd000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0xce for level 1
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xce000
+[ADD_DEV_CONTEXT] Writing DC for device_id=0x7, DDI[0]=7, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x1c0
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x1c0
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x80001000000000c8
+[WRITE_MEMORY_RP] Writing to addr=0x1c0, size=64, data[0]=0x181
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x1c0
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x80001000000000c8
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV3] DC addr: 0x1c0, iohgatp.MODE=8 (Sv39x4), iosatp.MODE=8 (Sv39)
+[ADD_DEVICE] Called with iohgatp_mode=8, iosatp_mode=8
+[ADD_DEVICE] Allocated iohgatp PPN=0xd0 for mode 8
+[ADD_DEVICE] Set DC.iohgatp.MODE=8, PPN=0xd0
+[ADD_G_STAGE_PTE] GPA=0x65000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=101, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xd0000 (PPN=0xd0)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xd0000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0xd5 for level 2
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xd5000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xd5000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE invalid (V=0), allocating new page...
+[ADD_G_STAGE_PTE] Allocated PPN=0xd6 for level 1
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xd6000
+[ADD_DEV_CONTEXT] Writing DC for device_id=0x8, DDI[0]=8, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x200
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x200
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x80001000000000d0
+[WRITE_MEMORY_RP] Writing to addr=0x200, size=64, data[0]=0x181
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x200
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x80001000000000d0
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV4] DC addr: 0x200, iohgatp.MODE=8 (Sv39x4), iosatp.MODE=8 (Sv39)
+[ADD_G_STAGE_PTE] GPA=0x66000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=102, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xc8000 (PPN=0xc8)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xc8000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x33401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xcd000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xcd000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x33801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xce000
+[ADD_G_STAGE_PTE] GPA=0x67000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=103, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xc8000 (PPN=0xc8)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xc8000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x33401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xcd000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xcd000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x33801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xce000
+[DEV3] Added VS-stage PTE at addr 0xdd060, IOVA 0xc000 -> GPA 0x21000 (PPN=0x21)
+[ADD_G_STAGE_PTE] GPA=0x21000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=33, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xc8000 (PPN=0xc8)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xc8000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x33401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xcd000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xcd000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x33801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xce000
+[DEV3] Added G-stage PTE at addr 0xce108, GPA 0x21000 -> SPA 0x42000 (PPN=0x42)
+[ADD_G_STAGE_PTE] GPA=0x68000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=104, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xd0000 (PPN=0xd0)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xd0000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x35401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xd5000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xd5000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x35801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xd6000
+[ADD_G_STAGE_PTE] GPA=0x69000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=105, [1]=0, [2]=0, [3]=0
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xd0000 (PPN=0xd0)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xd0000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x35401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xd5000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xd5000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x35801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xd6000
+[DEV4] Added VS-stage PTE at addr 0xdf068, IOVA 0xd000 -> GPA 0x23000 (PPN=0x23)
+[ADD_G_STAGE_PTE] GPA=0x23000, add_level=0, LEVELS=3
+[ADD_G_STAGE_PTE] VPN values: [0]=35, [1]=0, [2]=0, [3]=30293
+[ADD_G_STAGE_PTE] Starting walk: i=2, root_addr=0xd0000 (PPN=0xd0)
+[ADD_G_STAGE_PTE] Reading PTE at level 2, addr=0xd0000 (vpn[2]=0)
+[ADD_G_STAGE_PTE] Level 2 PTE already valid: 0x35401
+[ADD_G_STAGE_PTE] Moving to level 1, next_addr=0xd5000
+[ADD_G_STAGE_PTE] Reading PTE at level 1, addr=0xd5000 (vpn[1]=0)
+[ADD_G_STAGE_PTE] Level 1 PTE already valid: 0x35801
+[ADD_G_STAGE_PTE] Moving to level 0, next_addr=0xd6000
+[DEV4] Added G-stage PTE at addr 0xd6118, GPA 0x23000 -> SPA 0x44000 (PPN=0x44)
+[DEV3] Pure functional model: translate_gpa(GPA=0x21000) -> SPA=0x42000, PTE_addr=0xce108
+[DEV4] Pure functional model: translate_gpa(GPA=0x23000) -> SPA=0x44000, PTE_addr=0xd6118
+
+[TEST] Invalidating IOMMU caches for concurrent test...
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+
+========== Triggering Concurrent Translation Requests ==========
+[TEST] Request 1: device_id=0x07, IOVA=0xc000 (expect SPA=0x42000)
+[TEST] Request 2: device_id=0x08, IOVA=0xd000 (expect SPA=0x44000)
+
+[TEST-THREAD2] Sending translation request: device_id=0x07, IOVA=0xc000
+
+[TEST-THREAD3] Sending translation request: device_id=0x08, IOVA=0xd000
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=3, device_id=0x7, iova=0xc000, at=0 -> inbound_fifo
+[PARSER] task_id=3 popped from inbound_fifo
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=4, device_id=0x8, iova=0xd000, at=0 -> inbound_fifo
+[PARSER] task_id=3, device_id=0x7, iova=0xc000, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=4 popped from inbound_fifo
+[PARSER] task_id=4, device_id=0x8, iova=0xd000, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=3, device_id=0x7, pid=0 -> MISS
+[DC_CACHE] task_id=3, device_id=0x7 -> MISS
+[COLLECTOR] task_id=3, device_id=0x7 -> DC MISS, route to xDTW(DDT walk)
+[DC_CACHE] task_id=4, device_id=0x8 -> MISS
+[XDTW_REQ] task_id=3, walk_type=DDT, level=0, addr=0x1c0, size=64, read_count=1 -> ddr_req
+[PC_CACHE] task_id=4, device_id=0x8, pid=0 -> MISS
+[DDR_ARBITER] Route XDTW request: task_id=3, addr=0x1c0, size=64, is_write=0 -> DDR
+[COLLECTOR] task_id=4, device_id=0x8 -> DC MISS, route to xDTW(DDT walk)
+[XDTW_REQ] task_id=4, walk_type=DDT, level=0, addr=0x200, size=64, read_count=1 -> ddr_req
+[DDR_ARBITER] Route XDTW request: task_id=4, addr=0x200, size=64, is_write=0 -> DDR
+[DDR] READ addr=0x1c0, len=64
+[XDTW_RSP] task_id=3, DDT_READ_DC: read_count=1, addr=0x1c0, DC_SIZE=64
+[XDTW_RSP] task_id=3, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=3, device_id=0x7 -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=3, device_id=0x7 -> update DC cache
+[PT_CACHE] task_id=3, iova=0xc000 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=3, iova=0xc000, iosatp.MODE=8, GV=1 -> start walk
+[PTW_REQ] task_id=3, walk_phase=1, addr=0xc8000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xc8000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0x200, len=64
+[XDTW_RSP] task_id=4, DDT_READ_DC: read_count=1, addr=0x200, DC_SIZE=64
+[XDTW_RSP] task_id=4, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=4, device_id=0x8 -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=4, device_id=0x8 -> update DC cache
+[PT_CACHE] task_id=4, iova=0xd000 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=4, iova=0xd000, iosatp.MODE=8, GV=1 -> start walk
+[PTW_REQ] task_id=4, walk_phase=1, addr=0xd0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd0000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xc8000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=2), addr=0xcd000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xcd000, size=8, phase=1, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xcd000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd0000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=2), addr=0xd5000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd5000, size=8, phase=1, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xcd000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=3), addr=0xce320
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xce320, size=8, phase=1, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xce320, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd5000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=3), addr=0xd6328
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd6328, size=8, phase=1, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd6328, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xce320, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=3, GS_IMPLICIT leaf -> VS_WALK (read_count=4), spa=0xcc000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xcc000, size=8, phase=0, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xcc000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd6328, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=4, GS_IMPLICIT leaf -> VS_WALK (read_count=4), spa=0xd4000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd4000, size=8, phase=0, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd4000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xcc000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=3, VS_WALK non-leaf: level=2 -> next level 1, read_count=4
+[PTW_RSP] task_id=3, VS_WALK non-leaf -> next addr=0xc8000, read_count=5
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xc8000, size=8, phase=1, read_count=5
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xc8000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd4000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=4, VS_WALK non-leaf: level=2 -> next level 1, read_count=4
+[PTW_RSP] task_id=4, VS_WALK non-leaf -> next addr=0xd0000, read_count=5
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd0000, size=8, phase=1, read_count=5
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd0000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xc8000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=5
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=6), addr=0xcd000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xcd000, size=8, phase=1, read_count=6
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xcd000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd0000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=5
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=6), addr=0xd5000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd5000, size=8, phase=1, read_count=6
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xcd000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=6
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=7), addr=0xce330
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xce330, size=8, phase=1, read_count=7
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xce330, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd5000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=6
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=7), addr=0xd6340
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd6340, size=8, phase=1, read_count=7
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd6340, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xce330, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=7
+[PTW_RSP] task_id=3, GS_IMPLICIT leaf -> VS_WALK (read_count=8), spa=0xdc000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xdc000, size=8, phase=0, read_count=8
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xdc000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd6340, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=7
+[PTW_RSP] task_id=4, GS_IMPLICIT leaf -> VS_WALK (read_count=8), spa=0xde000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xde000, size=8, phase=0, read_count=8
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xde000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xdc000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=8
+[PTW_RSP] task_id=3, VS_WALK non-leaf: level=1 -> next level 0, read_count=8
+[PTW_RSP] task_id=3, VS_WALK non-leaf -> next addr=0xc8000, read_count=9
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xc8000, size=8, phase=1, read_count=9
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xc8000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xde000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=8
+[PTW_RSP] task_id=4, VS_WALK non-leaf: level=1 -> next level 0, read_count=8
+[PTW_RSP] task_id=4, VS_WALK non-leaf -> next addr=0xd0000, read_count=9
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd0000, size=8, phase=1, read_count=9
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd0000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xc8000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=9
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=10), addr=0xcd000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xcd000, size=8, phase=1, read_count=10
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xcd000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd0000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=9
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=10), addr=0xd5000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd5000, size=8, phase=1, read_count=10
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xcd000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=10
+[PTW_RSP] task_id=3, GS_IMPLICIT non-leaf -> next (read_count=11), addr=0xce338
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xce338, size=8, phase=1, read_count=11
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xce338, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd5000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=10
+[PTW_RSP] task_id=4, GS_IMPLICIT non-leaf -> next (read_count=11), addr=0xd6348
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd6348, size=8, phase=1, read_count=11
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd6348, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xce338, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=11
+[PTW_RSP] task_id=3, GS_IMPLICIT leaf -> VS_WALK (read_count=12), spa=0xdd060
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xdd060, size=8, phase=0, read_count=12
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xdd060, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd6348, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=1 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=11
+[PTW_RSP] task_id=4, GS_IMPLICIT leaf -> VS_WALK (read_count=12), spa=0xdf068
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xdf068, size=8, phase=0, read_count=12
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xdf068, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xdd060, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=12
+[PTW_RSP] task_id=3, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=12
+[PTW_RSP] task_id=3, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=12
+[PTW_RSP] task_id=3, -> AD_UPDATE (read_count=13), addr=0x67060
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0x67060, size=8, phase=3, read_count=13
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0x67060, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xdf068, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=12
+[PTW_RSP] task_id=4, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=12
+[PTW_RSP] task_id=4, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=12
+[PTW_RSP] task_id=4, -> AD_UPDATE (read_count=13), addr=0x69068
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0x69068, size=8, phase=3, read_count=13
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0x69068, size=8, is_write=1 -> DDR
+[DDR] WRITE addr=0x67060, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=13
+[PTW_RSP] task_id=3, AD_UPDATE completed, read_count=13
+[PTW_RSP] task_id=3, AD_UPDATE -> GS_EXPLICIT (read_count=14)
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xc8000, size=8, phase=2, read_count=14
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xc8000, size=8, is_write=0 -> DDR
+[DDR] WRITE addr=0x69068, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=13
+[PTW_RSP] task_id=4, AD_UPDATE completed, read_count=13
+[PTW_RSP] task_id=4, AD_UPDATE -> GS_EXPLICIT (read_count=14)
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd0000, size=8, phase=2, read_count=14
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd0000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xc8000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=14
+[PTW_RSP] task_id=3, GS_EXPLICIT non-leaf -> next (read_count=15), addr=0xcd000
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xcd000, size=8, phase=2, read_count=15
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xcd000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd0000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=14
+[PTW_RSP] task_id=4, GS_EXPLICIT non-leaf -> next (read_count=15), addr=0xd5000
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd5000, size=8, phase=2, read_count=15
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xcd000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=15
+[PTW_RSP] task_id=3, GS_EXPLICIT non-leaf -> next (read_count=16), addr=0xce108
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xce108, size=8, phase=2, read_count=16
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xce108, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xd5000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=15
+[PTW_RSP] task_id=4, GS_EXPLICIT non-leaf -> next (read_count=16), addr=0xd6118
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xd6118, size=8, phase=2, read_count=16
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xd6118, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xce108, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=16
+[PTW_RSP] task_id=3, GS_EXPLICIT leaf -> DONE, total_reads=16, pa=0x42000
+[PTW_RSP] task_id=3 -> WALK COMPLETE, pa=0x42000, total_reads=16 -> pt_cache
+[PT_CACHE_PTW] task_id=3, iova=0xc000 -> PTW DONE, pa=0x42000 -> forwarder
+[FORWARDER] task_id=3, iova=0xc000, pa=0x42000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=3, pa=0x42000, state=23
+[TEST-THREAD2] b_transport returned, status=TLM_OK_RESPONSE, PA=0x42000
+[TEST-THREAD2] Translation SUCCESS! PA=0x42000
+[TEST-THREAD2] PASS: PA matches expected SPA!
+[DDR] READ addr=0xd6118, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=2 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=16
+[PTW_RSP] task_id=4, GS_EXPLICIT leaf -> DONE, total_reads=16, pa=0x44000
+[PTW_RSP] task_id=4 -> WALK COMPLETE, pa=0x44000, total_reads=16 -> pt_cache
+[PT_CACHE_PTW] task_id=4, iova=0xd000 -> PTW DONE, pa=0x44000 -> forwarder
+[FORWARDER] task_id=4, iova=0xd000, pa=0x44000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=4, pa=0x44000, state=23
+[TEST-THREAD3] b_transport returned, status=TLM_OK_RESPONSE, PA=0x44000
+[TEST-THREAD3] Translation SUCCESS! PA=0x44000
+[TEST-THREAD3] PASS: PA matches expected SPA!
+
+[TEST] Concurrent two-stage translation test completed!
+
+========== Megapage (2MB) Translation Test ==========
+[ADD_DEVICE] Called with iohgatp_mode=0, iosatp_mode=8
+[ADD_DEVICE] Set DC.iohgatp.MODE=0, PPN=0x0
+[ADD_DEV_CONTEXT] Writing DC for device_id=0x9, DDI[0]=9, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x240
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x240
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x0
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x240
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x0
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV5] DC addr: 0x240, iohgatp.MODE=0 (Bare), iosatp.MODE=8 (Sv39)
+[DEV5] Added level-1 leaf PTE (megapage) at addr 0xe8008, IOVA 0x201234 -> PA 0x401234 (PPN=0x400)
+
+[TEST] Invalidating IOMMU caches for megapage test...
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+
+========== Megapage Translation Request ==========
+[TEST] Starting megapage translation: device_id=0x09, IOVA=0x201234 (expect PA=0x401234)
+[SEND_REQ] Entering send_translation_request_rp, IOVA=0x201234
+[SEND_REQ_COUT] IOVA=0x201234
+[DEBUG_IOVA] Entering iommu_translate_iova_rp
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=5, device_id=0x9, iova=0x201234, at=0 -> inbound_fifo
+[PARSER] task_id=5 popped from inbound_fifo
+[PARSER] task_id=5, device_id=0x9, iova=0x201234, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=5, device_id=0x9 -> MISS
+[PC_CACHE] task_id=5, device_id=0x9, pid=0 -> MISS
+[COLLECTOR] task_id=5, device_id=0x9 -> DC MISS, route to xDTW(DDT walk)
+[XDTW_REQ] task_id=5, walk_type=DDT, level=0, addr=0x240, size=64, read_count=1 -> ddr_req
+[DDR_ARBITER] Route XDTW request: task_id=5, addr=0x240, size=64, is_write=0 -> DDR
+[DDR] READ addr=0x240, len=64
+[XDTW_RSP] task_id=5, DDT_READ_DC: read_count=1, addr=0x240, DC_SIZE=64
+[XDTW_RSP] task_id=5, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=5, device_id=0x9 -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=5, device_id=0x9 -> update DC cache
+[PT_CACHE] task_id=5, iova=0x201234 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=5, iova=0x201234, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=5, walk_phase=0, addr=0xe6000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=5, addr=0xe6000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xe6000, len=8
+[PTW_RSP] task_id=5, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=5, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=5, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=5, VS_WALK non-leaf -> next addr=0xe8008, read_count=2
+[PTW_RSP] task_id=5 -> need_next_ddr, addr=0xe8008, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=5, addr=0xe8008, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xe8008, len=8
+[PTW_RSP] task_id=5, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=5, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=5, VS_WALK leaf: level=1, page_sz=0x200000, PPN=0x400, total_reads=2
+[PTW_RSP] task_id=5, VS_WALK leaf -> DONE, total_reads=2, pa=0x401234
+[PTW_RSP] task_id=5 -> WALK COMPLETE, pa=0x401234, total_reads=2 -> pt_cache
+[PT_CACHE_PTW] task_id=5, iova=0x201234 -> PTW DONE, pa=0x401234 -> forwarder
+[FORWARDER] task_id=5, iova=0x201234, pa=0x401234, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=5, pa=0x401234, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x401234, status=TLM_OK_RESPONSE
+[RP Module] Transaction completed - at:0, pid_valid:0, exec_req:0, priv_req:0, no_write:0, read_writeAMO:0, response: TLM_OK_RESPONSE
+[DEBUG_IOVA] TLM response addr=0x401234, status=TLM_OK_RESPONSE, extracted PA=0x401000
+[DEBUG_IOVA] Exiting iommu_translate_iova_rp
+[SEND_REQ] Exiting send_translation_request_rp, status=0x0
+[SEND_REQ_COUT] Status=0x0
+[TEST] Request returned, status=0x0
+[TEST] Translation SUCCESS! PA=0x401234
+[TEST] PASS: Megapage PA matches expected! Page offset 0x1234 correctly preserved.
+
+========== Misaligned Megapage Fault Test ==========
+[DEV5] Added misaligned level-1 leaf PTE at addr 0xe8010, PPN=0x401 (PPN[0]=1)
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[TEST] Starting misaligned megapage translation: device_id=0x09, IOVA=0x401234
+[SEND_REQ] Entering send_translation_request_rp, IOVA=0x401234
+[SEND_REQ_COUT] IOVA=0x401234
+[DEBUG_IOVA] Entering iommu_translate_iova_rp
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=6, device_id=0x9, iova=0x401234, at=0 -> inbound_fifo
+[PARSER] task_id=6 popped from inbound_fifo
+[PARSER] task_id=6, device_id=0x9, iova=0x401234, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=6, device_id=0x9 -> HIT
+[PC_CACHE] task_id=6, device_id=0x9, pid=0 -> MISS
+[COLLECTOR] task_id=6, device_id=0x9 -> DC HIT
+[COLLECTOR] task_id=6, device_id=0x9 -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PT_CACHE] task_id=6, iova=0x401234 -> IOTLB MISS -> PTW
+[PTW_REQ] task_id=6, iova=0x401234, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=6, walk_phase=0, addr=0xe6000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=6, addr=0xe6000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xe6000, len=8
+[PTW_RSP] task_id=6, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=6, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=6, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=6, VS_WALK non-leaf -> next addr=0xe8010, read_count=2
+[PTW_RSP] task_id=6 -> need_next_ddr, addr=0xe8010, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=6, addr=0xe8010, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xe8010, len=8
+[PTW_RSP] task_id=6, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=6, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=6 -> FAULT: misaligned superpage at level=1, PPN=0x401
+[PTW_RSP] task_id=6 -> WALK FAULT, cause=13, total_reads=2
+[FAULT_CQ] task_id=6, cause=13, device_id=0x9, iova=0x401234 -> processing fault
+[IOMMU_TOP] send_response_to_initiator: task_id=6, pa=0x0, state=24
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x0, status=TLM_GENERIC_ERROR_RESPONSE
+[RP Module] Transaction completed - at:0, pid_valid:0, exec_req:0, priv_req:0, no_write:0, read_writeAMO:0, response: TLM_GENERIC_ERROR_RESPONSE
+[DEBUG_IOVA] TLM response addr=0x0, status=TLM_GENERIC_ERROR_RESPONSE, extracted PA=0x0
+[DEBUG_IOVA] Exiting iommu_translate_iova_rp
+[SEND_REQ] Exiting send_translation_request_rp, status=0x1
+[SEND_REQ_COUT] Status=0x1
+[TEST] Request returned, status=0x1
+[TEST] PASS: Misaligned megapage correctly faulted!
+
+[TEST] All page offset tests completed!
+
+========== 100-Request Concurrent Single-Stage Test ==========
+[ADD_DEVICE] Called with iohgatp_mode=0, iosatp_mode=8
+[ADD_DEVICE] Set DC.iohgatp.MODE=0, PPN=0x0
+[ADD_DEV_CONTEXT] Writing DC for device_id=0xa, DDI[0]=10, DDI[1]=0, DDI[2]=0
+[ADD_DEV_CONTEXT] DC.tc.V=1, DC.tc.EN_ATS=0, DC.tc.GADE=1, DC.tc.SADE=1
+[ADD_DEV_CONTEXT] DC_SIZE=64, DC address=0x280
+[ADD_DEV_CONTEXT] About to write DC (size=64 bytes) to address 0x280
+[ADD_DEV_CONTEXT] DC raw data (first 16 bytes): 0x181 0x0
+[ADD_DEV_CONTEXT] Verification - Read back DC from 0x280
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.V=1 (should be 1)
+[ADD_DEV_CONTEXT] Verification - DC_verify.tc.EN_ATS=0
+[ADD_DEV_CONTEXT] Verification - DC raw data (first 16 bytes): 0x181 0x0
+[ADD_DEV_CONTEXT] SUCCESS: DC written and verified successfully!
+[DEV6] DC addr: 0x280, iohgatp.MODE=0 (Bare), iosatp.MODE=8 (Sv39)
+[DEV6] Added S-stage PTE at addr 0xf6080, IOVA 0x10000 -> PA 0x20000
+[DEV6] Added S-stage PTE at addr 0xf6088, IOVA 0x11000 -> PA 0x21000
+[DEV6] Added S-stage PTE at addr 0xf6090, IOVA 0x12000 -> PA 0x22000
+[DEV6] Added S-stage PTE at addr 0xf6098, IOVA 0x13000 -> PA 0x23000
+[DEV6] Added S-stage PTE at addr 0xf60a0, IOVA 0x14000 -> PA 0x24000
+[DEV6] Added S-stage PTE at addr 0xf60a8, IOVA 0x15000 -> PA 0x25000
+[DEV6] Added S-stage PTE at addr 0xf60b0, IOVA 0x16000 -> PA 0x26000
+[DEV6] Added S-stage PTE at addr 0xf60b8, IOVA 0x17000 -> PA 0x27000
+[DEV6] Added S-stage PTE at addr 0xf60c0, IOVA 0x18000 -> PA 0x28000
+[DEV6] Added S-stage PTE at addr 0xf60c8, IOVA 0x19000 -> PA 0x29000
+[DEV6] Added S-stage PTE at addr 0xf60d0, IOVA 0x1a000 -> PA 0x2a000
+[DEV6] Added S-stage PTE at addr 0xf60d8, IOVA 0x1b000 -> PA 0x2b000
+[DEV6] Added S-stage PTE at addr 0xf60e0, IOVA 0x1c000 -> PA 0x2c000
+
+[TEST] Invalidating IOMMU caches for 100-request test...
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+[COMMANDS] Starting to process commands
+[COMMANDS] Checking command queue status - cqon: 0, cqen: 0, cqmf: 0, cmd_ill: 0, cmd_to: 0, command_queue_stall_for_itag: 0, iofence_wait_pending_inv: 0
+[COMMANDS] Command queue not ready, returning
+
+[TEST] Sending 100 concurrent translation requests (device_id=0x0A)...
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=1, device_id=0xa, iova=0x10000, at=0 -> inbound_fifo
+[TEST] Sent request  0: IOVA=0x10000 (expected PA=0x20000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=2, device_id=0xa, iova=0x10200, at=0 -> inbound_fifo
+[TEST] Sent request  1: IOVA=0x10200 (expected PA=0x20200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=3, device_id=0xa, iova=0x10400, at=0 -> inbound_fifo
+[TEST] Sent request  2: IOVA=0x10400 (expected PA=0x20400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=4, device_id=0xa, iova=0x10600, at=0 -> inbound_fifo
+[TEST] Sent request  3: IOVA=0x10600 (expected PA=0x20600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=5, device_id=0xa, iova=0x10800, at=0 -> inbound_fifo
+[TEST] Sent request  4: IOVA=0x10800 (expected PA=0x20800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=6, device_id=0xa, iova=0x10a00, at=0 -> inbound_fifo
+[TEST] Sent request  5: IOVA=0x10a00 (expected PA=0x20a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=7, device_id=0xa, iova=0x10c00, at=0 -> inbound_fifo
+[TEST] Sent request  6: IOVA=0x10c00 (expected PA=0x20c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=8, device_id=0xa, iova=0x10e00, at=0 -> inbound_fifo
+[TEST] Sent request  7: IOVA=0x10e00 (expected PA=0x20e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=9, device_id=0xa, iova=0x11000, at=0 -> inbound_fifo
+[TEST] Sent request  8: IOVA=0x11000 (expected PA=0x21000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=10, device_id=0xa, iova=0x11200, at=0 -> inbound_fifo
+[TEST] Sent request  9: IOVA=0x11200 (expected PA=0x21200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=11, device_id=0xa, iova=0x11400, at=0 -> inbound_fifo
+[TEST] Sent request 10: IOVA=0x11400 (expected PA=0x21400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=12, device_id=0xa, iova=0x11600, at=0 -> inbound_fifo
+[TEST] Sent request 11: IOVA=0x11600 (expected PA=0x21600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=13, device_id=0xa, iova=0x11800, at=0 -> inbound_fifo
+[TEST] Sent request 12: IOVA=0x11800 (expected PA=0x21800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=14, device_id=0xa, iova=0x11a00, at=0 -> inbound_fifo
+[TEST] Sent request 13: IOVA=0x11a00 (expected PA=0x21a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=15, device_id=0xa, iova=0x11c00, at=0 -> inbound_fifo
+[TEST] Sent request 14: IOVA=0x11c00 (expected PA=0x21c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=16, device_id=0xa, iova=0x11e00, at=0 -> inbound_fifo
+[TEST] Sent request 15: IOVA=0x11e00 (expected PA=0x21e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=17, device_id=0xa, iova=0x12000, at=0 -> inbound_fifo
+[PARSER] task_id=1 popped from inbound_fifo
+[TEST] Sent request 16: IOVA=0x12000 (expected PA=0x22000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=18, device_id=0xa, iova=0x12200, at=0 -> inbound_fifo
+[PARSER] task_id=1, device_id=0xa, iova=0x10000, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=2 popped from inbound_fifo
+[TEST] Sent request 17: IOVA=0x12200 (expected PA=0x22200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=19, device_id=0xa, iova=0x12400, at=0 -> inbound_fifo
+[PARSER] task_id=2, device_id=0xa, iova=0x10200, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=3 popped from inbound_fifo
+[TEST] Sent request 18: IOVA=0x12400 (expected PA=0x22400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=20, device_id=0xa, iova=0x12600, at=0 -> inbound_fifo
+[PC_CACHE] task_id=1, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=3, device_id=0xa, iova=0x10400, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=4 popped from inbound_fifo
+[DC_CACHE] task_id=1, device_id=0xa -> MISS
+[TEST] Sent request 19: IOVA=0x12600 (expected PA=0x22600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=21, device_id=0xa, iova=0x12800, at=0 -> inbound_fifo
+[PARSER] task_id=4, device_id=0xa, iova=0x10600, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=5 popped from inbound_fifo
+[COLLECTOR] task_id=1, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 20: IOVA=0x12800 (expected PA=0x22800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=22, device_id=0xa, iova=0x12a00, at=0 -> inbound_fifo
+[DC_CACHE] task_id=2, device_id=0xa -> MISS
+[XDTW_REQ] task_id=1, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[PARSER] task_id=5, device_id=0xa, iova=0x10800, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=6 popped from inbound_fifo
+[PC_CACHE] task_id=2, device_id=0xa, pid=0 -> MISS
+[DDR_ARBITER] Route XDTW request: task_id=1, addr=0x280, size=64, is_write=0 -> DDR
+[TEST] Sent request 21: IOVA=0x12a00 (expected PA=0x22a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=23, device_id=0xa, iova=0x12c00, at=0 -> inbound_fifo
+[PARSER] task_id=6, device_id=0xa, iova=0x10a00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=7 popped from inbound_fifo
+[COLLECTOR] task_id=2, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 22: IOVA=0x12c00 (expected PA=0x22c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=24, device_id=0xa, iova=0x12e00, at=0 -> inbound_fifo
+[PC_CACHE] task_id=3, device_id=0xa, pid=0 -> MISS
+[XDTW_REQ] task_id=2, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[PARSER] task_id=7, device_id=0xa, iova=0x10c00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=8 popped from inbound_fifo
+[DC_CACHE] task_id=3, device_id=0xa -> MISS
+[DDR_ARBITER] Route XDTW request: task_id=2, addr=0x280, size=64, is_write=0 -> DDR
+[TEST] Sent request 23: IOVA=0x12e00 (expected PA=0x22e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=25, device_id=0xa, iova=0x13000, at=0 -> inbound_fifo
+[PARSER] task_id=8, device_id=0xa, iova=0x10e00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=9 popped from inbound_fifo
+[COLLECTOR] task_id=3, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 24: IOVA=0x13000 (expected PA=0x23000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=26, device_id=0xa, iova=0x13200, at=0 -> inbound_fifo
+[DC_CACHE] task_id=4, device_id=0xa -> MISS
+[PC_CACHE] task_id=4, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=9, device_id=0xa, iova=0x11000, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=10 popped from inbound_fifo
+[XDTW_REQ] task_id=3, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[TEST] Sent request 25: IOVA=0x13200 (expected PA=0x23200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=27, device_id=0xa, iova=0x13400, at=0 -> inbound_fifo
+[DDR_ARBITER] Route XDTW request: task_id=3, addr=0x280, size=64, is_write=0 -> DDR
+[PARSER] task_id=10, device_id=0xa, iova=0x11200, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=11 popped from inbound_fifo
+[COLLECTOR] task_id=4, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 26: IOVA=0x13400 (expected PA=0x23400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=28, device_id=0xa, iova=0x13600, at=0 -> inbound_fifo
+[PC_CACHE] task_id=5, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=5, device_id=0xa -> MISS
+[PARSER] task_id=11, device_id=0xa, iova=0x11400, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=12 popped from inbound_fifo
+[XDTW_REQ] task_id=4, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[TEST] Sent request 27: IOVA=0x13600 (expected PA=0x23600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=29, device_id=0xa, iova=0x13800, at=0 -> inbound_fifo
+[DDR_ARBITER] Route XDTW request: task_id=4, addr=0x280, size=64, is_write=0 -> DDR
+[PARSER] task_id=12, device_id=0xa, iova=0x11600, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=13 popped from inbound_fifo
+[COLLECTOR] task_id=5, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 28: IOVA=0x13800 (expected PA=0x23800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=30, device_id=0xa, iova=0x13a00, at=0 -> inbound_fifo
+[DC_CACHE] task_id=6, device_id=0xa -> MISS
+[PARSER] task_id=13, device_id=0xa, iova=0x11800, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=14 popped from inbound_fifo
+[PC_CACHE] task_id=6, device_id=0xa, pid=0 -> MISS
+[TEST] Sent request 29: IOVA=0x13a00 (expected PA=0x23a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=31, device_id=0xa, iova=0x13c00, at=0 -> inbound_fifo
+[PARSER] task_id=14, device_id=0xa, iova=0x11a00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=15 popped from inbound_fifo
+[COLLECTOR] task_id=6, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 30: IOVA=0x13c00 (expected PA=0x23c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=32, device_id=0xa, iova=0x13e00, at=0 -> inbound_fifo
+[PC_CACHE] task_id=7, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=15, device_id=0xa, iova=0x11c00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=16 popped from inbound_fifo
+[DDR] READ addr=0x280, len=64
+[DC_CACHE] task_id=7, device_id=0xa -> MISS
+[TEST] Sent request 31: IOVA=0x13e00 (expected PA=0x23e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=33, device_id=0xa, iova=0x14000, at=0 -> inbound_fifo
+[PARSER] task_id=16, device_id=0xa, iova=0x11e00, TTYP=2 -> collector+dc_cache+pc_cache
+[PARSER] task_id=17 popped from inbound_fifo
+[XDTW_RSP] task_id=1, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=1, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR] task_id=7, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[TEST] Sent request 32: IOVA=0x14000 (expected PA=0x24000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=34, device_id=0xa, iova=0x14200, at=0 -> inbound_fifo
+[DC_CACHE] task_id=8, device_id=0xa -> MISS
+[XDTW_REQ] task_id=5, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[COLLECTOR_XDTW] task_id=1, device_id=0xa -> DDT walk DONE, DC valid
+[PARSER] task_id=17, device_id=0xa, iova=0x12000, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=8, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=18 popped from inbound_fifo
+[DDR_ARBITER] Route XDTW request: task_id=5, addr=0x280, size=64, is_write=0 -> DDR
+[TEST] Sent request 33: IOVA=0x14200 (expected PA=0x24200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=35, device_id=0xa, iova=0x14400, at=0 -> inbound_fifo
+[COLLECTOR] task_id=8, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[PARSER] task_id=18, device_id=0xa, iova=0x12200, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=9, device_id=0xa -> MISS
+[PC_CACHE] task_id=9, device_id=0xa, pid=0 -> MISS
+[DC_CACHE_UPD] task_id=1, device_id=0xa -> update DC cache
+[PARSER] task_id=19 popped from inbound_fifo
+[TEST] Sent request 34: IOVA=0x14400 (expected PA=0x24400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=36, device_id=0xa, iova=0x14600, at=0 -> inbound_fifo
+[PT_CACHE] task_id=1, iova=0x10000 -> IOTLB MISS -> PTW
+[PARSER] task_id=19, device_id=0xa, iova=0x12400, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=9, device_id=0xa -> DC MISS, route to xDTW(DDT walk)
+[PTW_REQ] task_id=1, iova=0x10000, iosatp.MODE=8, GV=0 -> start walk
+[PC_CACHE] task_id=10, device_id=0xa, pid=0 -> MISS
+[PTW_REQ] task_id=1, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DC_CACHE] task_id=10, device_id=0xa -> HIT
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0xf0000, size=8, is_write=0 -> DDR
+[PARSER] task_id=20 popped from inbound_fifo
+[TEST] Sent request 35: IOVA=0x14600 (expected PA=0x24600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=37, device_id=0xa, iova=0x14800, at=0 -> inbound_fifo
+[COLLECTOR] task_id=10, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=10, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=20, device_id=0xa, iova=0x12600, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=11, device_id=0xa -> HIT
+[PC_CACHE] task_id=11, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=21 popped from inbound_fifo
+[TEST] Sent request 36: IOVA=0x14800 (expected PA=0x24800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=38, device_id=0xa, iova=0x14a00, at=0 -> inbound_fifo
+[COLLECTOR] task_id=11, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=11, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=21, device_id=0xa, iova=0x12800, TTYP=2 -> collector+dc_cache+pc_cache
+[DDR] READ addr=0x280, len=64
+[PC_CACHE] task_id=12, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=12, device_id=0xa -> HIT
+[PT_CACHE] task_id=10, iova=0x11200 -> IOTLB MISS -> PTW
+[PARSER] task_id=22 popped from inbound_fifo
+[PTW_REQ] task_id=10, iova=0x11200, iosatp.MODE=8, GV=0 -> start walk
+[TEST] Sent request 37: IOVA=0x14a00 (expected PA=0x24a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=39, device_id=0xa, iova=0x14c00, at=0 -> inbound_fifo
+[XDTW_RSP] task_id=2, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=2, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PARSER] task_id=22, device_id=0xa, iova=0x12a00, TTYP=2 -> collector+dc_cache+pc_cache
+[PTW_REQ] task_id=10, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[COLLECTOR] task_id=12, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=12, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[DDR_ARBITER] Route PTW request: task_id=10, addr=0xf0000, size=8, is_write=0 -> DDR
+[DC_CACHE] task_id=13, device_id=0xa -> HIT
+[XDTW_REQ] task_id=6, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[COLLECTOR_XDTW] task_id=2, device_id=0xa -> DDT walk DONE, DC valid
+[PC_CACHE] task_id=13, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=23 popped from inbound_fifo
+[DDR_ARBITER] Route XDTW request: task_id=6, addr=0x280, size=64, is_write=0 -> DDR
+[TEST] Sent request 38: IOVA=0x14c00 (expected PA=0x24c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=40, device_id=0xa, iova=0x14e00, at=0 -> inbound_fifo
+[PT_CACHE] task_id=11, iova=0x11400 -> IOTLB MISS -> PTW
+[COLLECTOR] task_id=13, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=13, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=23, device_id=0xa, iova=0x12c00, TTYP=2 -> collector+dc_cache+pc_cache
+[PTW_REQ] task_id=11, iova=0x11400, iosatp.MODE=8, GV=0 -> start walk
+[DC_CACHE] task_id=14, device_id=0xa -> HIT
+[DC_CACHE_UPD] task_id=2, device_id=0xa -> update DC cache
+[PC_CACHE] task_id=14, device_id=0xa, pid=0 -> MISS
+[PTW_REQ] task_id=11, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[PARSER] task_id=24 popped from inbound_fifo
+[DDR_ARBITER] Route PTW request: task_id=11, addr=0xf0000, size=8, is_write=0 -> DDR
+[TEST] Sent request 39: IOVA=0x14e00 (expected PA=0x24e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=41, device_id=0xa, iova=0x15000, at=0 -> inbound_fifo
+[COLLECTOR] task_id=14, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=14, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=24, device_id=0xa, iova=0x12e00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=15, device_id=0xa -> HIT
+[PC_CACHE] task_id=15, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=12, iova=0x11600 -> IOTLB MISS -> PTW
+[PARSER] task_id=25 popped from inbound_fifo
+[PTW_REQ] task_id=12, iova=0x11600, iosatp.MODE=8, GV=0 -> start walk
+[TEST] Sent request 40: IOVA=0x15000 (expected PA=0x25000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=42, device_id=0xa, iova=0x15200, at=0 -> inbound_fifo
+[COLLECTOR] task_id=15, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=15, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PTW_REQ] task_id=12, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[PARSER] task_id=25, device_id=0xa, iova=0x13000, TTYP=2 -> collector+dc_cache+pc_cache
+[DDR_ARBITER] Route PTW request: task_id=12, addr=0xf0000, size=8, is_write=0 -> DDR
+[PC_CACHE] task_id=16, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=16, device_id=0xa -> HIT
+[PARSER] task_id=26 popped from inbound_fifo
+[TEST] Sent request 41: IOVA=0x15200 (expected PA=0x25200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=43, device_id=0xa, iova=0x15400, at=0 -> inbound_fifo
+[PT_CACHE] task_id=2, iova=0x10200 -> IOTLB MISS -> PTW
+[PARSER] task_id=26, device_id=0xa, iova=0x13200, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=16, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=16, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[DC_CACHE] task_id=17, device_id=0xa -> HIT
+[PC_CACHE] task_id=17, device_id=0xa, pid=0 -> MISS
+[DDR] READ addr=0x280, len=64
+[PARSER] task_id=27 popped from inbound_fifo
+[TEST] Sent request 42: IOVA=0x15400 (expected PA=0x25400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=44, device_id=0xa, iova=0x15600, at=0 -> inbound_fifo
+[COLLECTOR] task_id=17, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=17, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[XDTW_RSP] task_id=3, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=3, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PARSER] task_id=27, device_id=0xa, iova=0x13400, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=18, device_id=0xa -> HIT
+[XDTW_REQ] task_id=7, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[COLLECTOR_XDTW] task_id=3, device_id=0xa -> DDT walk DONE, DC valid
+[PC_CACHE] task_id=18, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=13, iova=0x11800 -> IOTLB MISS -> PTW
+[PARSER] task_id=28 popped from inbound_fifo
+[DDR_ARBITER] Route XDTW request: task_id=7, addr=0x280, size=64, is_write=0 -> DDR
+[TEST] Sent request 43: IOVA=0x15600 (expected PA=0x25600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=45, device_id=0xa, iova=0x15800, at=0 -> inbound_fifo
+[COLLECTOR] task_id=18, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=18, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=28, device_id=0xa, iova=0x13600, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=19, device_id=0xa, pid=0 -> MISS
+[DC_CACHE_UPD] task_id=3, device_id=0xa -> update DC cache
+[DC_CACHE] task_id=19, device_id=0xa -> HIT
+[PARSER] task_id=29 popped from inbound_fifo
+[TEST] Sent request 44: IOVA=0x15800 (expected PA=0x25800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=46, device_id=0xa, iova=0x15a00, at=0 -> inbound_fifo
+[PT_CACHE] task_id=14, iova=0x11a00 -> IOTLB MISS -> PTW
+[PARSER] task_id=29, device_id=0xa, iova=0x13800, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=19, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=19, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[DC_CACHE] task_id=20, device_id=0xa -> HIT
+[PC_CACHE] task_id=20, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=30 popped from inbound_fifo
+[TEST] Sent request 45: IOVA=0x15a00 (expected PA=0x25a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=47, device_id=0xa, iova=0x15c00, at=0 -> inbound_fifo
+[COLLECTOR] task_id=20, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=20, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=30, device_id=0xa, iova=0x13a00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=21, device_id=0xa -> HIT
+[PC_CACHE] task_id=21, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=15, iova=0x11c00 -> IOTLB MISS -> PTW
+[PARSER] task_id=31 popped from inbound_fifo
+[TEST] Sent request 46: IOVA=0x15c00 (expected PA=0x25c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=48, device_id=0xa, iova=0x15e00, at=0 -> inbound_fifo
+[COLLECTOR] task_id=21, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=21, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=31, device_id=0xa, iova=0x13c00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=22, device_id=0xa -> HIT
+[PC_CACHE] task_id=22, device_id=0xa, pid=0 -> MISS
+[DDR] READ addr=0x280, len=64
+[PARSER] task_id=32 popped from inbound_fifo
+[TEST] Sent request 47: IOVA=0x15e00 (expected PA=0x25e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=49, device_id=0xa, iova=0x16000, at=0 -> inbound_fifo
+[PT_CACHE] task_id=16, iova=0x11e00 -> IOTLB MISS -> PTW
+[XDTW_RSP] task_id=4, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=4, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PARSER] task_id=32, device_id=0xa, iova=0x13e00, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=22, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=22, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=23, device_id=0xa, pid=0 -> MISS
+[XDTW_REQ] task_id=8, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[COLLECTOR_XDTW] task_id=4, device_id=0xa -> DDT walk DONE, DC valid
+[DC_CACHE] task_id=23, device_id=0xa -> HIT
+[DDR_ARBITER] Route XDTW request: task_id=8, addr=0x280, size=64, is_write=0 -> DDR
+[PARSER] task_id=33 popped from inbound_fifo
+[TEST] Sent request 48: IOVA=0x16000 (expected PA=0x26000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=50, device_id=0xa, iova=0x16200, at=0 -> inbound_fifo
+[COLLECTOR] task_id=23, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=23, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=33, device_id=0xa, iova=0x14000, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE_UPD] task_id=4, device_id=0xa -> update DC cache
+[PC_CACHE] task_id=24, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=24, device_id=0xa -> HIT
+[PT_CACHE] task_id=17, iova=0x12000 -> IOTLB MISS -> PTW
+[PARSER] task_id=34 popped from inbound_fifo
+[TEST] Sent request 49: IOVA=0x16200 (expected PA=0x26200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=51, device_id=0xa, iova=0x16400, at=0 -> inbound_fifo
+[COLLECTOR] task_id=24, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=24, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=34, device_id=0xa, iova=0x14200, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=25, device_id=0xa -> HIT
+[PC_CACHE] task_id=25, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=35 popped from inbound_fifo
+[TEST] Sent request 50: IOVA=0x16400 (expected PA=0x26400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=52, device_id=0xa, iova=0x16600, at=0 -> inbound_fifo
+[PT_CACHE] task_id=3, iova=0x10400 -> IOTLB MISS -> PTW
+[PARSER] task_id=35, device_id=0xa, iova=0x14400, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=25, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=25, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=26, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=26, device_id=0xa -> HIT
+[PARSER] task_id=36 popped from inbound_fifo
+[TEST] Sent request 51: IOVA=0x16600 (expected PA=0x26600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=53, device_id=0xa, iova=0x16800, at=0 -> inbound_fifo
+[COLLECTOR] task_id=26, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=26, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=36, device_id=0xa, iova=0x14600, TTYP=2 -> collector+dc_cache+pc_cache
+[DDR] READ addr=0x280, len=64
+[DC_CACHE] task_id=27, device_id=0xa -> HIT
+[PC_CACHE] task_id=27, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=18, iova=0x12200 -> IOTLB MISS -> PTW
+[PARSER] task_id=37 popped from inbound_fifo
+[TEST] Sent request 52: IOVA=0x16800 (expected PA=0x26800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=54, device_id=0xa, iova=0x16a00, at=0 -> inbound_fifo
+[XDTW_RSP] task_id=5, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=5, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PARSER] task_id=37, device_id=0xa, iova=0x14800, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=28, device_id=0xa, pid=0 -> MISS
+[XDTW_REQ] task_id=9, walk_type=DDT, level=0, addr=0x280, size=64, read_count=1 -> ddr_req
+[COLLECTOR] task_id=27, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=27, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[COLLECTOR_XDTW] task_id=5, device_id=0xa -> DDT walk DONE, DC valid
+[DC_CACHE] task_id=28, device_id=0xa -> HIT
+[DDR_ARBITER] Route XDTW request: task_id=9, addr=0x280, size=64, is_write=0 -> DDR
+[PARSER] task_id=38 popped from inbound_fifo
+[TEST] Sent request 53: IOVA=0x16a00 (expected PA=0x26a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=55, device_id=0xa, iova=0x16c00, at=0 -> inbound_fifo
+[PT_CACHE] task_id=19, iova=0x12400 -> IOTLB MISS -> PTW
+[PARSER] task_id=38, device_id=0xa, iova=0x14a00, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=29, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=29, device_id=0xa -> HIT
+[DC_CACHE_UPD] task_id=5, device_id=0xa -> update DC cache
+[PARSER] task_id=39 popped from inbound_fifo
+[TEST] Sent request 54: IOVA=0x16c00 (expected PA=0x26c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=56, device_id=0xa, iova=0x16e00, at=0 -> inbound_fifo
+[COLLECTOR] task_id=28, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=28, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=39, device_id=0xa, iova=0x14c00, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=30, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=30, device_id=0xa -> HIT
+[PT_CACHE] task_id=20, iova=0x12600 -> IOTLB MISS -> PTW
+[PARSER] task_id=40 popped from inbound_fifo
+[TEST] Sent request 55: IOVA=0x16e00 (expected PA=0x26e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=57, device_id=0xa, iova=0x17000, at=0 -> inbound_fifo
+[PARSER] task_id=40, device_id=0xa, iova=0x14e00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=31, device_id=0xa -> HIT
+[PC_CACHE] task_id=31, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=41 popped from inbound_fifo
+[TEST] Sent request 56: IOVA=0x17000 (expected PA=0x27000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=58, device_id=0xa, iova=0x17200, at=0 -> inbound_fifo
+[PT_CACHE] task_id=21, iova=0x12800 -> IOTLB MISS -> PTW
+[PARSER] task_id=41, device_id=0xa, iova=0x15000, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=32, device_id=0xa, pid=0 -> MISS
+[COLLECTOR] task_id=29, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=29, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[DC_CACHE] task_id=32, device_id=0xa -> HIT
+[DDR] READ addr=0xf0000, len=8
+[PARSER] task_id=42 popped from inbound_fifo
+[TEST] Sent request 57: IOVA=0x17200 (expected PA=0x27200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=59, device_id=0xa, iova=0x17400, at=0 -> inbound_fifo
+[PARSER] task_id=42, device_id=0xa, iova=0x15200, TTYP=2 -> collector+dc_cache+pc_cache
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=1, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=1, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0xf5000, size=8, is_write=0 -> DDR
+[PC_CACHE] task_id=33, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=33, device_id=0xa -> HIT
+[PT_CACHE] task_id=22, iova=0x12a00 -> IOTLB MISS -> PTW
+[PARSER] task_id=43 popped from inbound_fifo
+[TEST] Sent request 58: IOVA=0x17400 (expected PA=0x27400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=60, device_id=0xa, iova=0x17600, at=0 -> inbound_fifo
+[PARSER] task_id=43, device_id=0xa, iova=0x15400, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=34, device_id=0xa -> HIT
+[COLLECTOR] task_id=30, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=30, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=34, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=44 popped from inbound_fifo
+[TEST] Sent request 59: IOVA=0x17600 (expected PA=0x27600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=61, device_id=0xa, iova=0x17800, at=0 -> inbound_fifo
+[PT_CACHE] task_id=4, iova=0x10600 -> IOTLB MISS -> PTW
+[PARSER] task_id=44, device_id=0xa, iova=0x15600, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=35, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=35, device_id=0xa -> HIT
+[COLLECTOR] task_id=31, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=31, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=45 popped from inbound_fifo
+[TEST] Sent request 60: IOVA=0x17800 (expected PA=0x27800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=62, device_id=0xa, iova=0x17a00, at=0 -> inbound_fifo
+[PARSER] task_id=45, device_id=0xa, iova=0x15800, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=36, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=36, device_id=0xa -> HIT
+[PT_CACHE] task_id=23, iova=0x12c00 -> IOTLB MISS -> PTW
+[PARSER] task_id=46 popped from inbound_fifo
+[TEST] Sent request 61: IOVA=0x17a00 (expected PA=0x27a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=63, device_id=0xa, iova=0x17c00, at=0 -> inbound_fifo
+[PARSER] task_id=46, device_id=0xa, iova=0x15a00, TTYP=2 -> collector+dc_cache+pc_cache
+[COLLECTOR] task_id=32, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=32, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=37, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=37, device_id=0xa -> HIT
+[DDR] READ addr=0xf0000, len=8
+[PARSER] task_id=47 popped from inbound_fifo
+[TEST] Sent request 62: IOVA=0x17c00 (expected PA=0x27c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=64, device_id=0xa, iova=0x17e00, at=0 -> inbound_fifo
+[PT_CACHE] task_id=24, iova=0x12e00 -> IOTLB MISS -> PTW
+[PTW_RSP] task_id=10, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=10, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=10, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=10, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=10 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[PARSER] task_id=47, device_id=0xa, iova=0x15c00, TTYP=2 -> collector+dc_cache+pc_cache
+[DDR_ARBITER] Route PTW request: task_id=10, addr=0xf5000, size=8, is_write=0 -> DDR
+[DC_CACHE] task_id=38, device_id=0xa -> HIT
+[COLLECTOR] task_id=33, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=33, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=38, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=48 popped from inbound_fifo
+[TEST] Sent request 63: IOVA=0x17e00 (expected PA=0x27e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=65, device_id=0xa, iova=0x18000, at=0 -> inbound_fifo
+[PARSER] task_id=48, device_id=0xa, iova=0x15e00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=39, device_id=0xa -> HIT
+[PC_CACHE] task_id=39, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=25, iova=0x13000 -> IOTLB MISS -> PTW
+[PARSER] task_id=49 popped from inbound_fifo
+[TEST] Sent request 64: IOVA=0x18000 (expected PA=0x28000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=66, device_id=0xa, iova=0x18200, at=0 -> inbound_fifo
+[PARSER] task_id=49, device_id=0xa, iova=0x16000, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=40, device_id=0xa, pid=0 -> MISS
+[COLLECTOR] task_id=34, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=34, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[DC_CACHE] task_id=40, device_id=0xa -> HIT
+[PARSER] task_id=50 popped from inbound_fifo
+[TEST] Sent request 65: IOVA=0x18200 (expected PA=0x28200), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=67, device_id=0xa, iova=0x18400, at=0 -> inbound_fifo
+[PT_CACHE] task_id=26, iova=0x13200 -> IOTLB MISS -> PTW
+[PARSER] task_id=50, device_id=0xa, iova=0x16200, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=41, device_id=0xa -> HIT
+[PC_CACHE] task_id=41, device_id=0xa, pid=0 -> MISS
+[COLLECTOR] task_id=35, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=35, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PARSER] task_id=51 popped from inbound_fifo
+[TEST] Sent request 66: IOVA=0x18400 (expected PA=0x28400), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=68, device_id=0xa, iova=0x18600, at=0 -> inbound_fifo
+[PARSER] task_id=51, device_id=0xa, iova=0x16400, TTYP=2 -> collector+dc_cache+pc_cache
+[PT_CACHE] task_id=27, iova=0x13400 -> IOTLB MISS -> PTW
+[PC_CACHE] task_id=42, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=42, device_id=0xa -> HIT
+[DDR] READ addr=0x280, len=64
+[PARSER] task_id=52 popped from inbound_fifo
+[TEST] Sent request 67: IOVA=0x18600 (expected PA=0x28600), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=69, device_id=0xa, iova=0x18800, at=0 -> inbound_fifo
+[COLLECTOR] task_id=36, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=36, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[XDTW_RSP] task_id=6, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=6, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PARSER] task_id=52, device_id=0xa, iova=0x16600, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=43, device_id=0xa -> HIT
+[COLLECTOR_XDTW] task_id=6, device_id=0xa -> DDT walk DONE, DC valid
+[PC_CACHE] task_id=43, device_id=0xa, pid=0 -> MISS
+[PARSER] task_id=53 popped from inbound_fifo
+[TEST] Sent request 68: IOVA=0x18800 (expected PA=0x28800), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=70, device_id=0xa, iova=0x18a00, at=0 -> inbound_fifo
+[PT_CACHE] task_id=5, iova=0x10800 -> IOTLB MISS -> PTW
+[PARSER] task_id=53, device_id=0xa, iova=0x16800, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=44, device_id=0xa -> HIT
+[COLLECTOR] task_id=37, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=37, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=44, device_id=0xa, pid=0 -> MISS
+[DC_CACHE_UPD] task_id=6, device_id=0xa -> update DC cache
+[PARSER] task_id=54 popped from inbound_fifo
+[TEST] Sent request 69: IOVA=0x18a00 (expected PA=0x28a00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=71, device_id=0xa, iova=0x18c00, at=0 -> inbound_fifo
+[PARSER] task_id=54, device_id=0xa, iova=0x16a00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=45, device_id=0xa -> HIT
+[PC_CACHE] task_id=45, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=28, iova=0x13600 -> IOTLB MISS -> PTW
+[PARSER] task_id=55 popped from inbound_fifo
+[TEST] Sent request 70: IOVA=0x18c00 (expected PA=0x28c00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=72, device_id=0xa, iova=0x18e00, at=0 -> inbound_fifo
+[PARSER] task_id=55, device_id=0xa, iova=0x16c00, TTYP=2 -> collector+dc_cache+pc_cache
+[PC_CACHE] task_id=46, device_id=0xa, pid=0 -> MISS
+[DC_CACHE] task_id=46, device_id=0xa -> HIT
+[PARSER] task_id=56 popped from inbound_fifo
+[TEST] Sent request 71: IOVA=0x18e00 (expected PA=0x28e00), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=73, device_id=0xa, iova=0x19000, at=0 -> inbound_fifo
+[PT_CACHE] task_id=29, iova=0x13800 -> IOTLB MISS -> PTW
+[PARSER] task_id=56, device_id=0xa, iova=0x16e00, TTYP=2 -> collector+dc_cache+pc_cache
+[DC_CACHE] task_id=47, device_id=0xa -> HIT
+[COLLECTOR] task_id=38, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=38, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PC_CACHE] task_id=47, device_id=0xa, pid=0 -> MISS
+[DDR] READ addr=0xf0000, len=8
+[PARSER] task_id=57 popped from inbound_fifo
+[TEST] Sent request 72: IOVA=0x19000 (expected PA=0x29000), nb_status=1
+[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=74, device_id=0xa, iova=0x19200, at=0 -> inbound_fifo
+[PARSER] task_id=57, device_id=0xa, iova=0x17000, TTYP=2 -> collector+dc_cache+pc_cache
+[PTW_RSP] task_id=11, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=11, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=11, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=11, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=11 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=11, addr=0xf5000, size=8, is_write=0 -> DDR
+[DC_CACHE] task_id=48, device_id=0xa -> HIT
+[PC_CACHE] task_id=48, device_id=0xa, pid=0 -> MISS
+[PT_CACHE] task_id=30, iova=0x13a00 -> IOTLB MISS -> PTW
+[COLLECTOR] task_id=39, device_id=0xa -> DC HIT
+[COLLECTOR] task_id=39, device_id=0xa -> DC HIT, iosatp.MODE=8, iohgatp.MODE=0 -> pt_cache_query
+[PT_CACHE] task_id=31, iova=0x13c00 -> IOTLB MISS -> PTW
+[PT_CACHE] task_id=32, iova=0x13e00 -> IOTLB MISS -> PTW
+[DDR] READ addr=0xf0000, len=8
+[PT_CACHE] task_id=33, iova=0x14000 -> IOTLB MISS -> PTW
+[PTW_RSP] task_id=12, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=12, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=12, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=12, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=12 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=12, addr=0xf5000, size=8, is_write=0 -> DDR
+[PT_CACHE] task_id=34, iova=0x14200 -> IOTLB MISS -> PTW
+[PT_CACHE] task_id=35, iova=0x14400 -> IOTLB MISS -> PTW
+[DDR] READ addr=0x280, len=64
+[PT_CACHE] task_id=36, iova=0x14600 -> IOTLB MISS -> PTW
+[XDTW_RSP] task_id=7, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=7, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=7, device_id=0xa -> DDT walk DONE, DC valid
+[PT_CACHE] task_id=6, iova=0x10a00 -> IOTLB MISS -> PTW
+[DC_CACHE_UPD] task_id=7, device_id=0xa -> update DC cache
+[PT_CACHE] task_id=37, iova=0x14800 -> IOTLB MISS -> PTW
+[PT_CACHE] task_id=38, iova=0x14a00 -> IOTLB MISS -> PTW
+[DDR] READ addr=0x280, len=64
+[XDTW_RSP] task_id=8, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=8, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[PT_CACHE] task_id=39, iova=0x14c00 -> IOTLB MISS -> PTW
+[COLLECTOR_XDTW] task_id=8, device_id=0xa -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=8, device_id=0xa -> update DC cache
+[PT_CACHE] task_id=7, iova=0x10c00 -> IOTLB MISS -> PTW
+[PT_CACHE] task_id=8, iova=0x10e00 -> IOTLB MISS -> PTW
+[DDR] READ addr=0x280, len=64
+[XDTW_RSP] task_id=9, DDT_READ_DC: read_count=1, addr=0x280, DC_SIZE=64
+[XDTW_RSP] task_id=9, walk_type=DDT -> DONE, total_ddr_reads=1, return to collector
+[COLLECTOR_XDTW] task_id=9, device_id=0xa -> DDT walk DONE, DC valid
+[DC_CACHE_UPD] task_id=9, device_id=0xa -> update DC cache
+[PT_CACHE] task_id=9, iova=0x11000 -> IOTLB MISS -> PTW
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=1, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=1, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=10, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=10, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=10, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=10, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=10 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=10, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=11, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=11, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=11, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=11, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=11 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=11, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=12, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=12, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=12, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=12, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=12 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=12, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=1, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=1, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=1, -> AD_UPDATE (read_count=4), addr=0xf6080
+[PTW_RSP] task_id=1 -> need_next_ddr, addr=0xf6080, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=1, addr=0xf6080, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=10, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=10, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=10, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=10, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=10, -> AD_UPDATE (read_count=4), addr=0xf6088
+[PTW_RSP] task_id=10 -> need_next_ddr, addr=0xf6088, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=10, addr=0xf6088, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=11, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=11, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=11, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=11, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=11, -> AD_UPDATE (read_count=4), addr=0xf6088
+[PTW_RSP] task_id=11 -> need_next_ddr, addr=0xf6088, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=11, addr=0xf6088, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=12, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=12, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=12, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=12, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=12, -> AD_UPDATE (read_count=4), addr=0xf6088
+[PTW_RSP] task_id=12 -> need_next_ddr, addr=0xf6088, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=12, addr=0xf6088, size=8, is_write=1 -> DDR
+[DDR] WRITE addr=0xf6080, len=8
+[PTW_RSP] task_id=1, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=1, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=1, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=1, AD_UPDATE -> DONE, total_reads=4, pa=0x20000
+[PTW_RSP] task_id=1 -> WALK COMPLETE, pa=0x20000, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=2, iova=0x10200, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=2, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=1, iova=0x10000 -> PTW DONE, pa=0x20000 -> forwarder
+[FORWARDER] task_id=1, iova=0x10000, pa=0x20000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=1, pa=0x20000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20000, status=TLM_OK_RESPONSE
+[DDR] WRITE addr=0xf6088, len=8
+[PTW_RSP] task_id=10, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=10, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=10, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=10, AD_UPDATE -> DONE, total_reads=4, pa=0x21200
+[PTW_RSP] task_id=10 -> WALK COMPLETE, pa=0x21200, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=13, iova=0x11800, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=13, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=13, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=10, iova=0x11200 -> PTW DONE, pa=0x21200 -> forwarder
+[FORWARDER] task_id=10, iova=0x11200, pa=0x21200, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=10, pa=0x21200, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21200, status=TLM_OK_RESPONSE
+[DDR] WRITE addr=0xf6088, len=8
+[PTW_RSP] task_id=11, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=11, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=11, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=11, AD_UPDATE -> DONE, total_reads=4, pa=0x21400
+[PTW_RSP] task_id=11 -> WALK COMPLETE, pa=0x21400, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=14, iova=0x11a00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=14, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=14, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=11, iova=0x11400 -> PTW DONE, pa=0x21400 -> forwarder
+[FORWARDER] task_id=11, iova=0x11400, pa=0x21400, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=11, pa=0x21400, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21400, status=TLM_OK_RESPONSE
+[DDR] WRITE addr=0xf6088, len=8
+[PTW_RSP] task_id=12, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=12, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=12, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=12, AD_UPDATE -> DONE, total_reads=4, pa=0x21600
+[PTW_RSP] task_id=12 -> WALK COMPLETE, pa=0x21600, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=15, iova=0x11c00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=15, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=15, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=12, iova=0x11600 -> PTW DONE, pa=0x21600 -> forwarder
+[FORWARDER] task_id=12, iova=0x11600, pa=0x21600, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=12, pa=0x21600, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21600, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=2, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=2, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=13, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=13, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=13, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=13, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=13 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=13, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=14, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=14, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=14, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=14, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=14 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=14, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=15, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=15, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=15, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=15, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=15 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=15, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=2, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=2, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=2 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=2, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=13, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=13, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=13, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=13, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=13 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=13, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=14, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=14, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=14, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=14, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=14 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=14, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=15, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=15, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=15, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=15, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=15 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=15, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=2, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=2, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=2, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=2, VS_WALK leaf -> DONE, total_reads=3, pa=0x20200
+[PTW_RSP] task_id=2 -> WALK COMPLETE, pa=0x20200, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=16, iova=0x11e00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=16, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=16, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=2, iova=0x10200 -> PTW DONE, pa=0x20200 -> forwarder
+[FORWARDER] task_id=2, iova=0x10200, pa=0x20200, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=2, pa=0x20200, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20200, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=13, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=13, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=13, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=13, VS_WALK leaf -> DONE, total_reads=3, pa=0x21800
+[PTW_RSP] task_id=13 -> WALK COMPLETE, pa=0x21800, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=17, iova=0x12000, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=17, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=17, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=13, iova=0x11800 -> PTW DONE, pa=0x21800 -> forwarder
+[FORWARDER] task_id=13, iova=0x11800, pa=0x21800, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=13, pa=0x21800, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21800, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=14, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=14, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=14, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=14, VS_WALK leaf -> DONE, total_reads=3, pa=0x21a00
+[PTW_RSP] task_id=14 -> WALK COMPLETE, pa=0x21a00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=3, iova=0x10400, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=3, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=14, iova=0x11a00 -> PTW DONE, pa=0x21a00 -> forwarder
+[FORWARDER] task_id=14, iova=0x11a00, pa=0x21a00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=14, pa=0x21a00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21a00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=15, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=15, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=15, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=15, VS_WALK leaf -> DONE, total_reads=3, pa=0x21c00
+[PTW_RSP] task_id=15 -> WALK COMPLETE, pa=0x21c00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=18, iova=0x12200, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=18, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=18, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=15, iova=0x11c00 -> PTW DONE, pa=0x21c00 -> forwarder
+[FORWARDER] task_id=15, iova=0x11c00, pa=0x21c00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=15, pa=0x21c00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21c00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=16, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=16, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=16, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=16, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=16 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=16, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=17, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=17, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=17, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=17, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=17 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=17, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=3, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=3, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=18, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=18, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=18, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=18, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=18 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=18, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=16, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=16, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=16, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=16, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=16 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=16, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=17, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=17, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=17, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=17, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=17 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=17, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=3, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=3, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=3 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=3, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=18, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=18, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=18, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=18, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=18 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=18, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=16, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=16, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=16, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=16, VS_WALK leaf -> DONE, total_reads=3, pa=0x21e00
+[PTW_RSP] task_id=16 -> WALK COMPLETE, pa=0x21e00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=19, iova=0x12400, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=19, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=19, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=16, iova=0x11e00 -> PTW DONE, pa=0x21e00 -> forwarder
+[FORWARDER] task_id=16, iova=0x11e00, pa=0x21e00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=16, pa=0x21e00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21e00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=17, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=17, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=17, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=17, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=17, -> AD_UPDATE (read_count=4), addr=0xf6090
+[PTW_RSP] task_id=17 -> need_next_ddr, addr=0xf6090, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=17, addr=0xf6090, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=3, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=3, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=3, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=3, VS_WALK leaf -> DONE, total_reads=3, pa=0x20400
+[PTW_RSP] task_id=3 -> WALK COMPLETE, pa=0x20400, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=20, iova=0x12600, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=20, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=20, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=3, iova=0x10400 -> PTW DONE, pa=0x20400 -> forwarder
+[FORWARDER] task_id=3, iova=0x10400, pa=0x20400, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=3, pa=0x20400, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20400, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=18, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=18, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=18, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=18, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=18, -> AD_UPDATE (read_count=4), addr=0xf6090
+[PTW_RSP] task_id=18 -> need_next_ddr, addr=0xf6090, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=18, addr=0xf6090, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=19, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=19, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=19, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=19, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=19 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=19, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] WRITE addr=0xf6090, len=8
+[PTW_RSP] task_id=17, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=17, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=17, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=17, AD_UPDATE -> DONE, total_reads=4, pa=0x22000
+[PTW_RSP] task_id=17 -> WALK COMPLETE, pa=0x22000, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=21, iova=0x12800, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=21, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=21, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=17, iova=0x12000 -> PTW DONE, pa=0x22000 -> forwarder
+[FORWARDER] task_id=17, iova=0x12000, pa=0x22000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=17, pa=0x22000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22000, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=20, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=20, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=20, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=20, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=20 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=20, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] WRITE addr=0xf6090, len=8
+[PTW_RSP] task_id=18, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=18, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=18, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=18, AD_UPDATE -> DONE, total_reads=4, pa=0x22200
+[PTW_RSP] task_id=18 -> WALK COMPLETE, pa=0x22200, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=22, iova=0x12a00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=22, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=22, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=18, iova=0x12200 -> PTW DONE, pa=0x22200 -> forwarder
+[FORWARDER] task_id=18, iova=0x12200, pa=0x22200, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=18, pa=0x22200, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22200, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=19, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=19, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=19, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=19, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=19 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=19, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=21, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=21, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=21, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=21, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=21 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=21, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=20, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=20, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=20, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=20, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=20 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=20, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=22, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=22, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=22, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=22, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=22 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=22, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=19, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=19, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=19, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=19, VS_WALK leaf -> DONE, total_reads=3, pa=0x22400
+[PTW_RSP] task_id=19 -> WALK COMPLETE, pa=0x22400, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=4, iova=0x10600, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=4, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=19, iova=0x12400 -> PTW DONE, pa=0x22400 -> forwarder
+[FORWARDER] task_id=19, iova=0x12400, pa=0x22400, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=19, pa=0x22400, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22400, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=21, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=21, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=21, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=21, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=21 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=21, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=20, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=20, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=20, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=20, VS_WALK leaf -> DONE, total_reads=3, pa=0x22600
+[PTW_RSP] task_id=20 -> WALK COMPLETE, pa=0x22600, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=23, iova=0x12c00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=23, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=23, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=20, iova=0x12600 -> PTW DONE, pa=0x22600 -> forwarder
+[FORWARDER] task_id=20, iova=0x12600, pa=0x22600, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=20, pa=0x22600, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22600, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=22, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=22, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=22, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=22, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=22 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=22, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=4, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=4, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=21, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=21, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=21, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=21, VS_WALK leaf -> DONE, total_reads=3, pa=0x22800
+[PTW_RSP] task_id=21 -> WALK COMPLETE, pa=0x22800, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=24, iova=0x12e00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=24, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=24, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=21, iova=0x12800 -> PTW DONE, pa=0x22800 -> forwarder
+[FORWARDER] task_id=21, iova=0x12800, pa=0x22800, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=21, pa=0x22800, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22800, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=23, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=23, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=23, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=23, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=23 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=23, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=22, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=22, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=22, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=22, VS_WALK leaf -> DONE, total_reads=3, pa=0x22a00
+[PTW_RSP] task_id=22 -> WALK COMPLETE, pa=0x22a00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=25, iova=0x13000, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=25, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=25, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=22, iova=0x12a00 -> PTW DONE, pa=0x22a00 -> forwarder
+[FORWARDER] task_id=22, iova=0x12a00, pa=0x22a00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=22, pa=0x22a00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22a00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=4, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=4, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=4 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=4, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=24, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=24, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=24, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=24, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=24 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=24, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=23, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=23, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=23, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=23, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=23 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=23, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=25, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=25, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=25, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=25, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=25 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=25, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=4, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=4, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=4, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=4, VS_WALK leaf -> DONE, total_reads=3, pa=0x20600
+[PTW_RSP] task_id=4 -> WALK COMPLETE, pa=0x20600, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=26, iova=0x13200, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=26, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=26, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=4, iova=0x10600 -> PTW DONE, pa=0x20600 -> forwarder
+[FORWARDER] task_id=4, iova=0x10600, pa=0x20600, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=4, pa=0x20600, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20600, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=24, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=24, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=24, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=24, VS_WALK non-leaf -> next addr=0xf6090, read_count=3
+[PTW_RSP] task_id=24 -> need_next_ddr, addr=0xf6090, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=24, addr=0xf6090, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=23, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=23, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=23, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=23, VS_WALK leaf -> DONE, total_reads=3, pa=0x22c00
+[PTW_RSP] task_id=23 -> WALK COMPLETE, pa=0x22c00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=27, iova=0x13400, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=27, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=27, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=23, iova=0x12c00 -> PTW DONE, pa=0x22c00 -> forwarder
+[FORWARDER] task_id=23, iova=0x12c00, pa=0x22c00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=23, pa=0x22c00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22c00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=25, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=25, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=25, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=25, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=25 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=25, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=26, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=26, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=26, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=26, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=26 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=26, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6090, len=8
+[PTW_RSP] task_id=24, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=24, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=24, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x22, total_reads=3
+[PTW_RSP] task_id=24, VS_WALK leaf -> DONE, total_reads=3, pa=0x22e00
+[PTW_RSP] task_id=24 -> WALK COMPLETE, pa=0x22e00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=5, iova=0x10800, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=5, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=5, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=24, iova=0x12e00 -> PTW DONE, pa=0x22e00 -> forwarder
+[FORWARDER] task_id=24, iova=0x12e00, pa=0x22e00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=24, pa=0x22e00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x22e00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=27, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=27, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=27, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=27, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=27 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=27, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=25, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=25, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=25, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=25, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=25, -> AD_UPDATE (read_count=4), addr=0xf6098
+[PTW_RSP] task_id=25 -> need_next_ddr, addr=0xf6098, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=25, addr=0xf6098, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=26, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=26, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=26, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=26, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=26 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=26, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=5, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=5, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=5, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=5, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=5 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=5, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=27, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=27, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=27, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=27, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=27 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=27, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] WRITE addr=0xf6098, len=8
+[PTW_RSP] task_id=25, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=25, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=25, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=25, AD_UPDATE -> DONE, total_reads=4, pa=0x23000
+[PTW_RSP] task_id=25 -> WALK COMPLETE, pa=0x23000, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=28, iova=0x13600, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=28, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=28, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=25, iova=0x13000 -> PTW DONE, pa=0x23000 -> forwarder
+[FORWARDER] task_id=25, iova=0x13000, pa=0x23000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=25, pa=0x23000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23000, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=26, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=26, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=26, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=26, VS_WALK leaf -> DONE, total_reads=3, pa=0x23200
+[PTW_RSP] task_id=26 -> WALK COMPLETE, pa=0x23200, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=29, iova=0x13800, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=29, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=29, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=26, iova=0x13200 -> PTW DONE, pa=0x23200 -> forwarder
+[FORWARDER] task_id=26, iova=0x13200, pa=0x23200, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=26, pa=0x23200, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23200, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=5, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=5, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=5, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=5, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=5 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=5, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=27, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=27, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=27, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=27, VS_WALK leaf -> DONE, total_reads=3, pa=0x23400
+[PTW_RSP] task_id=27 -> WALK COMPLETE, pa=0x23400, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=30, iova=0x13a00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=30, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=30, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=27, iova=0x13400 -> PTW DONE, pa=0x23400 -> forwarder
+[FORWARDER] task_id=27, iova=0x13400, pa=0x23400, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=27, pa=0x23400, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23400, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=28, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=28, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=28, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=28, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=28 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=28, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=29, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=29, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=29, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=29, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=29 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=29, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=5, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=5, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=5, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=5, VS_WALK leaf -> DONE, total_reads=3, pa=0x20800
+[PTW_RSP] task_id=5 -> WALK COMPLETE, pa=0x20800, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=31, iova=0x13c00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=31, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=31, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=5, iova=0x10800 -> PTW DONE, pa=0x20800 -> forwarder
+[FORWARDER] task_id=5, iova=0x10800, pa=0x20800, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=5, pa=0x20800, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20800, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=30, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=30, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=30, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=30, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=30 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=30, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=28, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=28, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=28, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=28, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=28 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=28, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=29, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=29, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=29, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=29, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=29 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=29, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=31, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=31, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=31, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=31, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=31 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=31, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=30, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=30, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=30, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=30, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=30 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=30, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=28, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=28, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=28, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=28, VS_WALK leaf -> DONE, total_reads=3, pa=0x23600
+[PTW_RSP] task_id=28 -> WALK COMPLETE, pa=0x23600, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=32, iova=0x13e00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=32, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=32, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=28, iova=0x13600 -> PTW DONE, pa=0x23600 -> forwarder
+[FORWARDER] task_id=28, iova=0x13600, pa=0x23600, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=28, pa=0x23600, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23600, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=29, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=29, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=29, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=29, VS_WALK leaf -> DONE, total_reads=3, pa=0x23800
+[PTW_RSP] task_id=29 -> WALK COMPLETE, pa=0x23800, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=33, iova=0x14000, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=33, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=33, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=29, iova=0x13800 -> PTW DONE, pa=0x23800 -> forwarder
+[FORWARDER] task_id=29, iova=0x13800, pa=0x23800, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=29, pa=0x23800, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23800, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=31, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=31, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=31, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=31, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=31 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=31, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=30, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=30, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=30, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=30, VS_WALK leaf -> DONE, total_reads=3, pa=0x23a00
+[PTW_RSP] task_id=30 -> WALK COMPLETE, pa=0x23a00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=34, iova=0x14200, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=34, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=34, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=30, iova=0x13a00 -> PTW DONE, pa=0x23a00 -> forwarder
+[FORWARDER] task_id=30, iova=0x13a00, pa=0x23a00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=30, pa=0x23a00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23a00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=32, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=32, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=32, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=32, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=32 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=32, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=33, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=33, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=33, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=33, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=33 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=33, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=31, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=31, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=31, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=31, VS_WALK leaf -> DONE, total_reads=3, pa=0x23c00
+[PTW_RSP] task_id=31 -> WALK COMPLETE, pa=0x23c00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=35, iova=0x14400, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=35, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=35, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=31, iova=0x13c00 -> PTW DONE, pa=0x23c00 -> forwarder
+[FORWARDER] task_id=31, iova=0x13c00, pa=0x23c00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=31, pa=0x23c00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23c00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=34, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=34, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=34, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=34, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=34 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=34, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=32, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=32, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=32, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=32, VS_WALK non-leaf -> next addr=0xf6098, read_count=3
+[PTW_RSP] task_id=32 -> need_next_ddr, addr=0xf6098, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=32, addr=0xf6098, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=33, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=33, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=33, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=33, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=33 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=33, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=35, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=35, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=35, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=35, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=35 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=35, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=34, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=34, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=34, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=34, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=34 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=34, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6098, len=8
+[PTW_RSP] task_id=32, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=32, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=32, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x23, total_reads=3
+[PTW_RSP] task_id=32, VS_WALK leaf -> DONE, total_reads=3, pa=0x23e00
+[PTW_RSP] task_id=32 -> WALK COMPLETE, pa=0x23e00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=36, iova=0x14600, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=36, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=36, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=32, iova=0x13e00 -> PTW DONE, pa=0x23e00 -> forwarder
+[FORWARDER] task_id=32, iova=0x13e00, pa=0x23e00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=32, pa=0x23e00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x23e00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=33, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=33, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=33, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=33, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=33, -> AD_UPDATE (read_count=4), addr=0xf60a0
+[PTW_RSP] task_id=33 -> need_next_ddr, addr=0xf60a0, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=33, addr=0xf60a0, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=35, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=35, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=35, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=35, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=35 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=35, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=34, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=34, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=34, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=34, A/D update needed: A=0, D=0, is_write=0, SADE=1, read_count=3
+[PTW_RSP] task_id=34, -> AD_UPDATE (read_count=4), addr=0xf60a0
+[PTW_RSP] task_id=34 -> need_next_ddr, addr=0xf60a0, size=8, phase=3, read_count=4
+[DDR_ARBITER] Route PTW request: task_id=34, addr=0xf60a0, size=8, is_write=1 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=36, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=36, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=36, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=36, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=36 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=36, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] WRITE addr=0xf60a0, len=8
+[PTW_RSP] task_id=33, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=33, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=33, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=33, AD_UPDATE -> DONE, total_reads=4, pa=0x24000
+[PTW_RSP] task_id=33 -> WALK COMPLETE, pa=0x24000, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=6, iova=0x10a00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=6, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=6, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=33, iova=0x14000 -> PTW DONE, pa=0x24000 -> forwarder
+[FORWARDER] task_id=33, iova=0x14000, pa=0x24000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=33, pa=0x24000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24000, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=35, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=35, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=35, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=35, VS_WALK leaf -> DONE, total_reads=3, pa=0x24400
+[PTW_RSP] task_id=35 -> WALK COMPLETE, pa=0x24400, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=37, iova=0x14800, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=37, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=37, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=35, iova=0x14400 -> PTW DONE, pa=0x24400 -> forwarder
+[FORWARDER] task_id=35, iova=0x14400, pa=0x24400, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=35, pa=0x24400, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24400, status=TLM_OK_RESPONSE
+[DDR] WRITE addr=0xf60a0, len=8
+[PTW_RSP] task_id=34, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=34, walk_phase=3 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=4
+[PTW_RSP] task_id=34, AD_UPDATE completed, read_count=4
+[PTW_RSP] task_id=34, AD_UPDATE -> DONE, total_reads=4, pa=0x24200
+[PTW_RSP] task_id=34 -> WALK COMPLETE, pa=0x24200, total_reads=4 -> pt_cache
+[PTW_REQ] task_id=38, iova=0x14a00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=38, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=38, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=34, iova=0x14200 -> PTW DONE, pa=0x24200 -> forwarder
+[FORWARDER] task_id=34, iova=0x14200, pa=0x24200, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=34, pa=0x24200, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24200, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=36, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=36, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=36, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=36, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=36 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=36, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=6, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=6, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=6, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=6, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=6 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=6, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=37, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=37, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=37, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=37, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=37 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=37, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=38, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=38, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=38, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=38, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=38 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=38, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=36, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=36, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=36, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=36, VS_WALK leaf -> DONE, total_reads=3, pa=0x24600
+[PTW_RSP] task_id=36 -> WALK COMPLETE, pa=0x24600, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=39, iova=0x14c00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=39, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=39, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=36, iova=0x14600 -> PTW DONE, pa=0x24600 -> forwarder
+[FORWARDER] task_id=36, iova=0x14600, pa=0x24600, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=36, pa=0x24600, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24600, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=6, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=6, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=6, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=6, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=6 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=6, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=37, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=37, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=37, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=37, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=37 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=37, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=38, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=38, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=38, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=38, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=38 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=38, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=39, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=39, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=39, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=39, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=39 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=39, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=6, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=6, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=6, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=6, VS_WALK leaf -> DONE, total_reads=3, pa=0x20a00
+[PTW_RSP] task_id=6 -> WALK COMPLETE, pa=0x20a00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=7, iova=0x10c00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=7, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=7, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=6, iova=0x10a00 -> PTW DONE, pa=0x20a00 -> forwarder
+[FORWARDER] task_id=6, iova=0x10a00, pa=0x20a00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=6, pa=0x20a00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20a00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=37, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=37, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=37, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=37, VS_WALK leaf -> DONE, total_reads=3, pa=0x24800
+[PTW_RSP] task_id=37 -> WALK COMPLETE, pa=0x24800, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=8, iova=0x10e00, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=8, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=8, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=37, iova=0x14800 -> PTW DONE, pa=0x24800 -> forwarder
+[FORWARDER] task_id=37, iova=0x14800, pa=0x24800, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=37, pa=0x24800, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24800, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=38, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=38, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=38, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=38, VS_WALK leaf -> DONE, total_reads=3, pa=0x24a00
+[PTW_RSP] task_id=38 -> WALK COMPLETE, pa=0x24a00, total_reads=3 -> pt_cache
+[PTW_REQ] task_id=9, iova=0x11000, iosatp.MODE=8, GV=0 -> start walk
+[PTW_REQ] task_id=9, walk_phase=0, addr=0xf0000, size=8, read_count=1 -> ddr_req
+[DDR_ARBITER] Route PTW request: task_id=9, addr=0xf0000, size=8, is_write=0 -> DDR
+[PT_CACHE_PTW] task_id=38, iova=0x14a00 -> PTW DONE, pa=0x24a00 -> forwarder
+[FORWARDER] task_id=38, iova=0x14a00, pa=0x24a00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=38, pa=0x24a00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24a00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=39, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=39, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=39, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=39, VS_WALK non-leaf -> next addr=0xf60a0, read_count=3
+[PTW_RSP] task_id=39 -> need_next_ddr, addr=0xf60a0, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=39, addr=0xf60a0, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=7, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=7, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=7, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=7, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=7 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=7, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=8, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=8, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=8, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=8, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=8 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=8, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf0000, len=8
+[PTW_RSP] task_id=9, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=9, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=1
+[PTW_RSP] task_id=9, VS_WALK non-leaf: level=2 -> next level 1, read_count=1
+[PTW_RSP] task_id=9, VS_WALK non-leaf -> next addr=0xf5000, read_count=2
+[PTW_RSP] task_id=9 -> need_next_ddr, addr=0xf5000, size=8, phase=0, read_count=2
+[DDR_ARBITER] Route PTW request: task_id=9, addr=0xf5000, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf60a0, len=8
+[PTW_RSP] task_id=39, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=39, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=39, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x24, total_reads=3
+[PTW_RSP] task_id=39, VS_WALK leaf -> DONE, total_reads=3, pa=0x24c00
+[PTW_RSP] task_id=39 -> WALK COMPLETE, pa=0x24c00, total_reads=3 -> pt_cache
+[PT_CACHE_PTW] task_id=39, iova=0x14c00 -> PTW DONE, pa=0x24c00 -> forwarder
+[FORWARDER] task_id=39, iova=0x14c00, pa=0x24c00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=39, pa=0x24c00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x24c00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=7, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=7, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=7, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=7, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=7 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=7, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=8, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=8, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=8, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=8, VS_WALK non-leaf -> next addr=0xf6080, read_count=3
+[PTW_RSP] task_id=8 -> need_next_ddr, addr=0xf6080, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=8, addr=0xf6080, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf5000, len=8
+[PTW_RSP] task_id=9, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=9, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=2
+[PTW_RSP] task_id=9, VS_WALK non-leaf: level=1 -> next level 0, read_count=2
+[PTW_RSP] task_id=9, VS_WALK non-leaf -> next addr=0xf6088, read_count=3
+[PTW_RSP] task_id=9 -> need_next_ddr, addr=0xf6088, size=8, phase=0, read_count=3
+[DDR_ARBITER] Route PTW request: task_id=9, addr=0xf6088, size=8, is_write=0 -> DDR
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=7, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=7, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=7, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=7, VS_WALK leaf -> DONE, total_reads=3, pa=0x20c00
+[PTW_RSP] task_id=7 -> WALK COMPLETE, pa=0x20c00, total_reads=3 -> pt_cache
+[PT_CACHE_PTW] task_id=7, iova=0x10c00 -> PTW DONE, pa=0x20c00 -> forwarder
+[FORWARDER] task_id=7, iova=0x10c00, pa=0x20c00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=7, pa=0x20c00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20c00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6080, len=8
+[PTW_RSP] task_id=8, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=8, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=8, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x20, total_reads=3
+[PTW_RSP] task_id=8, VS_WALK leaf -> DONE, total_reads=3, pa=0x20e00
+[PTW_RSP] task_id=8 -> WALK COMPLETE, pa=0x20e00, total_reads=3 -> pt_cache
+[PT_CACHE_PTW] task_id=8, iova=0x10e00 -> PTW DONE, pa=0x20e00 -> forwarder
+[FORWARDER] task_id=8, iova=0x10e00, pa=0x20e00, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=8, pa=0x20e00, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x20e00, status=TLM_OK_RESPONSE
+[DDR] READ addr=0xf6088, len=8
+[PTW_RSP] task_id=9, data_len=8, error=0 -> processing
+[PTW_RSP] task_id=9, walk_phase=0 (VS_WALK=0, GS_IMPLICIT=1, GS_EXPLICIT=2, AD_UPDATE=3), read_count=3
+[PTW_RSP] task_id=9, VS_WALK leaf: level=0, page_sz=0x1000, PPN=0x21, total_reads=3
+[PTW_RSP] task_id=9, VS_WALK leaf -> DONE, total_reads=3, pa=0x21000
+[PTW_RSP] task_id=9 -> WALK COMPLETE, pa=0x21000, total_reads=3 -> pt_cache
+[PT_CACHE_PTW] task_id=9, iova=0x11000 -> PTW DONE, pa=0x21000 -> forwarder
+[FORWARDER] task_id=9, iova=0x11000, pa=0x21000, is_msi=0, TTYP=2 -> forward response
+[IOMMU_TOP] send_response_to_initiator: task_id=9, pa=0x21000, state=23
+[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x21000, status=TLM_OK_RESPONSE
+IOMMU simulation completed

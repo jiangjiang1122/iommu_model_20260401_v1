@@ -496,6 +496,146 @@ void RP_Module::send_translation_request_1_thread()
         }
 
         printf("\n[TEST] All page offset tests completed!\n");
+
+        // ============================================================
+        // ========== 100-Request Concurrent Single-Stage Test ==========
+        // ============================================================
+        printf("\n========== 100-Request Concurrent Single-Stage Test ==========\n");
+
+        // Reset page allocators (stay within 1MB DDR = 256 pages)
+        next_free_page = 240;
+
+        // Configure device 0x0A with iohgatp=Bare, iosatp=Sv39
+        uint64_t dc6_addr = add_device(iommu_ptr, 0x0A, 1, 0, 0, 0, 0, 0,
+                                       1, 1, 0, 0, 0,
+                                       IOHGATP_Bare, IOSATP_Sv39, PDTP_Bare,
+                                       MSIPTP_Off, 0, 0, 0);
+        device_context_t DC6;
+        read_memory_test_rp(dc6_addr, sizeof(device_context_t), (char*)&DC6);
+        printf("[DEV6] DC addr: 0x%lx, iohgatp.MODE=%d (Bare), iosatp.MODE=%d (Sv39)\n",
+               dc6_addr, DC6.iohgatp.MODE, DC6.fsc.iosatp.MODE);
+
+        next_free_page = 245;
+
+        // Setup S-stage page table for 100 requests
+        spte_t pte6;
+        pte6.raw = 0;
+        pte6.V = 1;
+        pte6.R = 1;
+        pte6.W = 1;
+        pte6.X = 0;
+        pte6.U = 1;
+        pte6.G = 0;
+        pte6.A = 0;
+        pte6.D = 0;
+        pte6.PBMT = PMA;
+
+        // Map 13 pages for 100 requests (8 requests per 4KB page, stride=512B)
+        for (int p = 0; p < 13; p++) {
+            uint64_t iova_page = 0x10000 + p * 0x1000;
+            uint64_t pa_page = 0x20000 + p * 0x1000;
+            pte6.PPN = pa_page / PAGESIZE;
+            uint64_t pte_addr = add_s_stage_pte(DC6.fsc.iosatp, iova_page, pte6, 0, 0);
+            printf("[DEV6] Added S-stage PTE at addr 0x%lx, IOVA 0x%lx -> PA 0x%lx\n", pte_addr, iova_page, pa_page);
+        }
+
+        // Invalidate caches
+        printf("\n[TEST] Invalidating IOMMU caches for 100-request test...\n");
+        iodir(iommu_ptr, INVAL_DDT, 1, 0x0A, 0);
+        iotinval(iommu_ptr, VMA, 0, 0, 0, 0, 0, 0);
+
+        // Reset task ID counter so 100 requests get IDs 1-100
+        iommu_ptr->next_task_id = 1;
+
+        // Reset response counter
+        response_count = 0;
+
+        // Prepare and send 100 translation requests
+        const int NUM_REQUESTS = 100;
+        tlm_generic_payload* trans_array[NUM_REQUESTS];
+        PayloadExtention* ext_array[NUM_REQUESTS];
+        uint64_t base_iova = 0x10000;
+
+        printf("\n[TEST] Sending %d concurrent translation requests (device_id=0x0A)...\n", NUM_REQUESTS);
+        fflush(stdout);
+
+        for (int i = 0; i < NUM_REQUESTS; i++) {
+            uint64_t iova = base_iova + i * 512;
+            uint64_t expected_pa = iova + 0x10000;
+
+            trans_array[i] = new tlm_generic_payload();
+            sc_time delay = SC_ZERO_TIME;
+            unsigned char* data = new unsigned char[1024]();
+
+            trans_array[i]->set_address(iova);
+            trans_array[i]->set_data_ptr(data);
+            trans_array[i]->set_data_length(16);
+            trans_array[i]->set_command(TLM_READ_COMMAND);
+
+            ext_array[i] = new PayloadExtention();
+            ext_array[i]->requester_id = 0x0A;
+            ext_array[i]->pid_valid = 0;
+            ext_array[i]->process_id = 0;
+            ext_array[i]->exec_req = 0;
+            ext_array[i]->priv_req = 0;
+            ext_array[i]->no_write = 0;
+            ext_array[i]->at = 0;
+            trans_array[i]->set_extension(ext_array[i]);
+
+            tlm::tlm_phase phase = tlm::BEGIN_REQ;
+            tlm::tlm_sync_enum status =
+                axi_master_to_pcie_noc_0_socket->nb_transport_fw(*trans_array[i], phase, delay);
+
+            printf("[TEST] Sent request %2d: IOVA=0x%lx (expected PA=0x%lx), nb_status=%d\n",
+                   i, iova, expected_pa, status);
+        }
+
+        printf("[TEST] All %d requests injected. Waiting for responses...\n", NUM_REQUESTS);
+        fflush(stdout);
+
+        // Wait for all responses
+        while (response_count < NUM_REQUESTS) {
+            wait(response_count_event);
+        }
+
+        printf("[TEST] All %d responses received! response_count=%d\n", NUM_REQUESTS, response_count);
+
+        // Validate responses
+        int pass_count = 0;
+        for (int i = 0; i < NUM_REQUESTS; i++) {
+            uint64_t iova = base_iova + i * 512;
+            uint64_t expected_pa = iova + 0x10000;
+            uint64_t result_pa = trans_array[i]->get_address();
+            tlm::tlm_response_status status = trans_array[i]->get_response_status();
+
+            if (status == tlm::TLM_OK_RESPONSE && result_pa == expected_pa) {
+                pass_count++;
+            } else {
+                printf("[TEST] FAIL request %2d: IOVA=0x%lx, expected PA=0x%lx, got PA=0x%lx, status=%s\n",
+                       i, iova, expected_pa, result_pa,
+                       trans_array[i]->get_response_string().c_str());
+            }
+        }
+
+        printf("\n[TEST] Validation: %d/%d passed\n", pass_count, NUM_REQUESTS);
+        if (pass_count == NUM_REQUESTS) {
+            printf("[TEST] PASS: All 100 requests translated correctly!\n");
+        } else {
+            printf("[TEST] FAIL: Some requests failed translation!\n");
+        }
+
+        // Cleanup
+        for (int i = 0; i < NUM_REQUESTS; i++) {
+            trans_array[i]->clear_extension(ext_array[i]);
+            delete ext_array[i];
+            if (trans_array[i]->get_data_ptr()) {
+                delete[] trans_array[i]->get_data_ptr();
+            }
+            delete trans_array[i];
+        }
+
+        printf("\n[TEST] 100-request concurrent test completed!\n");
+
         return;
     }
 }
