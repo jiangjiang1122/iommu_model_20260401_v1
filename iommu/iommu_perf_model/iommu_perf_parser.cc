@@ -3,6 +3,7 @@
 // SPEC Section 12.1
 
 #include "iommu_top.hh"
+#include "iommu_task_cache_convert.hh"
 #include <cstdio>
 
 void iommu_top::parser_thread() {
@@ -88,8 +89,7 @@ void iommu_top::parser_thread() {
         }
 
         // 7. Dispatch to DC/PC Cache query and Collector
-        // Parser writes the same task* to 3 FIFOs simultaneously
-        // Safety guaranteed by SystemC cooperative scheduling and field isolation
+        // Parser writes task to collector, and CacheMessage to cache_sub FIFOs
         task->state = TASK_PARSE_DONE;
         task->iotval = task->iova;
         task->DTF = 0;
@@ -98,8 +98,15 @@ void iommu_top::parser_thread() {
                task->task_id, task->device_id, task->iova, task->TTYP);
         fflush(stdout);
 
+        // Send to collector
         parser_to_collector_fifo.write(task);
-        parser_to_dc_cache_query_fifo.write(task);
-        parser_to_pc_cache_query_fifo.write(task);
+        
+        // Convert task to CacheMessage and send to CacheSubsystem DC request FIFO
+        iommu::CacheMessage dc_req = task_to_dc_request(task);
+        cache_sub.dc_request_fifo.write(dc_req);
+        
+        // Convert task to CacheMessage and send to CacheSubsystem PC request FIFO
+        iommu::CacheMessage pc_req = task_to_pc_request(task);
+        cache_sub.pc_request_fifo.write(pc_req);
     }
 }

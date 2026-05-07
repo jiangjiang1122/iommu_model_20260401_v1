@@ -3,6 +3,7 @@
 // Corresponds to iommu_translate_iova() steps 7-16
 
 #include "iommu_top.hh"
+#include "iommu_task_cache_convert.hh"
 #include <cstdio>
 
 // ============================================================
@@ -14,11 +15,11 @@ void iommu_top::collector_cache_lookup_result_thread() {
     while (true) {
         // Check if data already available before waiting (avoid missing edge-triggered events)
         if (parser_to_collector_fifo.num_available() == 0 &&
-            dc_cache_to_collector_fifo.num_available() == 0 &&
-            pc_cache_to_collector_fifo.num_available() == 0) {
+            cache_sub.dc_response_fifo.num_available() == 0 &&
+            cache_sub.pc_response_fifo.num_available() == 0) {
             wait(parser_to_collector_fifo.data_written_event() |
-                 dc_cache_to_collector_fifo.data_written_event() |
-                 pc_cache_to_collector_fifo.data_written_event());
+                 cache_sub.dc_response_fifo.data_written_event() |
+                 cache_sub.pc_response_fifo.data_written_event());
         }
 
         // --- Process parser_to_collector_fifo ---
@@ -31,22 +32,38 @@ void iommu_top::collector_cache_lookup_result_thread() {
             collector_mtx.unlock();
         }
 
-        // --- Process dc_cache_to_collector_fifo ---
-        while (dc_cache_to_collector_fifo.num_available() > 0) {
-            iommu_task_t* task = dc_cache_to_collector_fifo.read();
+        // --- Process dc_cache_to_collector_fifo (from cache_sub.dc_response_fifo) ---
+        while (cache_sub.dc_response_fifo.num_available() > 0) {
+            iommu::CacheMessage resp = cache_sub.dc_response_fifo.read();
+            
+            std::cout << "[DC Lookup] task_id=" << resp.task_id
+                      << " hit=" << resp.hit << std::endl;
+            
             collector_mtx.lock();
-            if (pending_tasks.find(task->task_id) != pending_tasks.end()) {
-                pending_tasks[task->task_id].dc_done = true;
+            if (pending_tasks.find(resp.task_id) != pending_tasks.end()) {
+                pending_tasks[resp.task_id].dc_done = true;
+                
+                // Convert CacheMessage response back to task fields
+                iommu_task_t* task = pending_tasks[resp.task_id].task;
+                dc_response_to_task(resp, task);
             }
             collector_mtx.unlock();
         }
 
-        // --- Process pc_cache_to_collector_fifo ---
-        while (pc_cache_to_collector_fifo.num_available() > 0) {
-            iommu_task_t* task = pc_cache_to_collector_fifo.read();
+        // --- Process pc_cache_to_collector_fifo (from cache_sub.pc_response_fifo) ---
+        while (cache_sub.pc_response_fifo.num_available() > 0) {
+            iommu::CacheMessage resp = cache_sub.pc_response_fifo.read();
+            
+            std::cout << "[PC Lookup] task_id=" << resp.task_id
+                      << " hit=" << resp.hit << std::endl;
+            
             collector_mtx.lock();
-            if (pending_tasks.find(task->task_id) != pending_tasks.end()) {
-                pending_tasks[task->task_id].pc_done = true;
+            if (pending_tasks.find(resp.task_id) != pending_tasks.end()) {
+                pending_tasks[resp.task_id].pc_done = true;
+                
+                // Convert CacheMessage response back to task fields
+                iommu_task_t* task = pending_tasks[resp.task_id].task;
+                pc_response_to_task(resp, task);
             }
             collector_mtx.unlock();
         }
@@ -289,8 +306,9 @@ void iommu_top::collector_xdtw_response_thread() {
             task->dc_hit = 1;
             task->DTF = task->DC.tc.DTF;
 
-            // Update DC cache
-            collector_to_dc_cache_update_fifo.write(task);
+            // Update DC cache via CacheSubsystem
+            iommu::CacheMessage dc_update_req = task_to_dc_update(task);
+            cache_sub.dc_update_fifo.write(dc_update_req);
 
             // Steps 7-13 checks (same as above for DC hit path)
             if (task->DC.tc.EN_ATS == 0 &&
@@ -405,8 +423,9 @@ void iommu_top::collector_xdtw_response_thread() {
             task->pc_valid = 1;
             task->pc_hit = 1;
 
-            // Update PC cache
-            collector_to_pc_cache_update_fifo.write(task);
+            // Update PC cache via CacheSubsystem
+            iommu::CacheMessage pc_update_req = task_to_pc_update(task);
+            cache_sub.pc_update_fifo.write(pc_update_req);
 
             // Step 15: ENS check
             if (task->PC.ta.ENS == 0 && task->pid_valid && task->priv_req) {

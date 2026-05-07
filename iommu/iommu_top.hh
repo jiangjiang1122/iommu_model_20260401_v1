@@ -22,6 +22,7 @@ using namespace std;
 using namespace sc_core;
 using namespace tlm;
 using namespace tlm_utils;
+// using namespace iommu;  // Avoid namespace pollution, use iommu:: prefix explicitly
 
 #define IOMMU_BASE_ADDR 0x80000000ULL
 
@@ -63,14 +64,14 @@ public:
     // ===================== Pipeline Data FIFOs (sc_fifo<iommu_task_t*>) =====================
     sc_fifo<iommu_task_t*> inbound_fifo;
     sc_fifo<iommu_task_t*> parser_to_collector_fifo;
-    sc_fifo<iommu_task_t*> parser_to_dc_cache_query_fifo;
-    sc_fifo<iommu_task_t*> parser_to_pc_cache_query_fifo;
-    sc_fifo<iommu_task_t*> dc_cache_to_collector_fifo;
-    sc_fifo<iommu_task_t*> pc_cache_to_collector_fifo;
+    // sc_fifo<iommu_task_t*> parser_to_dc_cache_query_fifo;  // Replaced by cache_sub.dc_request_fifo
+    // sc_fifo<iommu_task_t*> parser_to_pc_cache_query_fifo;  // Replaced by cache_sub.pc_request_fifo
+    // sc_fifo<iommu_task_t*> dc_cache_to_collector_fifo;     // Replaced by cache_sub.dc_response_fifo
+    // sc_fifo<iommu_task_t*> pc_cache_to_collector_fifo;     // Replaced by cache_sub.pc_response_fifo
     sc_fifo<iommu_task_t*> collector_to_xdtw_dc_fifo;
     sc_fifo<iommu_task_t*> collector_to_xdtw_pc_fifo;
-    sc_fifo<iommu_task_t*> collector_to_dc_cache_update_fifo;
-    sc_fifo<iommu_task_t*> collector_to_pc_cache_update_fifo;
+    // sc_fifo<iommu_task_t*> collector_to_dc_cache_update_fifo;  // Replaced by cache_sub.dc_update_fifo
+    // sc_fifo<iommu_task_t*> collector_to_pc_cache_update_fifo;  // Replaced by cache_sub.pc_update_fifo
     sc_fifo<iommu_task_t*> collector_to_pt_cache_query_fifo;
     sc_fifo<iommu_task_t*> collector_to_msipt_cache_query_fifo;
     sc_fifo<iommu_task_t*> collector_to_fault_fifo;
@@ -214,14 +215,14 @@ public:
         // Initialize FIFOs with SPEC-defined depths
         inbound_fifo("inbound_fifo", FIFO_DEPTH_INBOUND),
         parser_to_collector_fifo("parser_to_collector_fifo", FIFO_DEPTH_PARSER_TO_COLLECTOR),
-        parser_to_dc_cache_query_fifo("parser_to_dc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_DC_CACHE_QUERY),
-        parser_to_pc_cache_query_fifo("parser_to_pc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY),
-        dc_cache_to_collector_fifo("dc_cache_to_collector_fifo", FIFO_DEPTH_DC_CACHE_TO_COLLECTOR),
-        pc_cache_to_collector_fifo("pc_cache_to_collector_fifo", FIFO_DEPTH_PC_CACHE_TO_COLLECTOR),
+        // parser_to_dc_cache_query_fifo("parser_to_dc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_DC_CACHE_QUERY),  // Replaced by cache_sub
+        // parser_to_pc_cache_query_fifo("parser_to_pc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY),  // Replaced by cache_sub
+        // dc_cache_to_collector_fifo("dc_cache_to_collector_fifo", FIFO_DEPTH_DC_CACHE_TO_COLLECTOR),           // Replaced by cache_sub
+        // pc_cache_to_collector_fifo("pc_cache_to_collector_fifo", FIFO_DEPTH_PC_CACHE_TO_COLLECTOR),           // Replaced by cache_sub
         collector_to_xdtw_dc_fifo("collector_to_xdtw_dc_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
         collector_to_xdtw_pc_fifo("collector_to_xdtw_pc_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
-        collector_to_dc_cache_update_fifo("collector_to_dc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE),
-        collector_to_pc_cache_update_fifo("collector_to_pc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE),
+        // collector_to_dc_cache_update_fifo("collector_to_dc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE),  // Replaced by cache_sub
+        // collector_to_pc_cache_update_fifo("collector_to_pc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE),  // Replaced by cache_sub
         collector_to_pt_cache_query_fifo("collector_to_pt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY),
         collector_to_msipt_cache_query_fifo("collector_to_msipt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY),
         collector_to_fault_fifo("collector_to_fault_fifo", FIFO_DEPTH_COLLECTOR_TO_FAULT),
@@ -263,12 +264,12 @@ public:
         ahb_slave_from_pcie_noc_1_socket.register_b_transport(
             this, &iommu_top::ahb_slave_b_transport);
 
-        // Register all 21 SC_THREADs
+        // Register all SC_THREADs
         SC_THREAD(parser_thread);
-        SC_THREAD(dc_cache_query_thread);
-        SC_THREAD(dc_cache_update_thread);
-        SC_THREAD(pc_cache_query_thread);
-        SC_THREAD(pc_cache_update_thread);
+        // SC_THREAD(dc_cache_query_thread);   // Replaced by CacheSubsystem
+        // SC_THREAD(dc_cache_update_thread);  // Replaced by CacheSubsystem
+        // SC_THREAD(pc_cache_query_thread);   // Replaced by CacheSubsystem
+        // SC_THREAD(pc_cache_update_thread);  // Replaced by CacheSubsystem
         SC_THREAD(collector_cache_lookup_result_thread);
         SC_THREAD(collector_xdtw_response_thread);
         SC_THREAD(xdtw_req_thread);

@@ -8,6 +8,9 @@
 #include <vector>
 #include <optional>
 
+// Include IOMMU data structures (global namespace)
+#include "iommu_data_structures.hh"
+
 namespace iommu {
 
 // ============================================================
@@ -150,128 +153,16 @@ struct InvalidationCmd {
 // - 为降低迁移成本，下面同时提供少量桥接辅助函数，供子系统与测试读取。
 // ============================================================
 
-union tc_t {
-    struct {
-        uint64_t V:1;
-        uint64_t EN_ATS:1;
-        uint64_t EN_PRI:1;
-        uint64_t T2GPA:1;
-        uint64_t DTF:1;
-        uint64_t PDTV:1;
-        uint64_t PRPR:1;
-        uint64_t GADE:1;
-        uint64_t SADE:1;
-        uint64_t DPE:1;
-        uint64_t SBE:1;
-        uint64_t SXL:1;
-        uint64_t reserved0:12;
-        uint64_t custom:8;
-        uint64_t reserved1:32;
-    };
-    uint64_t raw = 0;
-};
+// ============================================================
+// DC/PC Data Structures - Now using global namespace definitions
+// These are defined in iommu_data_structures.hh
+// ============================================================
+// Note: Using extern to reference global namespace types
+// The actual definitions are in iommu/include/iommu_data_structures.hh
 
-union iohgatp_t {
-    struct {
-        uint64_t PPN:44;
-        uint64_t GSCID:16;
-        uint64_t MODE:4;
-    };
-    uint64_t raw = 0;
-};
-
-union ta_t {
-    struct {
-        uint64_t reserved0:12;
-        uint64_t PSCID:20;
-        uint64_t reserved1:8;
-        uint64_t rcid:12;
-        uint64_t mcid:12;
-    };
-    uint64_t raw = 0;
-};
-
-union iosatp_t {
-    struct {
-        uint64_t PPN:44;
-        uint64_t reserved:16;
-        uint64_t MODE:4;
-    };
-    uint64_t raw = 0;
-};
-
-union fsc_t {
-    iosatp_t iosatp;
-    struct {
-        uint64_t PPN:44;
-        uint64_t reserved:16;
-        uint64_t MODE:4;
-    } pdtp;
-    uint64_t raw;
-
-    fsc_t() : raw(0) {}
-};
-
-union msiptp_t {
-    struct {
-        uint64_t MODE:4;
-        uint64_t reserved0:8;
-        uint64_t PPN:44;
-        uint64_t reserved1:8;
-    };
-    uint64_t raw = 0;
-};
-
-union msi_addr_mask_t {
-    struct {
-        uint64_t mask:52;
-        uint64_t reserved:12;
-    };
-    uint64_t raw = 0;
-};
-
-union msi_addr_pattern_t {
-    struct {
-        uint64_t pattern:52;
-        uint64_t reserved:12;
-    };
-    uint64_t raw = 0;
-};
-
-typedef struct {
-    tc_t               tc{};
-    iohgatp_t          iohgatp{};
-    ta_t               ta{};
-    fsc_t              fsc{};
-    msiptp_t           msiptp{};
-    msi_addr_mask_t    msi_addr_mask{};
-    msi_addr_pattern_t msi_addr_pattern{};
-    uint64_t           reserved = 0;
-} device_context_t;
-
-union pc_ta_t {
-    struct {
-        uint64_t V:1;
-        uint64_t ENS:1;
-        uint64_t SUM:1;
-        uint64_t reserved0:9;
-        uint64_t PSCID:20;
-        uint64_t reserved1:32;
-    };
-    uint64_t raw = 0;
-};
-
-union pc_fsc_t {
-    iosatp_t iosatp;
-    uint64_t raw;
-
-    pc_fsc_t() : raw(0) {}
-};
-
-typedef struct {
-    pc_ta_t  ta{};
-    pc_fsc_t fsc{};
-} process_context_t;
+// Forward declarations - actual types are in global namespace
+// device_context_t, process_context_t, iohgatp_t, etc.
+// are already defined in iommu_data_structures.hh
 
 struct MSIPTData {
     bool        valid       = false;
