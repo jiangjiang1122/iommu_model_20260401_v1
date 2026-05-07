@@ -273,6 +273,13 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
             delete pending.trans_ptr;
         }
 
+        // Decrement axi_master_1 outstanding counter
+        axi_master_1_to_cmn_rnd_outstanding--;
+        printf("[DDR_RSP] axi_master_1 outstanding-- -> %d (task_id=%u, source=%d)\n",
+               axi_master_1_to_cmn_rnd_outstanding, pending.task_id, pending.source_module);
+        fflush(stdout);
+        axi_master_1_slot_freed_event.notify(SC_ZERO_TIME);
+
         // Notify arbiter that a slot is freed
         ddr_pending_freed_event.notify(SC_ZERO_TIME);
 
@@ -309,6 +316,11 @@ void iommu_top::ddr_arbiter_thread() {
             // Flow control: check global outstanding count
             if (ddr_pending_queue.size() >= DDR_MAX_OUTSTANDING) {
                 wait(ddr_pending_freed_event);
+            }
+
+            // Flow control: check axi_master_1_to_cmn_rnd outstanding count
+            if (axi_master_1_to_cmn_rnd_outstanding >= AXI_MASTER_1_TO_CMN_RND_MAX_OUTSTANDING) {
+                wait(axi_master_1_slot_freed_event);
             }
 
             ddr_req_entry_t req;
@@ -389,6 +401,12 @@ void iommu_top::ddr_arbiter_thread() {
             tlm::tlm_phase phase = tlm::BEGIN_REQ;
             sc_time delay = SC_ZERO_TIME;
             axi_master_1_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
+
+            // Increment outstanding counter after successful send
+            axi_master_1_to_cmn_rnd_outstanding++;
+            printf("[DDR_ARBITER] axi_master_1 outstanding++ -> %d (task_id=%u)\n",
+                   axi_master_1_to_cmn_rnd_outstanding, req.task_id);
+            fflush(stdout);
         }
     }
 }

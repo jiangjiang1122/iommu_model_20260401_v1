@@ -85,6 +85,12 @@ public:
     sc_mutex ddr_queue_mtx;
     sc_event ddr_pending_freed_event;
 
+    // ===================== AXI Master端口Outstanding计数器 =====================
+    int axi_master_1_to_cmn_rnd_outstanding;  // axi_master_1_to_cmn_rnd_socket并发计数
+    sc_event axi_master_1_slot_freed_event;   // slot释放事件
+    int axi_master_0_to_pcie_noc_outstanding; // axi_master_0_to_pcie_noc_socket并发计数
+    sc_event axi_master_0_slot_freed_event;   // slot释放事件
+
     // ===================== Control Path Response =====================
     uint8_t ctrl_path_rsp_buf[64];
     sc_event ctrl_path_rsp_event;
@@ -162,8 +168,9 @@ public:
     void msiptw_req_thread();
     void msiptw_rsp_thread();
 
-    // Forwarder (1 thread)
-    void forwarder_thread();
+    // Forwarder (2 threads - split for PT and MSIPT paths)
+    void pt_forwarder_thread();      // PT Cache -> axi_master_0_to_pcie_noc_socket
+    void msipt_forwarder_thread();   // MSIPT Cache -> axi_stream or axi_master_1
 
     // Fault/CQ (1 thread)
     void fault_cq_proc_thread();
@@ -229,7 +236,9 @@ public:
         collector_dc_walk_outstanding(0),
         collector_pc_walk_outstanding(0),
         ptw_outstanding_task_count(0),
-        msiptw_outstanding_task_count(0)
+        msiptw_outstanding_task_count(0),
+        axi_master_1_to_cmn_rnd_outstanding(0),
+        axi_master_0_to_pcie_noc_outstanding(0)
     {
         iommu_inst.top = this;
 
@@ -262,7 +271,8 @@ public:
         SC_THREAD(msipt_cache_result_thread);
         SC_THREAD(msiptw_req_thread);
         SC_THREAD(msiptw_rsp_thread);
-        SC_THREAD(forwarder_thread);
+        SC_THREAD(pt_forwarder_thread);
+        SC_THREAD(msipt_forwarder_thread);
         SC_THREAD(fault_cq_proc_thread);
         SC_THREAD(ddr_arbiter_thread);
 
