@@ -14,7 +14,7 @@ bool PTCache::lookup_pt(gscid_t gscid, pscid_t pscid, iova_t iova,
     PTTag tag;
     tag.gscid = gscid;
     tag.pscid = pscid;
-    tag.iova = iova;
+    tag.iova = align_iova(iova, PageSize::PAGE_4K);  // 页对齐，与fill_pt保持一致
     tag.stage = stage;
     tag.sv48 = sv48;
     tag.gstage_x4 = gstage_x4;
@@ -134,11 +134,11 @@ uint32_t PTCache::hash_function(const PTTag& tag) const {
 
 iova_t PTCache::align_iova(iova_t iova, PageSize ps) {
     switch (ps) {
-        case PageSize::PAGE_4K:   return iova;
-        case PageSize::PAGE_2M:   return iova & ~static_cast<iova_t>(0x1FF);       // 清低9bit
-        case PageSize::PAGE_1G:   return iova & ~static_cast<iova_t>(0x3FFFF);     // 清低18bit
-        case PageSize::PAGE_512G: return iova & ~static_cast<iova_t>(0x7FFFFFF);   // 清低27bit
-        default: return iova;
+        case PageSize::PAGE_4K:   return iova & ~static_cast<iova_t>(0xFFF);  // 清低12bit，页对齐
+        case PageSize::PAGE_2M:   return iova & ~static_cast<iova_t>(0x1FFFFF);  // 清低21bit
+        case PageSize::PAGE_1G:   return iova & ~static_cast<iova_t>(0x3FFFFFFF);  // 清低30bit
+        case PageSize::PAGE_512G: return iova & ~static_cast<iova_t>(0x7FFFFFFFFF);  // 清低39bit
+        default: return iova & ~static_cast<iova_t>(0xFFF);  // 默认4K对齐
     }
 }
 

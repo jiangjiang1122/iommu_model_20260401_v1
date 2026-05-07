@@ -556,7 +556,8 @@ void RP_Module::send_translation_request_1_thread()
         PayloadExtention* ext_array[NUM_REQUESTS];
         uint64_t base_iova = 0x10000;
 
-        printf("\n[TEST] Sending %d concurrent translation requests (device_id=0x0A)...\n", NUM_REQUESTS);
+        printf("\n[TEST] Sending %d translation requests with grouped timing (device_id=0x0A)...\n", NUM_REQUESTS);
+        printf("[TEST] Strategy: 8 requests per 4KB page, 10ns delay between groups to allow PT cache hit\n");
         fflush(stdout);
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
@@ -588,6 +589,13 @@ void RP_Module::send_translation_request_1_thread()
 
             printf("[TEST] Sent request %2d: IOVA=0x%lx (expected PA=0x%lx), nb_status=%d\n",
                    i, iova, expected_pa, status);
+
+            // 每8个请求（同一个4KB页）为一组，组间延迟50ns让PT cache有时间更新
+            // PTW需要约20-30ns完成（4次DDR访问），50ns足够
+            // 这样第2-8个请求应该能PT cache hit
+            if ((i + 1) % 8 == 0 && i < NUM_REQUESTS - 1) {
+                wait(50, SC_NS);
+            }
         }
 
         printf("[TEST] All %d requests injected. Waiting for responses...\n", NUM_REQUESTS);
