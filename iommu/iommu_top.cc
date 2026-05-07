@@ -1,6 +1,44 @@
 #include "iommu_top.hh"
 #include <cstdio>
 
+// ===================== Cache命中率统计全局变量定义 =====================
+uint64_t g_dc_cache_hit_count = 0;
+uint64_t g_dc_cache_miss_count = 0;
+uint64_t g_pc_cache_hit_count = 0;
+uint64_t g_pc_cache_miss_count = 0;
+uint64_t g_pt_cache_hit_count = 0;
+uint64_t g_pt_cache_miss_count = 0;
+uint64_t g_msipt_cache_hit_count = 0;
+uint64_t g_msipt_cache_miss_count = 0;
+
+// 打印Cache命中率统计信息
+void print_cache_statistics() {
+    printf("\n========== Cache Hit/Miss Statistics ==========\n");
+    
+    uint64_t dc_total = g_dc_cache_hit_count + g_dc_cache_miss_count;
+    double dc_hit_rate = dc_total > 0 ? (100.0 * g_dc_cache_hit_count / dc_total) : 0.0;
+    printf("[DC_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
+           g_dc_cache_hit_count, g_dc_cache_miss_count, dc_total, dc_hit_rate);
+    
+    uint64_t pc_total = g_pc_cache_hit_count + g_pc_cache_miss_count;
+    double pc_hit_rate = pc_total > 0 ? (100.0 * g_pc_cache_hit_count / pc_total) : 0.0;
+    printf("[PC_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
+           g_pc_cache_hit_count, g_pc_cache_miss_count, pc_total, pc_hit_rate);
+    
+    uint64_t pt_total = g_pt_cache_hit_count + g_pt_cache_miss_count;
+    double pt_hit_rate = pt_total > 0 ? (100.0 * g_pt_cache_hit_count / pt_total) : 0.0;
+    printf("[PT_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
+           g_pt_cache_hit_count, g_pt_cache_miss_count, pt_total, pt_hit_rate);
+    
+    uint64_t msipt_total = g_msipt_cache_hit_count + g_msipt_cache_miss_count;
+    double msipt_hit_rate = msipt_total > 0 ? (100.0 * g_msipt_cache_hit_count / msipt_total) : 0.0;
+    printf("[MSIPT_CACHE] HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
+           g_msipt_cache_hit_count, g_msipt_cache_miss_count, msipt_total, msipt_hit_rate);
+    
+    printf("===============================================\n\n");
+    fflush(stdout);
+}
+
 /**********************************************/
 // before_end_of_elaboration - IOMMU reset and initialization
 /**********************************************/

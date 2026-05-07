@@ -20,6 +20,16 @@ using namespace tlm_utils;
 
 #define IOMMU_BASE_ADDR 0x80000000ULL
 
+// ===================== Cache命中率统计全局变量 =====================
+extern uint64_t g_dc_cache_hit_count;
+extern uint64_t g_dc_cache_miss_count;
+extern uint64_t g_pc_cache_hit_count;
+extern uint64_t g_pc_cache_miss_count;
+extern uint64_t g_pt_cache_hit_count;
+extern uint64_t g_pt_cache_miss_count;
+extern uint64_t g_msipt_cache_hit_count;
+extern uint64_t g_msipt_cache_miss_count;
+
 class iommu_top : public sc_module
 {
 public:

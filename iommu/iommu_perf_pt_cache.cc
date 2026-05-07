@@ -12,6 +12,10 @@
 void iommu_top::pt_cache_query_thread() {
     while (true) {
         iommu_task_t* task = collector_to_pt_cache_query_fifo.read();
+        printf("[PT_CACHE_ENTRY] task_id=%u, time=%s, iova=0x%lx\n", 
+               task->task_id, sc_time_stamp().to_string().c_str(), task->iova);
+        fflush(stdout);
+        
         task->state = TASK_TLB_QUERY;
         wait(PT_CACHE_HIT_DELAY, SC_NS);
 
@@ -25,22 +29,26 @@ void iommu_top::pt_cache_query_thread() {
         iommu_cache_mtx.unlock();
 
         if (ioatc_status == IOATC_HIT) {
-            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB HIT, pa=0x%lx -> forwarder\n",
-                   task->task_id, task->iova, task->pa);
+            g_pt_cache_hit_count++;
+            printf("[PT_CACHE_EXIT] task_id=%u, time=%s, iova=0x%lx -> IOTLB HIT, pa=0x%lx -> forwarder (total_hit=%lu)\n",
+                   task->task_id, sc_time_stamp().to_string().c_str(), task->iova, task->pa, g_pt_cache_hit_count);
             fflush(stdout);
             task->is_mrif = 0;
             task->state = TASK_FORWARD;
             pt_cache_to_fwd_fifo.write(task);
         }
         else if (ioatc_status == IOATC_FAULT) {
-            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB FAULT\n", task->task_id, task->iova);
+            printf("[PT_CACHE_EXIT] task_id=%u, time=%s, iova=0x%lx -> IOTLB FAULT\n", 
+                   task->task_id, sc_time_stamp().to_string().c_str(), task->iova);
             fflush(stdout);
             task->state = TASK_FAULT;
             collector_to_fault_fifo.write(task);
         }
         else {
             // IOATC_MISS: send to PTW
-            printf("[PT_CACHE] task_id=%u, iova=0x%lx -> IOTLB MISS -> PTW\n", task->task_id, task->iova);
+            g_pt_cache_miss_count++;
+            printf("[PT_CACHE_EXIT] task_id=%u, time=%s, iova=0x%lx -> IOTLB MISS -> PTW (total_miss=%lu)\n", 
+                   task->task_id, sc_time_stamp().to_string().c_str(), task->iova, g_pt_cache_miss_count);
             fflush(stdout);
             task->state = TASK_TLB_MISS;
             pt_cache_to_ptw_fifo.write(task);

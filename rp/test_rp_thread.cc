@@ -636,6 +636,9 @@ void RP_Module::send_translation_request_1_thread()
 
         printf("\n[TEST] 100-request concurrent test completed!\n");
 
+        // 打印Cache命中率统计信息
+        print_cache_statistics();
+
         return;
     }
 }

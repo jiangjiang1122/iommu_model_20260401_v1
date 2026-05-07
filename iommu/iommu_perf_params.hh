@@ -110,4 +110,15 @@ static const uint32_t MAX_DEVICES = 64;           // 最大设备数
 static const uint32_t MAX_PROCESSES = 64;        // 最大进程数
 static const uint32_t MAX_DEVID_WIDTH = 24;         // 设备ID最大位宽
 
+// ===================== Cache命中率统计 =====================
+// 这些计数器在iommu_top.hh中声明，在iommu_top.cc中初始化
+// extern uint64_t g_dc_cache_hit_count;
+// extern uint64_t g_dc_cache_miss_count;
+// extern uint64_t g_pc_cache_hit_count;
+// extern uint64_t g_pc_cache_miss_count;
+// extern uint64_t g_pt_cache_hit_count;
+// extern uint64_t g_pt_cache_miss_count;
+// extern uint64_t g_msipt_cache_hit_count;
+// extern uint64_t g_msipt_cache_miss_count;
+
 #endif // __IOMMU_PERF_PARAMS_HH__
