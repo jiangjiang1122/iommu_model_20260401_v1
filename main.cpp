@@ -58,13 +58,13 @@ int sc_main(int argc, char *argv[]) {
     PCIENOC_Module* pcienoc = new PCIENOC_Module("pcienoc");
 
     // 绑定IOMMU的initiator sockets到DDR模块的target sockets
-    iommu->axi_stream_to_cmn_rnd_socket.bind(ddr->axi_slave_from_cmn_rnd_socket);
+    iommu->axi_stream_socket.bind(ddr->axi_slave_from_cmn_rnd_socket);
     
-    iommu->axi_master_0_to_pcie_noc_socket.bind(ddr->axi_slave_from_pcie_noc_0_socket);
+    iommu->axi_master_0_to_pcie_noc_to_cmn_rni_socket.bind(ddr->axi_slave_from_pcie_noc_0_socket);
     
     iommu->axi_master_1_to_cmn_rnd_socket.bind(ddr->axi_slave_from_cmn_rnd_1_socket);
     
-    iommu->axi_master_2_to_pcie_noc_socket.bind(rp->axi_slave_to_pcie_noc_0_socket);
+    iommu->axi_master_2_ats_msg_to_pcie_noc_socket.bind(rp->axi_slave_to_pcie_noc_0_socket);
 
     // 绑定RP模块的initiator socket到IOMMU的target socket
     rp->axi_master_to_pcie_noc_0_socket.bind(iommu->axi_slave_from_pcie_noc_0_socket);

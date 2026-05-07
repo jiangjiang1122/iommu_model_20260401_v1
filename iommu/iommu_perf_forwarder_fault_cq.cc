@@ -7,7 +7,7 @@
 
 // ============================================================
 // 12.19a pt_forwarder_thread - PT Cache Translation Forwarding
-// Reads from pt_cache_to_fwd_fifo, outputs to axi_master_0_to_pcie_noc_socket
+// Reads from pt_cache_to_fwd_fifo, outputs to axi_master_0_to_pcie_noc_to_cmn_rni_socket
 // Corresponds to iommu_translate.cc L494-613 (step 20)
 // ============================================================
 void iommu_top::pt_forwarder_thread() {
@@ -19,7 +19,7 @@ void iommu_top::pt_forwarder_thread() {
 
         iommu_task_t* task = pt_cache_to_fwd_fifo.read();
 
-        printf("[PT_FORWARDER] task_id=%u, iova=0x%lx, pa=0x%lx -> axi_master_0_to_pcie_noc\n",
+        printf("[PT_FORWARDER] task_id=%u, iova=0x%lx, pa=0x%lx -> axi_master_0_to_pcie_noc_to_cmn_rni\n",
                task->task_id, task->iova, task->pa);
         fflush(stdout);
 
@@ -40,9 +40,9 @@ void iommu_top::pt_forwarder_thread() {
         // Set translated PA into payload
         trans->set_address(task->pa);
 
-        // PT cache path: output to axi_master_0_to_pcie_noc_socket (logical routing)
+        // PT cache path: output to axi_master_0_to_pcie_noc_to_cmn_rni_socket (logical routing)
         // In the performance model, we directly send response to initiator
-        // The actual data path would go through axi_master_0_to_pcie_noc_socket to PCIE NoC
+        // The actual data path would go through axi_master_0_to_pcie_noc_to_cmn_rni_socket to PCIE NoC
 
         // Send response to initiator (with translated PA)
         send_response_to_initiator(task);
@@ -58,7 +58,7 @@ void iommu_top::pt_forwarder_thread() {
 // ============================================================
 // 12.19b msipt_forwarder_thread - MSIPT Cache Translation Forwarding
 // Reads from msipt_cache_to_fwd_fifo, routes based on MSI/MRIF:
-//   - is_msi=1 && is_mrif=0 -> axi_stream_to_cmn_rnd_socket (IMSIC)
+//   - is_msi=1 && is_mrif=0 -> axi_stream_socket (IMSIC)
 //   - otherwise -> axi_master_1_to_cmn_rnd_socket (DDR/normal DMA)
 // Corresponds to iommu_translate.cc L494-613 (step 20)
 // ============================================================
@@ -94,12 +94,12 @@ void iommu_top::msipt_forwarder_thread() {
 
         // MSIPT cache path: route based on MSI/MRIF flags
         if (task->is_msi == 1 && task->is_mrif == 0) {
-            // MSI forwarding to IMSIC via axi_stream_to_cmn_rnd_socket
+            // MSI forwarding to IMSIC via axi_stream_socket
             printf("[MSIPT_FORWARDER] task_id=%u -> MSI to IMSIC (axi_stream)\n", task->task_id);
             fflush(stdout);
             tlm::tlm_phase phase = tlm::BEGIN_REQ;
             sc_time delay = SC_ZERO_TIME;
-            axi_stream_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
+            axi_stream_socket->nb_transport_fw(*trans, phase, delay);
         } else {
             // Normal DMA or MRIF: output via axi_master_1_to_cmn_rnd_socket (logical routing)
             printf("[MSIPT_FORWARDER] task_id=%u -> normal DMA/MRIF (axi_master_1)\n", task->task_id);

@@ -34,10 +34,10 @@ class iommu_top : public sc_module
 {
 public:
     // ===================== Sockets (unchanged names for main.cpp compatibility) =====================
-    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_stream_to_cmn_rnd_socket;      // MSI data to IMSIC
-    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_0_to_pcie_noc_socket;    // DMA data / access RP
+    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_stream_socket;      // MSI data to IMSIC
+    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_0_to_pcie_noc_to_cmn_rni_socket;    // DMA data / access RP
     tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_1_to_cmn_rnd_socket;     // DDR access for DDT/PDT/CQ/FQ/PQ/MRIF
-    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_2_to_pcie_noc_socket;    // ATS msg back to RP
+    tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_2_ats_msg_to_pcie_noc_socket;    // ATS msg back to RP
 
     tlm_utils::simple_target_socket<iommu_top,BUS_WIDTH>  axi_slave_from_pcie_noc_0_socket;
     tlm_utils::simple_target_socket<iommu_top,BUS_WIDTH>  ahb_slave_from_pcie_noc_1_socket;

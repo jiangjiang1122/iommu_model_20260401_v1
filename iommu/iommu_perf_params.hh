@@ -83,7 +83,7 @@ static const uint32_t DDR_BANDWIDTH_GBPS = 128;     // DDR带宽(GB/s)
 
 // ===================== AXI Master端口并发限制 =====================
 static const uint32_t AXI_MASTER_1_TO_CMN_RND_MAX_OUTSTANDING = 256;  // axi_master_1_to_cmn_rnd_socket并发任务数（DDR访问）
-static const uint32_t AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING = 256; // axi_master_0_to_pcie_noc_socket并发任务数（DMA/RP访问）
+static const uint32_t AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING = 256; // axi_master_0_to_pcie_noc_to_cmn_rni_socket并发任务数（DMA/RP访问）
 
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding

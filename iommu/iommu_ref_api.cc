@@ -158,7 +158,7 @@ void send_msg_iommu_to_hb(iommu_t *iommu,ats_msg_t *prgr)
     trans.set_extension(new_ext);
 
     // 调用 b_transport
-    iommu->top->axi_master_2_to_pcie_noc_socket->b_transport(trans, delay);
+    iommu->top->axi_master_2_ats_msg_to_pcie_noc_socket->b_transport(trans, delay);
 
     // 检查响应状态
     if (trans.get_response_status() != tlm::TLM_OK_RESPONSE) {
