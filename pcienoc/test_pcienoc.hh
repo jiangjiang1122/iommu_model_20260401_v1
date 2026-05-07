@@ -4,8 +4,8 @@
 #include <systemc.h>
 #include <tlm.h>
 #include <tlm_utils/simple_initiator_socket.h>
-#include "../iommu/param_trans_def.hh"
-#include "../iommu/iommu_struct.hh"
+#include "param_trans_def.hh"
+#include "iommu_struct.hh"
 
 class PCIENOC_Module : public sc_core::sc_module {
 public:

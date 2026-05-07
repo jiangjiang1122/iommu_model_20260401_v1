@@ -4,9 +4,9 @@
 #include <tlm_utils/simple_initiator_socket.h>
 #include <cstdio>
 
-#include "iommu/param_trans_def.hh"
-#include "iommu/iommu_struct.hh"
-#include "iommu/iommu_top.hh"
+#include "param_trans_def.hh"
+#include "iommu_struct.hh"
+#include "iommu_top.hh"
 #include "rp/test_rp.hh"
 #include "pcienoc/test_pcienoc.hh"
 #include "ddr/test_ddr.hh"

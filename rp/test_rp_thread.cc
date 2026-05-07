@@ -1,8 +1,8 @@
 #include "test_rp.hh"
-#include "../iommu/iommu_struct.hh"
-#include "../iommu/iommu_registers.hh"
-#include "../iommu/iommu_utils.hh"
-#include "../iommu/iommu_top.hh"
+#include "iommu_struct.hh"
+#include "iommu_registers.hh"
+#include "iommu_utils.hh"
+#include "iommu_top.hh"
 #include <cstdio>
 #include <iostream>
 using namespace std;

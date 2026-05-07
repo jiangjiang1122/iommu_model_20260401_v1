@@ -1,8 +1,8 @@
 #include "test_rp.hh"
-#include "../iommu/iommu_struct.hh"
-#include "../iommu/iommu_registers.hh"
-#include "../iommu/iommu_utils.hh"
-#include "../iommu/iommu_top.hh"  // 包含完整的iommu_top定义
+#include "iommu_struct.hh"
+#include "iommu_registers.hh"
+#include "iommu_utils.hh"
+#include "iommu_top.hh"  // 包含完整的iommu_top定义
 #include <cstdint>
 
 #include <iostream>

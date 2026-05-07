@@ -5,8 +5,8 @@
 #include "tlm.h"
 #include "tlm_utils/simple_initiator_socket.h"
 #include "tlm_utils/simple_target_socket.h"
-#include "../iommu/param_trans_def.hh"
-#include "../iommu/iommu_struct.hh"
+#include "param_trans_def.hh"
+#include "iommu_struct.hh"
 #include "../ddr/test_ddr.hh"
 
 // 声明print_cache_statistics函数（在iommu_top.cc中定义）

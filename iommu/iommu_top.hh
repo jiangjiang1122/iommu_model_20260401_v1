@@ -13,6 +13,11 @@
 #include "iommu_perf_params.hh"
 #include "iommu_perf_model.hh"
 
+#include "json_config.h"
+#include "cache_subsystem.h"
+#include <iostream>
+#include <cassert>
+
 using namespace std;
 using namespace sc_core;
 using namespace tlm;
@@ -44,6 +49,12 @@ public:
 
     // ===================== IOMMU Instance =====================
     iommu_t iommu_inst;
+
+    // 从 JSON 配置文件加载（推荐，参数已与架构对齐）
+    iommu::GlobalConfig cfg = iommu::load_config("iommu/cache_config/default_config.json");
+
+    // 创建 CacheSubsystem
+    iommu::CacheSubsystem cache_sub{"cache_sub", cfg};
 
     // ===================== Task ID Counter =====================
     uint32_t next_task_id;

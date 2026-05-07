@@ -6,7 +6,7 @@
 #include "tlm_utils/simple_target_socket.h"
 #include "tlm_utils/simple_initiator_socket.h"
 #include <cstring>  // for memcpy and memset
-#include "../iommu/iommu_perf_params.hh"
+#include "iommu_perf_params.hh"
 
 using namespace std;
 using namespace sc_core;

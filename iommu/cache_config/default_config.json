@@ -1,0 +1,68 @@
+{
+  "global": {
+    "clock_period_ns": 1.0,
+    "random_seed": 42
+  },
+
+  "cache_timing": {
+    "arbiter_latency_cycles": 1,
+    "hash_latency_cycles": 1,
+    "read_set_latency_cycles": 1,
+    "compare_latency_cycles": 1,
+    "update_way_select_latency_cycles": 1,
+    "fill_compute_index_hit_cycles": 1,
+    "fill_compute_index_invalid_cycles": 2,
+    "fill_compute_index_replacement_cycles": 4,
+    "write_way_latency_cycles": 1,
+    "invalidation_compare_per_way_cycles": 1
+  },
+
+  "dc_cache": {
+    "num_sets": 64,
+    "num_ways": 4,
+    "replacement": "plru"
+  },
+
+  "pc_cache": {
+    "num_sets": 64,
+    "num_ways": 4,
+    "replacement": "plru"
+  },
+
+  "msipt_cache": {
+    "num_sets": 64,
+    "num_ways": 4,
+    "replacement": "plru"
+  },
+
+  "pt_cache": {
+    "num_sets": 1024,
+    "num_ways": 8,
+    "replacement": "plru",
+    "srrip_m_bits": 2
+  },
+
+  "walker_cache": {
+    "base_sets": 64,
+    "ptw_c1": {
+      "num_ways": 1,
+      "replacement": "none"
+    },
+    "ptw_c2": {
+      "num_ways": 2,
+      "replacement": "plru"
+    },
+    "ptw_c3": {
+      "num_ways": 4,
+      "replacement": "plru"
+    }
+  },
+
+  "statistics": {
+    "output_file": "cache_sim.log",
+    "enable_latency_histogram": true,
+    "enable_task_trace": true,
+    "task_trace_level": "detail",
+    "histogram_bin_width_ns": 1.0
+  }
+}

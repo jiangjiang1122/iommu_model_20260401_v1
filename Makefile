@@ -11,7 +11,7 @@ SYSTEMC_INCLUDE = /usr/include
 SYSTEMC_LIB = /usr/lib/x86_64-linux-gnu
 
 # Compiler flags
-CXXFLAGS = -std=c++11 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK
+CXXFLAGS = -std=c++17 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -I./iommu/include -I./iommu/iommu_fun_model -I./iommu/iommu_perf_model -I./iommu/cache_src -I./iommu/cache_src/cache -I./iommu/cache_src/common -I./iommu/cache_src/replacement -I./iommu/cache_src/subsystem -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK
 
 # Debug/Release build
 DEBUG ?= 1
@@ -28,30 +28,41 @@ LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm
 
 # Source files
 CXX_SOURCES = \
-    iommu/iommu_utils.cc \
-    iommu/iommu_reg.cc \
-    iommu/iommu_atc.cc \
-    iommu/iommu_ats.cc \
-    iommu/iommu_command_queue.cc \
-    iommu/iommu_device_context.cc \
-    iommu/iommu_faults.cc \
-    iommu/iommu_hpm.cc \
-    iommu/iommu_interrupt.cc \
-    iommu/iommu_msi_trans.cc \
-    iommu/iommu_process_context.cc \
-    iommu/iommu_ref_api.cc \
-    iommu/iommu_second_stage_trans.cc \
-    iommu/iommu_two_stage_trans.cc \
-    iommu/iommu_translate.cc \
+    iommu/iommu_fun_model/iommu_utils.cc \
+    iommu/iommu_perf_model/iommu_reg.cc \
+    iommu/iommu_fun_model/iommu_atc.cc \
+    iommu/iommu_fun_model/iommu_ats.cc \
+    iommu/iommu_perf_model/iommu_command_queue.cc \
+    iommu/iommu_perf_model/iommu_device_context.cc \
+    iommu/iommu_fun_model/iommu_faults.cc \
+    iommu/iommu_perf_model/iommu_hpm.cc \
+    iommu/iommu_fun_model/iommu_interrupt.cc \
+    iommu/iommu_fun_model/iommu_msi_trans.cc \
+    iommu/iommu_fun_model/iommu_process_context.cc \
+    iommu/iommu_perf_model/iommu_ref_api.cc \
+    iommu/iommu_fun_model/iommu_second_stage_trans.cc \
+    iommu/iommu_fun_model/iommu_two_stage_trans.cc \
+    iommu/iommu_fun_model/iommu_translate.cc \
     iommu/iommu_top.cc \
-    iommu/iommu_perf_parser.cc \
-    iommu/iommu_perf_dc_pc_cache.cc \
-    iommu/iommu_perf_collector.cc \
-    iommu/iommu_perf_xdtw.cc \
-    iommu/iommu_perf_pt_cache.cc \
-    iommu/iommu_perf_ptw.cc \
-    iommu/iommu_perf_msipt_cache.cc \
-    iommu/iommu_perf_forwarder_fault_cq.cc \
+    iommu/iommu_perf_model/iommu_perf_parser.cc \
+    iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc \
+    iommu/iommu_perf_model/iommu_perf_collector.cc \
+    iommu/iommu_perf_model/iommu_perf_xdtw.cc \
+    iommu/iommu_perf_model/iommu_perf_pt_cache.cc \
+    iommu/iommu_perf_model/iommu_perf_ptw.cc \
+    iommu/iommu_perf_model/iommu_perf_msipt_cache.cc \
+    iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc \
+    iommu/cache_src/common/json_config.cpp \
+    iommu/cache_src/common/stats_collector.cpp \
+    iommu/cache_src/cache/cache_base.cpp \
+    iommu/cache_src/cache/dc_cache.cpp \
+    iommu/cache_src/cache/pc_cache.cpp \
+    iommu/cache_src/cache/pt_cache.cpp \
+    iommu/cache_src/cache/walker_cache.cpp \
+    iommu/cache_src/cache/msipt_cache.cpp \
+    iommu/cache_src/replacement/plru_policy.cpp \
+    iommu/cache_src/replacement/srrip_policy.cpp \
+    iommu/cache_src/subsystem/cache_subsystem.cpp \
     rp/test_rp_func.cc \
     rp/test_rp_thread.cc \
     pcienoc/test_pcienoc.cc \
@@ -79,7 +90,7 @@ $(TARGET): $(ALL_OBJECTS)
 
 # Compile C++ sources into build directory
 build/%.o: %.cc
-	@mkdir -p build build/iommu build/rp build/pcienoc build/ddr build/test
+	@mkdir -p build build/iommu build/iommu/iommu_fun_model build/iommu/iommu_perf_model build/iommu/cache_src build/iommu/cache_src/common build/iommu/cache_src/cache build/iommu/cache_src/replacement build/iommu/cache_src/subsystem build/rp build/pcienoc build/ddr build/test
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile main source into build directory
