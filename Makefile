@@ -46,8 +46,8 @@ CXX_SOURCES = \
     iommu/iommu_top.cc \
     iommu/iommu_perf_model/iommu_perf_parser.cc \
     iommu/iommu_perf_model/iommu_perf_collector.cc \
+    iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc \
     iommu/iommu_perf_model/iommu_perf_xdtw.cc \
-    iommu/iommu_perf_model/iommu_perf_pt_cache.cc \
     iommu/iommu_perf_model/iommu_perf_ptw.cc \
     iommu/iommu_perf_model/iommu_perf_msipt_cache.cc \
     iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc \

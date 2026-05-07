@@ -1,43 +1,7 @@
 #include "iommu_top.hh"
+#include "iommu_task_cache_convert.hh"
 #include <cstdio>
-
-// ===================== Cache命中率统计全局变量定义 =====================
-uint64_t g_dc_cache_hit_count = 0;
-uint64_t g_dc_cache_miss_count = 0;
-uint64_t g_pc_cache_hit_count = 0;
-uint64_t g_pc_cache_miss_count = 0;
-uint64_t g_pt_cache_hit_count = 0;
-uint64_t g_pt_cache_miss_count = 0;
-uint64_t g_msipt_cache_hit_count = 0;
-uint64_t g_msipt_cache_miss_count = 0;
-
-// 打印Cache命中率统计信息
-void print_cache_statistics() {
-    printf("\n========== Cache Hit/Miss Statistics ==========\n");
-    
-    uint64_t dc_total = g_dc_cache_hit_count + g_dc_cache_miss_count;
-    double dc_hit_rate = dc_total > 0 ? (100.0 * g_dc_cache_hit_count / dc_total) : 0.0;
-    printf("[DC_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
-           g_dc_cache_hit_count, g_dc_cache_miss_count, dc_total, dc_hit_rate);
-    
-    uint64_t pc_total = g_pc_cache_hit_count + g_pc_cache_miss_count;
-    double pc_hit_rate = pc_total > 0 ? (100.0 * g_pc_cache_hit_count / pc_total) : 0.0;
-    printf("[PC_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
-           g_pc_cache_hit_count, g_pc_cache_miss_count, pc_total, pc_hit_rate);
-    
-    uint64_t pt_total = g_pt_cache_hit_count + g_pt_cache_miss_count;
-    double pt_hit_rate = pt_total > 0 ? (100.0 * g_pt_cache_hit_count / pt_total) : 0.0;
-    printf("[PT_CACHE]  HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
-           g_pt_cache_hit_count, g_pt_cache_miss_count, pt_total, pt_hit_rate);
-    
-    uint64_t msipt_total = g_msipt_cache_hit_count + g_msipt_cache_miss_count;
-    double msipt_hit_rate = msipt_total > 0 ? (100.0 * g_msipt_cache_hit_count / msipt_total) : 0.0;
-    printf("[MSIPT_CACHE] HIT=%lu, MISS=%lu, Total=%lu, Hit Rate=%.2f%%\n",
-           g_msipt_cache_hit_count, g_msipt_cache_miss_count, msipt_total, msipt_hit_rate);
-    
-    printf("===============================================\n\n");
-    fflush(stdout);
-}
+#include <iostream>
 
 /**********************************************/
 // before_end_of_elaboration - IOMMU reset and initialization
@@ -455,8 +419,14 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
 
     task->state = TASK_ROUTE_DECISION;
 
-    // Route to PT Cache for IOTLB lookup
-    collector_to_pt_cache_query_fifo.write(task);
+    // Save original task to pending map for PT cache response correlation
+    pt_cache_mtx.lock();
+    pt_cache_pending_tasks[task->task_id] = task;
+    pt_cache_mtx.unlock();
+
+    // Convert task to CacheMessage and write to cache_sub.pt_request_fifo
+    iommu::CacheMessage pt_req = task_to_pt_request(task);
+    cache_sub.pt_request_fifo.write(pt_req);
 }
 
 /**********************************************/
@@ -474,4 +444,17 @@ void iommu_top::init_gstage_walk(iommu_task_t* task, uint64_t gpa) {
                            gs_vpn[GS_LEVELS - 1] * 8; // G-stage PTESIZE=8
     task->walk_ctx.read_addr = gs_pte_addr;
     task->walk_ctx.read_size = 8;
+}
+
+/**********************************************/
+// print_cache_statistics - 打印Cache命中率统计信息
+/**********************************************/
+void iommu_top::print_cache_statistics() {
+    printf("\n========== Cache Hit/Miss Statistics (CacheSubsystem Internal) ==========\n");
+    
+    // 使用CacheSubsystem内部的StatsCollector
+    cache_sub.stats().print_summary(std::cout);
+    
+    printf("========================================================================\n\n");
+    fflush(stdout);
 }

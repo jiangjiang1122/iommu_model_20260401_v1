@@ -57,6 +57,9 @@ public:
     // 创建 CacheSubsystem
     iommu::CacheSubsystem cache_sub{"cache_sub", cfg};
 
+    // 打印Cache命中率统计信息
+    void print_cache_statistics();
+
     // ===================== Task ID Counter =====================
     uint32_t next_task_id;
     sc_mutex task_id_mtx;
@@ -72,7 +75,7 @@ public:
     sc_fifo<iommu_task_t*> collector_to_xdtw_pc_fifo;
     // sc_fifo<iommu_task_t*> collector_to_dc_cache_update_fifo;  // Replaced by cache_sub.dc_update_fifo
     // sc_fifo<iommu_task_t*> collector_to_pc_cache_update_fifo;  // Replaced by cache_sub.pc_update_fifo
-    sc_fifo<iommu_task_t*> collector_to_pt_cache_query_fifo;
+    // sc_fifo<iommu_task_t*> collector_to_pt_cache_query_fifo;   // Replaced by cache_sub.pt_request_fifo
     sc_fifo<iommu_task_t*> collector_to_msipt_cache_query_fifo;
     sc_fifo<iommu_task_t*> collector_to_fault_fifo;
     sc_fifo<iommu_task_t*> xdtw_to_collector_fifo;
@@ -110,6 +113,10 @@ public:
     // ===================== Collector Pending Tasks =====================
     std::map<uint32_t, collector_entry_t> pending_tasks;
     sc_mutex collector_mtx;
+
+    // ===================== PT Cache Pending Tasks =====================
+    std::map<uint32_t, iommu_task_t*> pt_cache_pending_tasks;  // Save original task for PT lookup
+    sc_mutex pt_cache_mtx;
 
     // ===================== Walker Active Walks =====================
     std::map<uint32_t, iommu_task_t*> xdtw_active_walks;
@@ -155,8 +162,9 @@ public:
     void pc_cache_query_thread();
     void pc_cache_update_thread();
 
-    // Collector (2 threads)
+    // Collector (3 threads)
     void collector_cache_lookup_result_thread();
+    void collector_pt_response_thread();  // New: handle PT cache responses
     void collector_xdtw_response_thread();
 
     // xDTW (2 threads)
@@ -223,7 +231,7 @@ public:
         collector_to_xdtw_pc_fifo("collector_to_xdtw_pc_fifo", FIFO_DEPTH_COLLECTOR_TO_XDTW),
         // collector_to_dc_cache_update_fifo("collector_to_dc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE),  // Replaced by cache_sub
         // collector_to_pc_cache_update_fifo("collector_to_pc_cache_update_fifo", FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE),  // Replaced by cache_sub
-        collector_to_pt_cache_query_fifo("collector_to_pt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY),
+        // collector_to_pt_cache_query_fifo("collector_to_pt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY),     // Replaced by cache_sub
         collector_to_msipt_cache_query_fifo("collector_to_msipt_cache_query_fifo", FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY),
         collector_to_fault_fifo("collector_to_fault_fifo", FIFO_DEPTH_COLLECTOR_TO_FAULT),
         xdtw_to_collector_fifo("xdtw_to_collector_fifo", FIFO_DEPTH_XDTW_TO_COLLECTOR),
@@ -271,12 +279,13 @@ public:
         // SC_THREAD(pc_cache_query_thread);   // Replaced by CacheSubsystem
         // SC_THREAD(pc_cache_update_thread);  // Replaced by CacheSubsystem
         SC_THREAD(collector_cache_lookup_result_thread);
+        SC_THREAD(collector_pt_response_thread);  // New: handle PT cache hit/miss responses
         SC_THREAD(collector_xdtw_response_thread);
         SC_THREAD(xdtw_req_thread);
         SC_THREAD(xdtw_rsp_thread);
-        SC_THREAD(pt_cache_query_thread);
-        SC_THREAD(pt_cache_result_thread);
-        SC_THREAD(pt_cache_ptw_rsp_thread);
+        // SC_THREAD(pt_cache_query_thread);    // Replaced by CacheSubsystem
+        // SC_THREAD(pt_cache_result_thread);   // Replaced by CacheSubsystem
+        // SC_THREAD(pt_cache_ptw_rsp_thread);  // Replaced by CacheSubsystem
         SC_THREAD(ptw_req_thread);
         SC_THREAD(ptw_rsp_thread);
         SC_THREAD(msipt_cache_query_thread);

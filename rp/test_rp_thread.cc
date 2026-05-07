@@ -637,7 +637,10 @@ void RP_Module::send_translation_request_1_thread()
         printf("\n[TEST] 100-request concurrent test completed!\n");
 
         // 打印Cache命中率统计信息
-        print_cache_statistics();
+        iommu_ptr->print_cache_statistics();
+
+        // 停止仿真
+        sc_core::sc_stop();
 
         return;
     }

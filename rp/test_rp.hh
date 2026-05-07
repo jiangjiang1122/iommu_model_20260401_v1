@@ -9,9 +9,6 @@
 #include "iommu_struct.hh"
 #include "../ddr/test_ddr.hh"
 
-// 声明print_cache_statistics函数（在iommu_top.cc中定义）
-extern void print_cache_statistics();
-
 using namespace std;
 using namespace sc_core;
 using namespace tlm;

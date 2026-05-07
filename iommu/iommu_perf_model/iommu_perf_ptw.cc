@@ -3,6 +3,7 @@
 // Corresponds to two_stage_address_translation() + second_stage_address_translation()
 
 #include "iommu_top.hh"
+#include "iommu_task_cache_convert.hh"
 #include <cstdio>
 
 // ============================================================
@@ -70,7 +71,13 @@ void iommu_top::ptw_req_thread() {
                 task->state = TASK_PTW_DONE;
                 ptw_outstanding_task_count--;
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
-                ptw_to_pt_cache_fifo.write(task);
+                
+                // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
+                iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+                cache_sub.pt_update_fifo.write(pt_update_req);
+                
+                // Also route to forwarder
+                pt_cache_to_fwd_fifo.write(task);
                 continue;
             }
         }
@@ -90,7 +97,13 @@ void iommu_top::ptw_req_thread() {
                 task->state = TASK_FAULT;
                 ptw_outstanding_task_count--;
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
-                ptw_to_pt_cache_fifo.write(task);
+                
+                // Convert task to CacheMessage and write to cache_sub.pt_update_fifo (for fault recording)
+                iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+                cache_sub.pt_update_fifo.write(pt_update_req);
+                
+                // Route to fault FIFO
+                collector_to_fault_fifo.write(task);
                 continue;
             }
 
@@ -610,7 +623,13 @@ void iommu_top::ptw_rsp_thread() {
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
             ptw_task_completed_event.notify(SC_ZERO_TIME);
-            ptw_to_pt_cache_fifo.write(task);
+            
+            // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
+            iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+            cache_sub.pt_update_fifo.write(pt_update_req);
+            
+            // Also route to forwarder after PT update
+            pt_cache_to_fwd_fifo.write(task);
         }
         else if (walk_complete) {
             printf("[PTW_RSP] task_id=%u -> WALK COMPLETE, pa=0x%lx, total_reads=%u -> pt_cache\n",
@@ -621,7 +640,13 @@ void iommu_top::ptw_rsp_thread() {
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
             ptw_task_completed_event.notify(SC_ZERO_TIME);
-            ptw_to_pt_cache_fifo.write(task);
+            
+            // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
+            iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+            cache_sub.pt_update_fifo.write(pt_update_req);
+            
+            // Also route to forwarder after PT update
+            pt_cache_to_fwd_fifo.write(task);
         }
         else if (need_next_ddr) {
             printf("[PTW_RSP] task_id=%u -> need_next_ddr, addr=0x%lx, size=%d, phase=%d, read_count=%u\n",
