@@ -147,14 +147,37 @@ iommu::CacheMessage task_to_pt_request(iommu_task_t* task) {
     req.gscid      = task->GSCID;
     req.pscid      = task->PSCID;
     req.iova       = task->iova;
-    req.stage      = (task->iohgatp.MODE == 0) ? 
-                     iommu::TransStage::STAGE1_ONLY : 
-                     iommu::TransStage::STAGE1_AND_2;
-    req.pt_sv48    = (task->iosatp.MODE >= 9);  // Sv48 or Sv57
-    req.pt_gstage_x4 = (task->iohgatp.MODE >= 8);  // Sv39x4 or Sv48x4
     
-    printf("[CONVERT] task_id=%u -> PT_LOOKUP request (gscid=%u, pscid=%u, iova=0x%lx)\n",
-           task->task_id, task->GSCID, task->PSCID, task->iova);
+    // (1) 根据iohgatp.MODE和iosatp.MODE判断翻译阶段
+    bool stage1_bare = (task->iosatp.MODE == RVI_IOMMU_IOSATP_Bare);
+    bool stage2_bare = (task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Bare);
+    
+    if (stage1_bare && !stage2_bare) {
+        // S-stage: Bare, VS-stage: 非Bare -> STAGE2_ONLY
+        req.stage = iommu::TransStage::STAGE2_ONLY;
+    } else if (!stage1_bare && !stage2_bare) {
+        // S-stage: 非Bare, VS-stage: 非Bare -> STAGE1_AND_2
+        req.stage = iommu::TransStage::STAGE1_AND_2;
+    } else if (!stage1_bare && stage2_bare) {
+        // S-stage: 非Bare, VS-stage: Bare -> STAGE1_ONLY
+        req.stage = iommu::TransStage::STAGE1_ONLY;
+    } else {
+        // 两者都Bare: 不应该发生，默认STAGE1_ONLY
+        req.stage = iommu::TransStage::STAGE1_ONLY;
+    }
+    
+    // (2) pt_sv48: 表示Sv39/Sv48标志位，指明iova地址类型
+    // 如果iosatp.MODE == Sv48，则为true，否则为false（Sv39或Bare）
+    req.pt_sv48 = (task->iosatp.MODE == RVI_IOMMU_IOSATP_Sv48);
+    
+    // (3) pt_gstage_x4: 表示G-stage阶段GPA是Sv39/Sv48还是Sv39x4/Sv48x4
+    // 如果iohgatp.MODE == Sv48x4或Sv39x4，则为true，否则为false
+    req.pt_gstage_x4 = (task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Sv48x4 || 
+                        task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Sv39x4);
+    
+    printf("[CONVERT] task_id=%u -> PT_LOOKUP request (gscid=%u, pscid=%u, iova=0x%lx, stage=%d, sv48=%d, x4=%d)\n",
+           task->task_id, task->GSCID, task->PSCID, task->iova, 
+           static_cast<int>(req.stage), req.pt_sv48, req.pt_gstage_x4);
     fflush(stdout);
     
     return req;
@@ -212,21 +235,50 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
     req.gscid      = task->GSCID;
     req.pscid      = task->PSCID;
     req.iova       = task->iova;
-    req.stage      = (task->iohgatp.MODE == 0) ? 
-                     iommu::TransStage::STAGE1_ONLY : 
-                     iommu::TransStage::STAGE1_AND_2;
-    req.pt_sv48    = (task->iosatp.MODE >= 9);
-    req.pt_gstage_x4 = (task->iohgatp.MODE >= 8);
+    
+    // (1) 根据iohgatp.MODE和iosatp.MODE判断翻译阶段
+    bool stage1_bare = (task->iosatp.MODE == RVI_IOMMU_IOSATP_Bare);
+    bool stage2_bare = (task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Bare);
+    
+    if (stage1_bare && !stage2_bare) {
+        // S-stage: Bare, VS-stage: 非Bare -> STAGE2_ONLY
+        req.stage = iommu::TransStage::STAGE2_ONLY;
+    } else if (!stage1_bare && !stage2_bare) {
+        // S-stage: 非Bare, VS-stage: 非Bare -> STAGE1_AND_2
+        req.stage = iommu::TransStage::STAGE1_AND_2;
+    } else if (!stage1_bare && stage2_bare) {
+        // S-stage: 非Bare, VS-stage: Bare -> STAGE1_ONLY
+        req.stage = iommu::TransStage::STAGE1_ONLY;
+    } else {
+        // 两者都Bare: 不应该发生，默认STAGE1_ONLY
+        req.stage = iommu::TransStage::STAGE1_ONLY;
+    }
+    
+    // (2) pt_sv48: 表示Sv39/Sv48标志位，指明iova地址类型
+    req.pt_sv48 = (task->iosatp.MODE == RVI_IOMMU_IOSATP_Sv48);
+    
+    // (3) pt_gstage_x4: 表示G-stage阶段GPA是Sv39/Sv48还是Sv39x4/Sv48x4
+    req.pt_gstage_x4 = (task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Sv48x4 || 
+                        task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Sv39x4);
+    
     req.from_prefetch = false;
     
-    // Copy PT data from task to CacheMessage
-    req.pt_data.reserved.valid = 1;
-    // Note: Skipping vs_pte and g_pte assignment due to type mismatch (gpte_t)
-    // PT cache update will use the PA directly from task->pa
-    req.pt_data.vs_pte.PPN = task->pa >> 12;
-    req.pt_data.g_pte.PPN = task->pa >> 12;
+    // (4) 使用make_pt_data构造PTData
+    // 根据task->pa和req.stage构造完整的PTData
+    req.pt_data = iommu::make_pt_data(
+        task->pa,                          // SPA (System Physical Address)
+        iommu::PageSize::PAGE_4K,          // 页大小 (默认4KB)
+        0x07,                              // permissions (R|W|X)
+        req.stage,                         // 翻译阶段
+        iommu::PageSize::PAGE_4K,          // input_page_size
+        (req.stage == iommu::TransStage::STAGE2_ONLY) ? false : true,  // iova_is_va
+        req.pt_sv48,                       // sv48标志
+        req.pt_gstage_x4                   // gstage_x4标志
+    );
     
-    printf("[CONVERT] task_id=%u -> PT_UPDATE request\n", task->task_id);
+    printf("[CONVERT] task_id=%u -> PT_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, pa=0x%lx, stage=%d, sv48=%d, x4=%d)\n",
+           task->task_id, task->GSCID, task->PSCID, task->iova, task->pa,
+           static_cast<int>(req.stage), req.pt_sv48, req.pt_gstage_x4);
     fflush(stdout);
     
     return req;
