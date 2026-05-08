@@ -27,4 +27,13 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task);
 void dc_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task);
 void pc_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task);
 
+// Convert iommu_task_t to CacheMessage for Walker Cache lookup request
+iommu::CacheMessage task_to_walker_request(iommu_task_t* task);
+
+// Convert Walker Cache Message response back to iommu_task_t
+void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task);
+
+// Convert iommu_task_t to CacheMessage for Walker Cache update
+iommu::CacheMessage task_to_walker_update(iommu_task_t* task);
+
 #endif // IOMMU_TASK_CACHE_CONVERT_HH

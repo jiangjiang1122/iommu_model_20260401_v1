@@ -283,3 +283,127 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
     
     return req;
 }
+
+// ============================================================
+// Convert iommu_task_t to CacheMessage for Walker Cache lookup request
+// ============================================================
+iommu::CacheMessage task_to_walker_request(iommu_task_t* task) {
+    iommu::CacheMessage req;
+    
+    req.msg_type           = iommu::CacheMsgType::WALKER_LOOKUP;
+    req.task_id            = task->task_id;
+    
+    // 从 task 解析路由键
+    req.gscid              = task->GSCID;
+    req.pscid              = task->PSCID;
+    req.iova               = task->iova;
+    
+    // 解析翻译模式标志位
+    req.walker_addr_is_va  = (task->iosatp.MODE != IOSATP_Bare);
+    req.walker_from_two_stage = (task->iohgatp.MODE != IOHGATP_Bare);
+    req.walker_sv48        = (task->iosatp.MODE == IOSATP_Sv48);
+    req.walker_x4_mode     = (task->iohgatp.MODE == IOHGATP_Sv39x4 || 
+                              task->iohgatp.MODE == IOHGATP_Sv48x4);
+    
+    printf("[CONVERT] task_id=%u -> WALKER_LOOKUP request (gscid=%u, pscid=%u, iova=0x%lx, sv48=%d, x4=%d)\n",
+           task->task_id, task->GSCID, task->PSCID, task->iova,
+           req.walker_sv48, req.walker_x4_mode);
+    fflush(stdout);
+    
+    return req;
+}
+
+// ============================================================
+// Convert Walker CacheMessage response back to iommu_task_t
+// Populates task walk_ctx from resp.walker_data
+// ============================================================
+void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
+    if (resp.hit) {
+        // Walker Cache hit: extract hit level and next PPN
+        uint8_t hit_level = resp.walker_level;
+        iommu::ppn_t next_ppn = resp.walker_data.next_ppn;
+        
+        // 设置walk starting point从命中层级的下一级开始
+        task->walk_ctx.level = hit_level - 1;
+        task->walk_ctx.base_addr = next_ppn * PAGESIZE;
+        
+        printf("[CONVERT] task_id=%u <- WALKER_LOOKUP response (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
+               task->task_id, hit_level, next_ppn, task->walk_ctx.level);
+        fflush(stdout);
+    } else {
+        // Walker Cache miss: will start full walk from highest level
+        printf("[CONVERT] task_id=%u <- WALKER_LOOKUP response (MISS)\n",
+               task->task_id);
+        fflush(stdout);
+    }
+}
+
+// ============================================================
+// Convert iommu_task_t to CacheMessage for Walker Cache update
+// ============================================================
+iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
+    iommu::CacheMessage req;
+    
+    req.msg_type           = iommu::CacheMsgType::WALKER_UPDATE;
+    req.task_id            = task->task_id;
+    req.gscid              = task->GSCID;
+    req.pscid              = task->PSCID;
+    req.iova               = task->iova;
+    
+    // 路由键标志位（与lookup保持一致）
+    req.walker_addr_is_va  = (task->iosatp.MODE != IOSATP_Bare);
+    req.walker_from_two_stage = (task->iohgatp.MODE != IOHGATP_Bare);
+    req.walker_sv48        = (task->iosatp.MODE == IOSATP_Sv48);
+    req.walker_x4_mode     = (task->iohgatp.MODE == IOHGATP_Sv39x4 || 
+                              task->iohgatp.MODE == IOHGATP_Sv48x4);
+    
+    // 根据保存的中间结果构造三级数据
+    // 默认值：valid=false
+    req.walker_data_ptwc1 = iommu::make_walker_data(0, false, 
+        req.walker_addr_is_va, req.walker_from_two_stage,
+        req.walker_sv48, req.walker_x4_mode);
+    req.walker_data_ptwc2 = iommu::make_walker_data(0, false,
+        req.walker_addr_is_va, req.walker_from_two_stage,
+        req.walker_sv48, req.walker_x4_mode);
+    req.walker_data_ptwc3 = iommu::make_walker_data(0, false,
+        req.walker_addr_is_va, req.walker_from_two_stage,
+        req.walker_sv48, req.walker_x4_mode);
+    
+    // 填充实际命中的层级
+    bool has_update = false;
+    if (task->walk_ctx.walker_cache_entries.valid_level2) {
+        req.walker_data_ptwc3 = iommu::make_walker_data(
+            task->walk_ctx.walker_cache_entries.ppn_level2, true,
+            req.walker_addr_is_va, req.walker_from_two_stage,
+            req.walker_sv48, req.walker_x4_mode);
+        has_update = true;
+    }
+    if (task->walk_ctx.walker_cache_entries.valid_level1) {
+        req.walker_data_ptwc2 = iommu::make_walker_data(
+            task->walk_ctx.walker_cache_entries.ppn_level1, true,
+            req.walker_addr_is_va, req.walker_from_two_stage,
+            req.walker_sv48, req.walker_x4_mode);
+        has_update = true;
+    }
+    if (task->walk_ctx.walker_cache_entries.valid_level0) {
+        req.walker_data_ptwc1 = iommu::make_walker_data(
+            task->walk_ctx.walker_cache_entries.ppn_level0, true,
+            req.walker_addr_is_va, req.walker_from_two_stage,
+            req.walker_sv48, req.walker_x4_mode);
+        has_update = true;
+    }
+    
+    // 设置update kind
+    if (has_update) {
+        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+    }
+    
+    printf("[CONVERT] task_id=%u -> WALKER_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, L2=%d, L1=%d, L0=%d)\n",
+           task->task_id, task->GSCID, task->PSCID, task->iova,
+           task->walk_ctx.walker_cache_entries.valid_level2,
+           task->walk_ctx.walker_cache_entries.valid_level1,
+           task->walk_ctx.walker_cache_entries.valid_level0);
+    fflush(stdout);
+    
+    return req;
+}

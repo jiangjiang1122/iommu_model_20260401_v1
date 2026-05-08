@@ -78,7 +78,6 @@ GlobalConfig parse_config(const std::string& json_str) {
     // Walker Cache
     if (j.contains("walker_cache")) {
         const auto& wc = j["walker_cache"];
-        if (wc.contains("enabled")) cfg.walker_cache_enabled = static_cast<bool>(wc["enabled"]);
         if (wc.contains("base_sets")) cfg.walker_base_sets = static_cast<uint32_t>(wc["base_sets"]);
 
         CacheConfig wc1_def = common_cache_def;

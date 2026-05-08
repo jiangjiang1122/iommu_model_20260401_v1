@@ -43,7 +43,6 @@
   },
 
   "walker_cache": {
-    "enabled": true,
     "base_sets": 64,
     "ptw_c1": {
       "num_ways": 1,

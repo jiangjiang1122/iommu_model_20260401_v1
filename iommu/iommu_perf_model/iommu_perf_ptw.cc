@@ -87,28 +87,12 @@ void iommu_top::ptw_req_thread() {
             // =====================================================================
             // Walker Cache Lookup (如果启用)
             // =====================================================================
-            bool walker_cache_enabled = cfg.walker_cache_enabled;
+            bool walker_cache_enabled = PTW_WALKER_CACHE_ENABLED;  // 从PTW模块参数读取
             bool walker_hit = false;
-            uint8_t walker_hit_level = 0;
-            iommu::ppn_t walker_next_ppn = 0;
             
             if (walker_cache_enabled) {
-                // 构造Walker Cache Lookup请求
-                iommu::CacheMessage req;
-                req.msg_type           = iommu::CacheMsgType::WALKER_LOOKUP;
-                req.task_id            = task->task_id;
-                
-                // 从 task 解析路由键
-                req.gscid              = task->GSCID;
-                req.pscid              = task->PSCID;
-                req.iova               = task->iova;
-                
-                // 解析翻译模式标志位
-                req.walker_addr_is_va  = (task->iosatp.MODE != IOSATP_Bare);
-                req.walker_from_two_stage = (task->iohgatp.MODE != IOHGATP_Bare);
-                req.walker_sv48        = (task->iosatp.MODE == IOSATP_Sv48);
-                req.walker_x4_mode     = (task->iohgatp.MODE == IOHGATP_Sv39x4 || 
-                                          task->iohgatp.MODE == IOHGATP_Sv48x4);
+                // 使用转换函数构造Walker Cache Lookup请求
+                iommu::CacheMessage req = task_to_walker_request(task);
                 
                 // 发送Lookup请求
                 cache_sub.walker_request_fifo.write(req);
@@ -116,19 +100,10 @@ void iommu_top::ptw_req_thread() {
                 // 阻塞等待响应
                 iommu::CacheMessage resp = cache_sub.walker_response_fifo.read();
                 
-                if (resp.hit) {
-                    walker_hit = true;
-                    walker_hit_level = resp.walker_level;
-                    walker_next_ppn = resp.walker_data.next_ppn;
-                    
-                    printf("[PTW_REQ] task_id=%u, Walker Cache HIT at level=%d, next_ppn=0x%lx\n",
-                           task->task_id, walker_hit_level, walker_next_ppn);
-                    fflush(stdout);
-                } else {
-                    printf("[PTW_REQ] task_id=%u, Walker Cache MISS, starting full walk\n",
-                           task->task_id);
-                    fflush(stdout);
-                }
+                // 使用转换函数将响应写回task
+                walker_response_to_task(resp, task);
+                
+                walker_hit = resp.hit;
             }
             
             uint16_t vpn[5] = {0};
@@ -166,11 +141,8 @@ void iommu_top::ptw_req_thread() {
             // 根据 Walker Cache 命中情况初始化 walk
             // =====================================================================
             if (walker_cache_enabled && walker_hit) {
-                // 命中：从命中层级的下一级开始 walk
-                // walker_hit_level 表示缓存的是哪一级的页表基址
-                // 例如：level=2 命中，表示已有 level=2 的 PPN，从 level=1 开始
-                task->walk_ctx.level = walker_hit_level - 1;
-                task->walk_ctx.base_addr = walker_next_ppn * PAGESIZE;
+                // 命中：walker_response_to_task已经设置了walk starting point
+                // task->walk_ctx.level 和 task->walk_ctx.base_addr 已经被设置
                 
                 printf("[PTW_REQ] task_id=%u, Walker hit: start from level=%d, base_addr=0x%lx\n",
                        task->task_id, task->walk_ctx.level, task->walk_ctx.base_addr);
@@ -733,62 +705,13 @@ void iommu_top::ptw_rsp_thread() {
             // =====================================================================
             // Update Walker Cache (如果启用)
             // =====================================================================
-            bool walker_cache_enabled = cfg.walker_cache_enabled;
+            bool walker_cache_enabled = PTW_WALKER_CACHE_ENABLED;  // 从PTW模块参数读取
             if (walker_cache_enabled) {
-                // 构造Walker Cache Update请求
-                iommu::CacheMessage walker_req;
-                walker_req.msg_type           = iommu::CacheMsgType::WALKER_UPDATE;
-                walker_req.task_id            = task->task_id;
-                walker_req.gscid              = task->GSCID;
-                walker_req.pscid              = task->PSCID;
-                walker_req.iova               = task->iova;
+                // 使用转换函数构造Walker Cache Update请求
+                iommu::CacheMessage walker_req = task_to_walker_update(task);
                 
-                // 路由键标志位（与lookup保持一致）
-                walker_req.walker_addr_is_va  = (task->iosatp.MODE != IOSATP_Bare);
-                walker_req.walker_from_two_stage = (task->iohgatp.MODE != IOHGATP_Bare);
-                walker_req.walker_sv48        = (task->iosatp.MODE == IOSATP_Sv48);
-                walker_req.walker_x4_mode     = (task->iohgatp.MODE == IOHGATP_Sv39x4 || 
-                                                 task->iohgatp.MODE == IOHGATP_Sv48x4);
-                
-                // 根据保存的中间结果构造三级数据
-                // 默认值：valid=false
-                walker_req.walker_data_ptwc1 = iommu::make_walker_data(0, false, 
-                    walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                    walker_req.walker_sv48, walker_req.walker_x4_mode);
-                walker_req.walker_data_ptwc2 = iommu::make_walker_data(0, false,
-                    walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                    walker_req.walker_sv48, walker_req.walker_x4_mode);
-                walker_req.walker_data_ptwc3 = iommu::make_walker_data(0, false,
-                    walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                    walker_req.walker_sv48, walker_req.walker_x4_mode);
-                
-                // 填充实际命中的层级
-                bool has_update = false;
-                if (task->walk_ctx.walker_cache_entries.valid_level2) {
-                    walker_req.walker_data_ptwc3 = iommu::make_walker_data(
-                        task->walk_ctx.walker_cache_entries.ppn_level2, true,
-                        walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                        walker_req.walker_sv48, walker_req.walker_x4_mode);
-                    has_update = true;
-                }
-                if (task->walk_ctx.walker_cache_entries.valid_level1) {
-                    walker_req.walker_data_ptwc2 = iommu::make_walker_data(
-                        task->walk_ctx.walker_cache_entries.ppn_level1, true,
-                        walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                        walker_req.walker_sv48, walker_req.walker_x4_mode);
-                    has_update = true;
-                }
-                if (task->walk_ctx.walker_cache_entries.valid_level0) {
-                    walker_req.walker_data_ptwc1 = iommu::make_walker_data(
-                        task->walk_ctx.walker_cache_entries.ppn_level0, true,
-                        walker_req.walker_addr_is_va, walker_req.walker_from_two_stage,
-                        walker_req.walker_sv48, walker_req.walker_x4_mode);
-                    has_update = true;
-                }
-                
-                // 设置update kind
-                if (has_update) {
-                    walker_req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+                // 只有当有有效数据时才写入
+                if (walker_req.walker_update_kind == iommu::WalkerUpdateKind::PTWC_1_2_3) {
                     cache_sub.walker_update_fifo.write(walker_req);
                     
                     printf("[PTW_RSP] task_id=%u -> Walker Cache UPDATE (L2=%d, L1=%d, L0=%d)\n",

@@ -604,7 +604,6 @@ struct GlobalConfig {
     CacheConfig msipt_cache;
     CacheConfig pt_cache;
     // Walker Cache配置
-    bool        walker_cache_enabled = true;  // 开关控制
     uint32_t    walker_base_sets = 64;
     CacheConfig walker_ptw_c1;
     CacheConfig walker_ptw_c2;

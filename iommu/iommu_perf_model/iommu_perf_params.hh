@@ -91,6 +91,9 @@ static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk
 static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 256;        // PTW总outstanding任务数
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
 
+// ===================== PTW模块参数 =====================
+static const bool PTW_WALKER_CACHE_ENABLED = false;          // Walker Cache开关（true=启用，false=禁用）
+
 // ===================== Collector Outstanding 限制 =====================
 static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限
 static const uint32_t COLLECTOR_MAX_PC_WALK_OUTSTANDING = 64;   // Collector PC walk outstanding上限
