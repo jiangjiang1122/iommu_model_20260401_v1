@@ -103,6 +103,17 @@ struct walk_context_t {
     // DDR read count for walk progress tracking
     uint32_t ddr_read_count;
 
+    // Walker Cache intermediate results (for PTW)
+    // 保存walk过程中的中间PPN，用于最后update walker cache
+    struct {
+        uint64_t ppn_level2;  // Level 2 PPN (PTWc_3)
+        uint64_t ppn_level1;  // Level 1 PPN (PTWc_2)
+        uint64_t ppn_level0;  // Level 0 PPN (PTWc_1)
+        bool valid_level2;
+        bool valid_level1;
+        bool valid_level0;
+    } walker_cache_entries;
+
     walk_context_t() {
         memset(this, 0, sizeof(walk_context_t));
     }
