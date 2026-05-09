@@ -388,24 +388,45 @@ void iommu_top::ptw_rsp_thread() {
                 }
 
                 // =====================================================================
-                // 保存中间结果到 Walker Cache entries
+                // 保存中间结果到 Walker Cache entries（按 PTWc_X tag 含义对齐）
                 // =====================================================================
-                // 根据当前level保存到对应的entry
-                // Sv39: level=2 -> PTWc_3, level=1 -> PTWc_2, level=0 -> PTWc_1
-                // Sv48: level=3 -> PTWc_3, level=2 -> PTWc_2, level=1 -> PTWc_1
-                if (task->walk_ctx.level == 2 || task->walk_ctx.level == 3) {
-                    task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
-                    task->walk_ctx.walker_cache_entries.valid_level2 = true;
-                } else if (task->walk_ctx.level == 1) {
-                    task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
-                    task->walk_ctx.walker_cache_entries.valid_level1 = true;
-                } else if (task->walk_ctx.level == 0) {
-                    task->walk_ctx.walker_cache_entries.ppn_level0 = pte.PPN;
-                    task->walk_ctx.walker_cache_entries.valid_level0 = true;
+                // PTWc_X 的 tag = 前 X 段 VPN 合并，其 data 是"读完前 X 段后的 PTE.PPN"：
+                //   Sv39: walk level=2 非叶子 -> PTWc_2（存 valid_level1）
+                //   Sv39: walk level=1 非叶子 -> PTWc_3（存 valid_level2）
+                //   Sv48: walk level=3 非叶子 -> PTWc_1（存 valid_level0）
+                //   Sv48: walk level=2 非叶子 -> PTWc_2（存 valid_level1）
+                //   Sv48: walk level=1 非叶子 -> PTWc_3（存 valid_level2）
+                //   level=0 为叶子节点 -> 不缓存
+                //
+                // 注意：task_to_walker_update 映射为
+                //   valid_level0 -> PTWc_1, valid_level1 -> PTWc_2, valid_level2 -> PTWc_3
+                if (task->iosatp.MODE == IOSATP_Sv48) {
+                    if (task->walk_ctx.level == 3) {
+                        task->walk_ctx.walker_cache_entries.ppn_level0 = pte.PPN;
+                        task->walk_ctx.walker_cache_entries.valid_level0 = true;
+                    } else if (task->walk_ctx.level == 2) {
+                        task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
+                        task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                    } else if (task->walk_ctx.level == 1) {
+                        task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
+                        task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                    }
+                } else {  // Sv39
+                    if (task->walk_ctx.level == 2) {
+                        task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
+                        task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                    } else if (task->walk_ctx.level == 1) {
+                        task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
+                        task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                    }
                 }
+                // level==0 为叶子节点，Walker Cache 不缓存叶子
                 
-                printf("[PTW_RSP] task_id=%u, saved walker cache: level=%d, PPN=0x%lx\n",
-                       task->task_id, task->walk_ctx.level, pte.PPN);
+                printf("[PTW_RSP] task_id=%u, saved walker cache: level=%d, PPN=0x%lx, valid=[L2=%d,L1=%d,L0=%d]\n",
+                       task->task_id, task->walk_ctx.level, pte.PPN,
+                       task->walk_ctx.walker_cache_entries.valid_level2,
+                       task->walk_ctx.walker_cache_entries.valid_level1,
+                       task->walk_ctx.walker_cache_entries.valid_level0);
                 fflush(stdout);
 
                 task->walk_ctx.level--;
@@ -710,17 +731,16 @@ void iommu_top::ptw_rsp_thread() {
                 // 使用转换函数构造Walker Cache Update请求
                 iommu::CacheMessage walker_req = task_to_walker_update(task);
                 
-                // 只有当有有效数据时才写入
-                if (walker_req.walker_update_kind == iommu::WalkerUpdateKind::PTWC_1_2_3) {
-                    cache_sub.walker_update_fifo.write(walker_req);
-                    
-                    printf("[PTW_RSP] task_id=%u -> Walker Cache UPDATE (L2=%d, L1=%d, L0=%d)\n",
-                           task->task_id,
-                           task->walk_ctx.walker_cache_entries.valid_level2,
-                           task->walk_ctx.walker_cache_entries.valid_level1,
-                           task->walk_ctx.walker_cache_entries.valid_level0);
-                    fflush(stdout);
-                }
+                // PTWC_1_2_3 / PTWC_2_3 / PTWC_3 三种更新类型都需要写入 walker_update_fifo
+                cache_sub.walker_update_fifo.write(walker_req);
+                
+                printf("[PTW_RSP] task_id=%u -> Walker Cache UPDATE (kind=%d, L2=%d, L1=%d, L0=%d)\n",
+                       task->task_id,
+                       static_cast<int>(walker_req.walker_update_kind),
+                       task->walk_ctx.walker_cache_entries.valid_level2,
+                       task->walk_ctx.walker_cache_entries.valid_level1,
+                       task->walk_ctx.walker_cache_entries.valid_level0);
+                fflush(stdout);
             }
             
             // Also route to forwarder after PT update

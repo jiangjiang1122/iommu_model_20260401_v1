@@ -235,6 +235,14 @@ WalkerCache::WalkerCache(sc_module_name name,
         "ptw_c2", cfg2, stats, "walker_ptw_c2", 2);
     ptw_c3_ = std::make_unique<WalkerSubCache>(
         "ptw_c3", cfg3, stats, "walker_ptw_c3", 3);
+
+    // 上电主动无效化所有条目（确保初始状态干净，避免残留数据污染）
+    uint32_t cleared = 0;
+    cleared += ptw_c1_->invalidate_global(nullptr);
+    cleared += ptw_c2_->invalidate_global(nullptr);
+    cleared += ptw_c3_->invalidate_global(nullptr);
+    printf("[WALKER_CACHE] POWER-ON RESET: all entries invalidated (cleared=%u)\n", cleared);
+    fflush(stdout);
 }
 
 WalkerCache::~WalkerCache() = default;
@@ -254,6 +262,9 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 3;
         latency += candidate_latency;
+        printf("[WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               gscid, pscid, va, candidate.next_ppn);
+        fflush(stdout);
         return true;
     }
     latency += candidate_latency;
@@ -264,6 +275,9 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 2;
         latency += candidate_latency;
+        printf("[WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               gscid, pscid, va, candidate.next_ppn);
+        fflush(stdout);
         return true;
     }
     latency += candidate_latency;
@@ -278,6 +292,9 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 1;
         latency += candidate_latency;
+        printf("[WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               gscid, pscid, va, candidate.next_ppn);
+        fflush(stdout);
         return true;
     }
     latency += candidate_latency;
@@ -315,6 +332,10 @@ WalkerCache::UpdateResult WalkerCache::update(gscid_t gscid, pscid_t pscid,
                                               const WalkerData& ptwc1_data,
                                               const WalkerData& ptwc2_data,
                                               const WalkerData& ptwc3_data) {
+    printf("[WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+           gscid, pscid, va, static_cast<int>(kind),
+           ptwc1_data.reserved.valid, ptwc2_data.reserved.valid, ptwc3_data.reserved.valid);
+    fflush(stdout);
     auto make_tag = [=](uint8_t level, const WalkerData& data) {
         WalkerTag tag;
         tag.gscid = gscid;

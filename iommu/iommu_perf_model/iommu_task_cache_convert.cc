@@ -323,8 +323,14 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
         uint8_t hit_level = resp.walker_level;
         iommu::ppn_t next_ppn = resp.walker_data.next_ppn;
         
-        // 设置walk starting point从命中层级的下一级开始
-        task->walk_ctx.level = hit_level - 1;
+        // 修正：根据命中层级设置正确的 walk 起始 level
+        // Walker Cache 只缓存中间映射，叶子节点不缓存。
+        // hit_level 对应命中的子表 level：
+        //   PTWc_3 hit (hit_level=3): 缓存了除叶子外的完整路径，只需再做1次walk（读level 0）
+        //   PTWc_2 hit (hit_level=2): 缓存了部分路径，需再做2次walk（读level 1 和 level 0）
+        //   PTWc_1 hit (hit_level=1): 仅Sv48，缓存了最顶层，需再做3次walk（读level 2/1/0）
+        // 因此：level = 3 - hit_level
+        task->walk_ctx.level = 3 - hit_level;
         task->walk_ctx.base_addr = next_ppn * PAGESIZE;
         
         printf("[CONVERT] task_id=%u <- WALKER_LOOKUP response (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
@@ -393,9 +399,17 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
         has_update = true;
     }
     
-    // 设置update kind
-    if (has_update) {
+    // 设置 update kind：根据实际缓存的中间结果层级
+    // Walker Cache 只缓存中间映射，不缓存叶子节点
+    if (task->walk_ctx.walker_cache_entries.valid_level0) {
+        // Sv48: 有 PTWc_1/PTWc_2/PTWc_3 三级缓存
         req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+    } else if (task->walk_ctx.walker_cache_entries.valid_level1) {
+        // 有 PTWc_2/PTWc_3 两级缓存 (Sv39 或 Sv48 的浅层 walk)
+        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+    } else if (task->walk_ctx.walker_cache_entries.valid_level2) {
+        // 只有 PTWc_3 一级缓存
+        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
     }
     
     printf("[CONVERT] task_id=%u -> WALKER_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, L2=%d, L1=%d, L0=%d)\n",
