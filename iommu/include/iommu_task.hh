@@ -74,49 +74,47 @@ enum msiptw_walk_phase_t {
 
 // ===================== Walk Context =====================
 struct walk_context_t {
-    walk_type_t walk_type;
-    int walk_phase;             // xdtw_walk_phase_t / ptw_walk_phase_t / msiptw_walk_phase_t
-    int8_t level;
-    int8_t max_levels;
-    uint64_t base_addr;
-    uint16_t indexes[5];
-    uint64_t read_addr;
-    uint32_t read_size;
-    uint8_t read_buf[64];
-    uint8_t ptesize;
+    walk_type_t walk_type = WALK_DDT;
+    int walk_phase = 0;             // xdtw_walk_phase_t / ptw_walk_phase_t / msiptw_walk_phase_t
+    int8_t level = 0;
+    int8_t max_levels = 0;
+    uint64_t base_addr = 0;
+    uint16_t indexes[5] = {0};
+    uint64_t read_addr = 0;
+    uint32_t read_size = 0;
+    uint8_t read_buf[64] = {0};
+    uint8_t ptesize = 0;
 
     // VS-stage walk context (for PTW)
-    uint16_t vpn[5];
-    int8_t vs_level;
+    uint16_t vpn[5] = {0};
+    int8_t vs_level = 0;
 
     // G-stage walk context (for PTW nested walk)
-    int8_t gs_level;
-    uint64_t gs_base_addr;
-    uint64_t gs_pte_addr;
-    uint64_t pending_vs_pte_addr;
-    uint16_t gs_vpn[5];
+    int8_t gs_level = 0;
+    uint64_t gs_base_addr = 0;
+    uint64_t gs_pte_addr = 0;
+    uint64_t pending_vs_pte_addr = 0;
+    uint16_t gs_vpn[5] = {0};
 
     // A/D bit update context
-    spte_t ad_pte;
-    uint64_t ad_pte_addr;
+    spte_t ad_pte{};
+    uint64_t ad_pte_addr = 0;
 
     // DDR read count for walk progress tracking
-    uint32_t ddr_read_count;
+    uint32_t ddr_read_count = 0;
 
     // Walker Cache intermediate results (for PTW)
     // 保存walk过程中的中间PPN，用于最后update walker cache
     struct {
-        uint64_t ppn_level2;  // Level 2 PPN (PTWc_3)
-        uint64_t ppn_level1;  // Level 1 PPN (PTWc_2)
-        uint64_t ppn_level0;  // Level 0 PPN (PTWc_1)
-        bool valid_level2;
-        bool valid_level1;
-        bool valid_level0;
+        uint64_t ppn_level2 = 0;  // Level 2 PPN (PTWc_3)
+        uint64_t ppn_level1 = 0;  // Level 1 PPN (PTWc_2)
+        uint64_t ppn_level0 = 0;  // Level 0 PPN (PTWc_1)
+        bool valid_level2 = false;
+        bool valid_level1 = false;
+        bool valid_level0 = false;
     } walker_cache_entries;
 
-    walk_context_t() {
-        memset(this, 0, sizeof(walk_context_t));
-    }
+    walk_context_t() = default;
 };
 
 // ===================== Unified Task Context =====================
@@ -193,26 +191,24 @@ struct iommu_task_t {
     walk_context_t walk_ctx;
 
     // Constructor
-    iommu_task_t() {
-        memset(this, 0, sizeof(iommu_task_t));
-        state = TASK_INIT;
-        vs_pte.raw = 0;
-        g_pte.raw = 0;
-        DC.tc.raw = 0;
-        DC.iohgatp.raw = 0;
-        DC.ta.raw = 0;
-        DC.fsc.raw = 0;
-        DC.msiptp.raw = 0;
-        DC.msi_addr_mask.raw = 0;
-        DC.msi_addr_pattern.raw = 0;
-        DC.reserved = 0;
-        PC.ta.raw = 0;
-        PC.fsc.raw = 0;
-        iosatp.raw = 0;
-        iohgatp.raw = 0;
-        at = ADDR_TYPE_UNTRANSLATED;
-        tlm_trans_ptr = nullptr;
-    }
+    iommu_task_t()
+        : task_id(0), device_id(0), process_id(0), pid_valid(0),
+          iova(0), length(0), at(ADDR_TYPE_UNTRANSLATED),
+          exec_req(0), priv_req(0), no_write(0), is_cxl_dev(0),
+          read_writeAMO(0), timestamp(),
+          TTYP(0), is_read(0), is_write(0), is_exec(0), priv(0), SUM(0),
+          DDI{0},
+          DC{}, PC{}, iosatp{}, iohgatp{},
+          PSCV(0), GV(0), PSCID(0), GSCID(0), DID(0), PID(0),
+          PV(0), DTF(0), check_access_perms(0), SXL(0), SADE(0), GADE(0),
+          pa(0), gpa(0), page_sz(0), gst_page_sz(0),
+          vs_pte{}, g_pte{},
+          is_msi(0), is_mrif(0), mrif_nid(0), dest_mrif_addr(0),
+          cause(0), iotval(0), iotval2(0),
+          is_bare_translation(0), is_b_transport(0),
+          state(TASK_INIT), dc_valid(0), dc_hit(0), pc_valid(0), pc_hit(0),
+          need_pc(0), tlm_trans_ptr(nullptr), walk_ctx() {}
+
 };
 
 // ===================== Collector Entry =====================
