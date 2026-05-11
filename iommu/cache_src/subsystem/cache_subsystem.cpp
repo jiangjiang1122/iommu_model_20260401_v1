@@ -324,11 +324,16 @@ void CacheSubsystem::pt_worker_thread() {
 void CacheSubsystem::walker_worker_thread() {
     while (true) {
         CacheMessage req = walker_request_fifo.read();
+        // 获取 walker 互斥：与 update/invalidate 互斥，保证 lookup 看到完整 fill 后的状态
+        while (walker_busy_) wait(walker_free_event_);
+        walker_busy_ = true;
         const sc_time start = sc_time_stamp();
         trace_task_event("begin", "walker_cache", "lookup", req, start);
         CacheMessage resp = execute_walker_request(req);
         record_task_completion("walker_cache", start, sc_time_stamp());
         trace_task_event("end", "walker_cache", "lookup", req, start, &resp);
+        walker_busy_ = false;
+        walker_free_event_.notify(SC_ZERO_TIME);
         push_fifo(walker_response_fifo, resp);
     }
 }
@@ -381,11 +386,16 @@ void CacheSubsystem::pt_update_worker_thread() {
 void CacheSubsystem::walker_update_worker_thread() {
     while (true) {
         CacheMessage req = walker_update_fifo.read();
+        // 获取 walker 互斥：update 期间 lookup 阻塞，保证原子性
+        while (walker_busy_) wait(walker_free_event_);
+        walker_busy_ = true;
         const sc_time start = sc_time_stamp();
         trace_task_event("begin", "walker_cache", "update", req, start);
         CacheMessage resp = execute_walker_update_request(req);
         record_task_completion("walker_cache", start, sc_time_stamp());
         trace_task_event("end", "walker_cache", "update", req, start, &resp);
+        walker_busy_ = false;
+        walker_free_event_.notify(SC_ZERO_TIME);
     }
 }
 
@@ -439,11 +449,16 @@ void CacheSubsystem::pt_invalidate_worker_thread() {
 void CacheSubsystem::walker_invalidate_worker_thread() {
     while (true) {
         CacheMessage req = walker_invalidate_fifo.read();
+        // 获取 walker 互斥：invalidate 与 lookup/update 互斥
+        while (walker_busy_) wait(walker_free_event_);
+        walker_busy_ = true;
         const sc_time start = sc_time_stamp();
         trace_task_event("begin", "walker_cache", "invalidate", req, start);
         CacheMessage resp = execute_walker_invalidate_request(req);
         record_task_completion("walker_cache", start, sc_time_stamp());
         trace_task_event("end", "walker_cache", "invalidate", req, start, &resp);
+        walker_busy_ = false;
+        walker_free_event_.notify(SC_ZERO_TIME);
         push_fifo(walker_invalidate_response_fifo, resp);
     }
 }

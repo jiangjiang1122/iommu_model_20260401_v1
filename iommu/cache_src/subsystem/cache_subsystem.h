@@ -96,6 +96,11 @@ private:
     std::unique_ptr<PTCache>     pt_cache_;
     std::unique_ptr<WalkerCache> walker_cache_;
 
+    // Walker Cache 原子性互斥锁：保证 lookup / update / invalidate 之间互斥，
+    // 防止 update 过程中 lookup 看到"部分 fill"的半填充状态。
+    bool walker_busy_ = false;
+    sc_event walker_free_event_;
+
     // invalidate 响应出口：返回失效是否完成、影响条目数和处理延迟。
     sc_fifo<CacheMessage> dc_invalidate_response_fifo;
     sc_fifo<CacheMessage> pc_invalidate_response_fifo;
