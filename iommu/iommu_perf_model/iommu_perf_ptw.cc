@@ -734,8 +734,9 @@ void iommu_top::ptw_rsp_thread() {
                 // PTWC_1_2_3 / PTWC_2_3 / PTWC_3 三种更新类型都需要写入 walker_update_fifo
                 cache_sub.walker_update_fifo.write(walker_req);
                 
-                printf("[PTW_RSP] task_id=%u -> Walker Cache UPDATE (kind=%d, L2=%d, L1=%d, L0=%d)\n",
-                       task->task_id,
+                printf("[t=%llu ns][PTW_RSP] task_id=%u -> Walker Cache UPDATE enqueue (iova=0x%lx, kind=%d, L2=%d, L1=%d, L0=%d)\n",
+                       (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                       task->task_id, task->iova,
                        static_cast<int>(walker_req.walker_update_kind),
                        task->walk_ctx.walker_cache_entries.valid_level2,
                        task->walk_ctx.walker_cache_entries.valid_level1,

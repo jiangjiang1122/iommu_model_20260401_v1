@@ -262,7 +262,8 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 3;
         latency += candidate_latency;
-        printf("[WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                gscid, pscid, va, candidate.next_ppn);
         fflush(stdout);
         return true;
@@ -275,7 +276,8 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 2;
         latency += candidate_latency;
-        printf("[WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                gscid, pscid, va, candidate.next_ppn);
         fflush(stdout);
         return true;
@@ -292,7 +294,8 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = candidate;
         hit_level = 1;
         latency += candidate_latency;
-        printf("[WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                gscid, pscid, va, candidate.next_ppn);
         fflush(stdout);
         return true;
@@ -332,7 +335,8 @@ WalkerCache::UpdateResult WalkerCache::update(gscid_t gscid, pscid_t pscid,
                                               const WalkerData& ptwc1_data,
                                               const WalkerData& ptwc2_data,
                                               const WalkerData& ptwc3_data) {
-    printf("[WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+    printf("[t=%llu ns][WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
            gscid, pscid, va, static_cast<int>(kind),
            ptwc1_data.reserved.valid, ptwc2_data.reserved.valid, ptwc3_data.reserved.valid);
     fflush(stdout);

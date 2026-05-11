@@ -305,7 +305,8 @@ iommu::CacheMessage task_to_walker_request(iommu_task_t* task) {
     req.walker_x4_mode     = (task->iohgatp.MODE == IOHGATP_Sv39x4 || 
                               task->iohgatp.MODE == IOHGATP_Sv48x4);
     
-    printf("[CONVERT] task_id=%u -> WALKER_LOOKUP request (gscid=%u, pscid=%u, iova=0x%lx, sv48=%d, x4=%d)\n",
+    printf("[t=%llu ns][CONVERT] task_id=%u -> WALKER_LOOKUP request (gscid=%u, pscid=%u, iova=0x%lx, sv48=%d, x4=%d)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
            task->task_id, task->GSCID, task->PSCID, task->iova,
            req.walker_sv48, req.walker_x4_mode);
     fflush(stdout);
@@ -333,12 +334,14 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
         task->walk_ctx.level = 3 - hit_level;
         task->walk_ctx.base_addr = next_ppn * PAGESIZE;
         
-        printf("[CONVERT] task_id=%u <- WALKER_LOOKUP response (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
+        printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_LOOKUP response (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                task->task_id, hit_level, next_ppn, task->walk_ctx.level);
         fflush(stdout);
     } else {
         // Walker Cache miss: will start full walk from highest level
-        printf("[CONVERT] task_id=%u <- WALKER_LOOKUP response (MISS)\n",
+        printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_LOOKUP response (MISS)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                task->task_id);
         fflush(stdout);
     }
