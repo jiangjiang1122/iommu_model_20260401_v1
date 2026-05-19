@@ -56,6 +56,20 @@ WalkerSubCache::UpdateResult
 WalkerSubCache::update_entry(const WalkerTag& tag, const WalkerData& data,
                              bool direct_write) {
     UpdateResult result;
+    
+    // 关键修复：跳过无效数据的缓存写入，防止缓存污染
+    // 如果WalkerData.valid=0，说明PTW没有缓存该层级的中间结果
+    // 不应将(next_ppn=0x0, valid=0)写入缓存，否则后续LOOKUP会错误HIT
+    if (!data.reserved.valid) {
+        printf("[t=%llu ns][WALKER_CACHE] SKIP UPDATE: %s, gscid=%u, pscid=%u, level=%d, va_segment=0x%lx (valid=0)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               cache_name_.c_str(), tag.gscid, tag.pscid, tag.level, tag.va_segment);
+        fflush(stdout);
+        result.updated = false;
+        result.latency = SC_ZERO_TIME;
+        return result;
+    }
+    
     arbitrate_ram_access(CacheOpType::FILL, [&]() {
         const uint32_t set = hash_function(tag);
         assert(set < num_sets_);

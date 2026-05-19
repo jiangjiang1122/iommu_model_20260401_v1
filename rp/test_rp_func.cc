@@ -652,22 +652,55 @@ uint64_t RP_Module::add_s_stage_pte (
         vpn[4] = get_bits(56, 48, va);
         LEVELS = 5;
     }
+    
+    // 调试日志：打印VPN信息
+    printf("[ADD_S_STAGE_PTE] IOVA=0x%lx, VPN=[%d,%d,%d,%d,%d], LEVELS=%d, root_PPN=0x%lx\n",
+           va, vpn[0], vpn[1], vpn[2], vpn[3], vpn[4], LEVELS, satp.PPN);
+    
     i = LEVELS - 1;
     a = satp.PPN * PAGESIZE;
     while ( i > add_level ) {
         nl_pte.raw = 0;
-        if ( read_memory_test_rp( (a | (vpn[i] * PTESIZE)), PTESIZE, (char *)&nl_pte.raw)) return -1;
+        uint64_t pte_addr_level = a | (vpn[i] * PTESIZE);
+        if ( read_memory_test_rp( pte_addr_level, PTESIZE, (char *)&nl_pte.raw)) return -1;
+        printf("[ADD_S_STAGE_PTE] Level %d: read PTE at 0x%lx, value=0x%lx, V=%d\n",
+               i, pte_addr_level, nl_pte.raw, nl_pte.V);
         if ( nl_pte.V == 0 ) {
             nl_pte.V = 1;
             nl_pte.PPN = get_free_ppn(1);
-            if ( write_memory_test_rp( (char *)&nl_pte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE) ) return -1;
+            nl_pte.R = 0; nl_pte.W = 0; nl_pte.X = 0;  // non-leaf PTE
+            uint64_t write_addr = pte_addr_level;
+            if ( write_memory_test_rp( (char *)&nl_pte.raw, write_addr, PTESIZE) ) return -1;
+            printf("[ADD_S_STAGE_PTE] Level %d: WRITE new non-leaf PTE at 0x%lx, PPN=0x%lx, raw=0x%lx\n",
+                   i, write_addr, nl_pte.PPN, nl_pte.raw);
         }
         i = i - 1;
         if ( i < 0 ) return -1;
         a = nl_pte.PPN * PAGESIZE;
     }
-    if ( write_memory_test_rp( (char *)&pte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE) ) return -1;
-    return (a | (vpn[i] * PTESIZE));
+    
+    // 写入最终Level的PTE（leaf PTE）
+    uint64_t leaf_pte_addr = a | (vpn[i] * PTESIZE);
+    printf("[ADD_S_STAGE_PTE] WRITE leaf PTE at 0x%lx (level %d), IOVA=0x%lx -> PA=0x%lx (PPN=0x%lx), raw=0x%lx, V=%d,R=%d,W=%d,X=%d\n",
+           leaf_pte_addr, i, va, pte.PPN * PAGESIZE, pte.PPN, pte.raw, pte.V, pte.R, pte.W, pte.X);
+    
+    if ( write_memory_test_rp( (char *)&pte.raw, leaf_pte_addr, PTESIZE) ) return -1;
+    
+    // 验证写入：读回刚写入的PTE
+    spte_t verify_pte;
+    verify_pte.raw = 0;
+    if ( read_memory_test_rp( leaf_pte_addr, PTESIZE, (char *)&verify_pte.raw) ) {
+        printf("[ADD_S_STAGE_PTE] ERROR: Failed to verify PTE at 0x%lx\n", leaf_pte_addr);
+        return -1;
+    }
+    printf("[ADD_S_STAGE_PTE] VERIFY PTE at 0x%lx: raw=0x%lx, PPN=0x%lx, V=%d,R=%d,W=%d,X=%d\n",
+           leaf_pte_addr, verify_pte.raw, verify_pte.PPN, verify_pte.V, verify_pte.R, verify_pte.W, verify_pte.X);
+    
+    if (verify_pte.raw != pte.raw) {
+        printf("[ADD_S_STAGE_PTE] WARNING: PTE mismatch! written=0x%lx, read=0x%lx\n", pte.raw, verify_pte.raw);
+    }
+    
+    return leaf_pte_addr;
 }
 
 uint64_t RP_Module::add_process_context(

@@ -19,7 +19,7 @@ void RP_Module::send_translation_request_1_thread()
         hb_to_iommu_req_t req;
         iommu_to_hb_rsp_t rsp;
 
-        printf("\n========== IOMMU Simplified 100-Request Test (single device 0x0A) ==========\n");
+        printf("\n========== IOMMU Simplified 500-Request Test (single device 0x0A) ==========\n");
 
         // 妫€鏌?IOMMU 妯″紡
         ddtp_t ddtp_check;
@@ -39,7 +39,7 @@ void RP_Module::send_translation_request_1_thread()
         // ============================================================
         // ========== 100-Request Concurrent Single-Stage Test ==========
         // ============================================================
-        printf("\n========== 100-Request Concurrent Single-Stage Test ==========\n");
+        printf("\n========== 500-Request Concurrent Single-Stage Test ==========\n");
 
         // Configure device 0x0A with iohgatp=Bare, iosatp=Sv39
         uint64_t dc6_addr = add_device(iommu_ptr, 0x0A, 1, 0, 0, 0, 0, 0,
@@ -53,7 +53,7 @@ void RP_Module::send_translation_request_1_thread()
 
         next_free_page = 245;
 
-        // Setup S-stage page table for 100 requests
+        // Setup S-stage page table for 500 requests
         spte_t pte6;
         pte6.raw = 0;
         pte6.V = 1;
@@ -66,8 +66,10 @@ void RP_Module::send_translation_request_1_thread()
         pte6.D = 0;
         pte6.PBMT = PMA;
 
-        // Map 13 pages for 100 requests (8 requests per 4KB page, stride=512B)
-        for (int p = 0; p < 13; p++) {
+        // Map 125 pages for 500 requests (8 requests per 4KB page, stride=512B)
+        // IOVA range: 0x10000 to 0x89B80 (500 requests * 512B stride)
+        // PA range: 0x20000 to 0x99B80 (PA = IOVA + 0x10000)
+        for (int p = 0; p < 125; p++) {
             uint64_t iova_page = 0x10000 + p * 0x1000;
             uint64_t pa_page = 0x20000 + p * 0x1000;
             pte6.PPN = pa_page / PAGESIZE;
@@ -76,18 +78,18 @@ void RP_Module::send_translation_request_1_thread()
         }
 
         // Invalidate caches
-        printf("\n[TEST] Invalidating IOMMU caches for 100-request test...\n");
+        printf("\n[TEST] Invalidating IOMMU caches for 500-request test...\n");
         iodir(iommu_ptr, INVAL_DDT, 1, 0x0A, 0);
         iotinval(iommu_ptr, VMA, 0, 0, 0, 0, 0, 0);
 
-        // Reset task ID counter so 100 requests get IDs 1-100
+        // Reset task ID counter so 500 requests get IDs 1-500
         iommu_ptr->next_task_id = 1;
 
         // Reset response counter
         response_count = 0;
 
         // Prepare and send 100 translation requests
-        const int NUM_REQUESTS = 100;
+        const int NUM_REQUESTS = 500;
         tlm_generic_payload* trans_array[NUM_REQUESTS];
         PayloadExtention* ext_array[NUM_REQUESTS];
         uint64_t base_iova = 0x10000;
@@ -161,7 +163,7 @@ void RP_Module::send_translation_request_1_thread()
 
         printf("\n[TEST] Validation: %d/%d passed\n", pass_count, NUM_REQUESTS);
         if (pass_count == NUM_REQUESTS) {
-            printf("[TEST] PASS: All 100 requests translated correctly!\n");
+            printf("[TEST] PASS: All %d requests translated correctly!\n", NUM_REQUESTS);
         } else {
             printf("[TEST] FAIL: Some requests failed translation!\n");
         }
@@ -176,7 +178,7 @@ void RP_Module::send_translation_request_1_thread()
             delete trans_array[i];
         }
 
-        printf("\n[TEST] 100-request concurrent test completed!\n");
+        printf("\n[TEST] 500-request concurrent test completed!\n");
 
         // 鎵撳嵃Cache鍛戒腑鐜囩粺璁′俊鎭?
         iommu_ptr->print_cache_statistics();
