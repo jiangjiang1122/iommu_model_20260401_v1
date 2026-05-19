@@ -94,8 +94,8 @@ void RP_Module::send_translation_request_1_thread()
         PayloadExtention* ext_array[NUM_REQUESTS];
         uint64_t base_iova = 0x10000;
 
-        printf("\n[TEST] Sending %d translation requests with grouped timing (device_id=0x0A)...\n", NUM_REQUESTS);
-        printf("[TEST] Strategy: 8 requests per 4KB page, 10ns delay between groups to allow PT cache hit\n");
+        printf("\n[TEST] Sending %d translation requests back-to-back (device_id=0x0A)...\n", NUM_REQUESTS);
+        printf("[TEST] Strategy: Back-to-back injection, no artificial delays\n");
         fflush(stdout);
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
@@ -129,9 +129,8 @@ void RP_Module::send_translation_request_1_thread()
                    i, iova, expected_pa, status);
 
             // 姣?涓姹傦紙鍚屼竴涓?KB椤碉級涓轰竴缁勶紝缁勯棿寤惰繜50ns璁㏄T cache鏈夋椂闂存洿鏂?
-            if ((i + 1) % 8 == 0 && i < NUM_REQUESTS - 1) {
-                wait(50, SC_NS);
-            }
+            // Back-to-back injection: no wait between requests
+            // Let the FIFO backpressure naturally throttle the injection
         }
 
         printf("[TEST] All %d requests injected. Waiting for responses...\n", NUM_REQUESTS);
