@@ -1,0 +1,59 @@
+# ============ 编译产物 / 二进制 ============
+build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+iommu_model
+
+# ============ 日志与运行输出 ============
+*.log
+out.txt
+out_.txt
+output.txt
+output_*.txt
+debug.txt
+test.txt
+*.tmp
+
+# 本工程历史调试/分析输出
+backpressure_test.txt
+ddr_ptw_*.txt
+ptw_ddr_*.txt
+iops_analysis.txt
+output_analysis.txt
+output_detail.txt
+output_mutex.txt
+output_simplified.txt
+output_cache_test.txt
+output_walker_*.txt
+walker_cache_detail_report.txt
+
+# ============ 分析脚本（按需保留，本次先排除大批量临时脚本） ============
+analyze_*.py
+analyze_*.sh
+
+# ============ 大体积文档（避免仓库膨胀，自行决定是否单独发布） ============
+Doc/
+*.pdf
+*.docx
+
+# ============ Windows 保留名（git 无法处理） ============
+nul
+
+# ============ IDE / OS ============
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============ Qoder repo wiki & specs（按需可取消注释） ============
+# .qoder/
+
+# ============ 异常文件名（含命令行残留） ============
+"h -c find . -name 'repowiki' -o -name 'wiki'  grep -v '.git'  head -20"
