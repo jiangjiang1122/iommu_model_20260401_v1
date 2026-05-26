@@ -1,4 +1,10 @@
 # Makefile for RISC-V IOMMU SystemC Model
+#
+# Test scenario selection:
+#   make TEST=sv39_bare       (default) Sv39 + Bare, 2000 requests
+#   make TEST=sv48_bare       Sv48 + Bare, 1000 requests
+#
+TEST ?= sv39_bare
 
 # Compiler settings
 CXX = g++
@@ -11,7 +17,7 @@ SYSTEMC_INCLUDE = /usr/include
 SYSTEMC_LIB = /usr/lib/x86_64-linux-gnu
 
 # Compiler flags
-CXXFLAGS = -std=c++17 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -I./iommu/include -I./iommu/iommu_fun_model -I./iommu/iommu_perf_model -I./iommu/cache_src -I./iommu/cache_src/cache -I./iommu/cache_src/common -I./iommu/cache_src/replacement -I./iommu/cache_src/subsystem -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK
+CXXFLAGS = -std=c++17 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -I./iommu/include -I./iommu/iommu_fun_model -I./iommu/iommu_perf_model -I./iommu/cache_src -I./iommu/cache_src/cache -I./iommu/cache_src/common -I./iommu/cache_src/replacement -I./iommu/cache_src/subsystem -I./slink -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK
 
 # Debug/Release build
 DEBUG ?= 1
@@ -25,6 +31,13 @@ endif
 
 # Libraries
 LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm
+
+# Test thread file selection based on TEST scenario
+ifeq ($(TEST), sv48_bare)
+    TEST_THREAD_SRC = rp/test_rp_sv48_bare_thread.cc
+else
+    TEST_THREAD_SRC = rp/test_rp_thread.cc
+endif
 
 # Source files
 CXX_SOURCES = \
@@ -51,6 +64,7 @@ CXX_SOURCES = \
     iommu/iommu_perf_model/iommu_perf_ptw.cc \
     iommu/iommu_perf_model/iommu_perf_msipt_cache.cc \
     iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc \
+    iommu/iommu_perf_model/iommu_perf_reorder.cc \
     iommu/iommu_perf_model/iommu_task_cache_convert.cc \
     iommu/cache_src/common/json_config.cpp \
     iommu/cache_src/common/stats_collector.cpp \
@@ -64,8 +78,9 @@ CXX_SOURCES = \
     iommu/cache_src/replacement/srrip_policy.cpp \
     iommu/cache_src/subsystem/cache_subsystem.cpp \
     rp/test_rp_func.cc \
-    rp/test_rp_thread.cc \
+    $(TEST_THREAD_SRC) \
     pcienoc/test_pcienoc.cc \
+    slink/test_slink.cc \
     ddr/test_ddr.cc 
 
 # CXX_SOURCES = \
@@ -90,7 +105,7 @@ $(TARGET): $(ALL_OBJECTS)
 
 # Compile C++ sources into build directory
 build/%.o: %.cc
-	@mkdir -p build build/iommu build/iommu/iommu_fun_model build/iommu/iommu_perf_model build/iommu/cache_src build/iommu/cache_src/common build/iommu/cache_src/cache build/iommu/cache_src/replacement build/iommu/cache_src/subsystem build/rp build/pcienoc build/ddr build/test
+	@mkdir -p build build/iommu build/iommu/iommu_fun_model build/iommu/iommu_perf_model build/iommu/cache_src build/iommu/cache_src/common build/iommu/cache_src/cache build/iommu/cache_src/replacement build/iommu/cache_src/subsystem build/rp build/pcienoc build/slink build/ddr build/test
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile main source into build directory

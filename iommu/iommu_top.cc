@@ -131,6 +131,12 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
     tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
 {
     if (phase == tlm::BEGIN_REQ) {
+        // ===== Bandwidth control: slave port accept delay =====
+        // delay_ns = 1000 * length * 8 / bandwidth_mbps
+        unsigned int data_len = trans.get_data_length();
+        double slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_0_BANDWIDTH_MBPS;
+        wait(slave_bw_delay_ns, SC_NS);
+
         // 1. Extract PayloadExtention
         PayloadExtention* ext = nullptr;
         trans.get_extension(ext);
@@ -365,6 +371,11 @@ void iommu_top::ddr_arbiter_thread() {
             tlm::tlm_phase phase = tlm::BEGIN_REQ;
             sc_time delay = SC_ZERO_TIME;
             axi_master_1_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
+
+            // ===== Bandwidth control: master_1 port (DDR access) =====
+            // delay_ns = 1000 * length * 8 / bandwidth_mbps
+            double master1_bw_delay_ns = 1000.0 * req.size * 8 / AXI_MASTER_1_BANDWIDTH_MBPS;
+            wait(master1_bw_delay_ns, SC_NS);
 
             // Increment outstanding counter after successful send
             axi_master_1_to_cmn_rnd_outstanding++;

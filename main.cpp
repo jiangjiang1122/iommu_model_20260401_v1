@@ -10,6 +10,7 @@
 #include "rp/test_rp.hh"
 #include "pcienoc/test_pcienoc.hh"
 #include "ddr/test_ddr.hh"
+#include "slink/test_slink.hh"
 
 // Define debug macros if DEBUG is defined
 #ifdef DEBUG
@@ -57,12 +58,17 @@ int sc_main(int argc, char *argv[]) {
     // 创建PCIENOC模块实例
     PCIENOC_Module* pcienoc = new PCIENOC_Module("pcienoc");
 
+    // 创建SLINK模块实例 (IOMMU到DDR页表访问的NoC路径模型)
+    SLINK_Module* slink = new SLINK_Module("slink");
+
     // 绑定IOMMU的initiator sockets到DDR模块的target sockets
     iommu->axi_stream_socket.bind(ddr->axi_slave_from_cmn_rnd_socket);
     
     iommu->axi_master_0_to_pcie_noc_to_cmn_rni_socket.bind(ddr->axi_slave_from_pcie_noc_0_socket);
     
-    iommu->axi_master_1_to_cmn_rnd_socket.bind(ddr->axi_slave_from_cmn_rnd_1_socket);
+    // IOMMU -> SLINK -> DDR (页表/目录表访问路径，中间经过NoC)
+    iommu->axi_master_1_to_cmn_rnd_socket.bind(slink->targ_socket);
+    slink->init_socket.bind(ddr->axi_slave_from_cmn_rnd_1_socket);
     
     iommu->axi_master_2_ats_msg_to_pcie_noc_socket.bind(rp->axi_slave_to_pcie_noc_0_socket);
 
@@ -79,6 +85,7 @@ int sc_main(int argc, char *argv[]) {
     // 清理内存
     delete pcienoc;
     delete rp;
+    delete slink;
     delete ddr;
     delete iommu;
 

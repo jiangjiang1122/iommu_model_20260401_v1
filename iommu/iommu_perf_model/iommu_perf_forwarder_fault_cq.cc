@@ -30,8 +30,8 @@ void iommu_top::pt_forwarder_thread() {
         tlm::tlm_generic_payload* trans = task->tlm_trans_ptr;
         if (!trans) {
             // No TLM payload (should not happen in normal flow)
-            task->state = TASK_DONE;
-            delete task;
+            // 仍走 reorder_mark_ready 以释放 reorder_buf / outstanding
+            reorder_mark_ready(task);
             continue;
         }
 
@@ -44,14 +44,11 @@ void iommu_top::pt_forwarder_thread() {
         // In the performance model, we directly send response to initiator
         // The actual data path would go through axi_master_0_to_pcie_noc_to_cmn_rni_socket to PCIE NoC
 
-        // Send response to initiator (with translated PA)
-        send_response_to_initiator(task);
-
-        // Release task (ownership endpoint for normal completion path)
-        task->state = TASK_DONE;
-        if (!task->is_b_transport) {
-            delete task;
-        }
+        // 入口已注册 reorder_buf：此处仅标记 ready，由 reorder_output_thread 真正下发
+        // 写请求按 task_id 保序输出，读请求可乱序输出。
+        task->state = TASK_FORWARD;
+        reorder_mark_ready(task);
+        // 注意：task 释放与 outstanding 释放交由 reorder_output_thread
     }
 }
 
@@ -82,8 +79,8 @@ void iommu_top::msipt_forwarder_thread() {
         tlm::tlm_generic_payload* trans = task->tlm_trans_ptr;
         if (!trans) {
             // No TLM payload (should not happen in normal flow)
-            task->state = TASK_DONE;
-            delete task;
+            // 仍走 reorder_mark_ready 以释放 reorder_buf / outstanding
+            reorder_mark_ready(task);
             continue;
         }
 
@@ -109,13 +106,10 @@ void iommu_top::msipt_forwarder_thread() {
         }
 
         // Send response to initiator
-        send_response_to_initiator(task);
-
-        // Release task (ownership endpoint for normal completion path)
-        task->state = TASK_DONE;
-        if (!task->is_b_transport) {
-            delete task;
-        }
+        // 入口已注册 reorder_buf：此处仅标记 ready，由 reorder_output_thread 真正下发
+        task->state = TASK_FORWARD;
+        reorder_mark_ready(task);
+        // 注意：task 释放与 outstanding 释放交由 reorder_output_thread
     }
 }
 
@@ -176,12 +170,9 @@ void iommu_top::fault_cq_proc_thread() {
         }
 
         // 3. Send response via nb_transport_bw
-        send_response_to_initiator(task);
-
-        // 4. Release task (ownership endpoint for fault path)
-        task->state = TASK_DONE;
-        if (!task->is_b_transport) {
-            delete task;
-        }
+        // 入口已注册 reorder_buf：此处仅标记 ready，由 reorder_output_thread 真正下发
+        // Fault 路径与正常路径都进入同一个重排序队列，统一保证写保序读乱序的语义
+        reorder_mark_ready(task);
+        // 注意：task 释放与 outstanding 释放交由 reorder_output_thread
     }
 }

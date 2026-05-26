@@ -8,10 +8,19 @@
 
 void iommu_top::parser_thread() {
     while (true) {
+        // 0. 全局 outstanding 反压：达到上限则等待 reorder 释放
+        while (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING) {
+            wait(iommu_global_outstanding_freed_event);
+        }
+
         // 1. Read task from inbound FIFO
         iommu_task_t* task = inbound_fifo.read();
         printf("[PARSER] task_id=%u popped from inbound_fifo\n", task->task_id);
         fflush(stdout);
+
+        // 1.1 入口注册到 reorder buffer，并申请全局 outstanding 槽
+        reorder_register_task(task);
+
         task->state = TASK_PARSING;
         wait(PARSER_DELAY, SC_NS);
 

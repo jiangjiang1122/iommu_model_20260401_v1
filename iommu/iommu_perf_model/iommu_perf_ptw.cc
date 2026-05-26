@@ -7,12 +7,12 @@
 #include <cstdio>
 
 // ============================================================
-// 12.13 ptw_req_thread - PTW Request Thread (async DDR send)
-// Initializes VS/GS walk context, sends first DDR request
+// 12.13 ptw_req_thread - PTW Request Dispatch (PEQ-based pipeline)
+// Reads from FIFO, applies outstanding control, schedules via PEQ
 // ============================================================
 void iommu_top::ptw_req_thread() {
     while (true) {
-        // Flow control
+        // Flow control: limit total PTW outstanding tasks
         while (ptw_outstanding_task_count >= PTW_MAX_OUTSTANDING_TASKS) {
             wait(ptw_task_completed_event);
         }
@@ -21,11 +21,23 @@ void iommu_top::ptw_req_thread() {
         task->state = TASK_PTW_REQ;
         ptw_outstanding_task_count++;
 
-        printf("[PTW_REQ] task_id=%u, iova=0x%lx, iosatp.MODE=%d, GV=%d -> start walk\n",
+        printf("[PTW_REQ] task_id=%u, iova=0x%lx, iosatp.MODE=%d, GV=%d -> dispatch to PEQ\n",
                task->task_id, task->iova, task->iosatp.MODE, task->GV);
         fflush(stdout);
 
-        wait(PTW_COMPUTE_DELAY, SC_NS);
+        // Pipeline delay via PEQ (non-blocking, parallel timing)
+        ptw_req_peq.notify(*task, sc_time(PTW_REQ_PIPELINE_DELAY_NS, SC_NS));
+    }
+}
+
+// ============================================================
+// 12.13b ptw_req_process_thread - PTW Request Processing
+// Fires after PEQ delay, performs walk init and sends DDR request
+// ============================================================
+void iommu_top::ptw_req_process_thread() {
+    while (true) {
+        iommu_task_t* task = ptw_req_peq.get_next_transaction();
+        if (!task) { wait(ptw_req_peq.get_event()); continue; }
 
         // ========== 1. Bare mode fast path ==========
         // Corresponds to iommu_two_stage_trans.cc L39-82
@@ -70,7 +82,7 @@ void iommu_top::ptw_req_thread() {
                 task->g_pte.PBMT = PMA;
                 task->state = TASK_PTW_DONE;
                 ptw_outstanding_task_count--;
-                ptw_task_completed_event.notify(SC_ZERO_TIME);
+                ptw_task_completed_event.notify(SC_ZERO_TIME); 
                 
                 // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
                 iommu::CacheMessage pt_update_req = task_to_pt_update(task);
@@ -189,13 +201,28 @@ void iommu_top::ptw_req_thread() {
 }
 
 // ============================================================
-// 12.14 ptw_rsp_thread - PTW Response Thread (multi-phase SM)
-// Processes DDR responses for VS/GS walk phases
+// 12.14 ptw_rsp_thread - PTW Response Dispatch (PEQ-based pipeline)
+// Reads DDR responses, schedules via PEQ with pipeline delay
 // ============================================================
 void iommu_top::ptw_rsp_thread() {
     while (true) {
         ddr_rsp_entry_t rsp = ptw_rsp_ddr_fifo.read();
-        wait(PTW_PARSE_DELAY, SC_NS);
+        // Heap-allocate to ensure lifetime across PEQ delay
+        ddr_rsp_entry_t* rsp_ptr = new ddr_rsp_entry_t(rsp);
+        ptw_rsp_peq.notify(*rsp_ptr, sc_time(PTW_RSP_PIPELINE_DELAY_NS, SC_NS));
+    }
+}
+
+// ============================================================
+// 12.14b ptw_rsp_process_thread - PTW Response Processing
+// Fires after PEQ delay, processes DDR responses for VS/GS walk
+// ============================================================
+void iommu_top::ptw_rsp_process_thread() {
+    while (true) {
+        ddr_rsp_entry_t* rsp_ptr = ptw_rsp_peq.get_next_transaction();
+        if (!rsp_ptr) { wait(ptw_rsp_peq.get_event()); continue; }
+        ddr_rsp_entry_t rsp = *rsp_ptr;
+        delete rsp_ptr;
 
         printf("[PTW_RSP] task_id=%u, data_len=%d, error=%d -> processing\n",
                rsp.task_id, rsp.data_length, rsp.error);

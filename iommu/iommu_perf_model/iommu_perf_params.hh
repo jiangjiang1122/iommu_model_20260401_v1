@@ -85,10 +85,26 @@ static const uint32_t DDR_BANDWIDTH_GBPS = 128;     // DDR带宽(GB/s)
 static const uint32_t AXI_MASTER_1_TO_CMN_RND_MAX_OUTSTANDING = 256;  // axi_master_1_to_cmn_rnd_socket并发任务数（DDR访问）
 static const uint32_t AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING = 256; // axi_master_0_to_pcie_noc_to_cmn_rni_socket并发任务数（DMA/RP访问）
 
+// ===================== 端口带宽参数 (bandwidth_mbps = freq_mhz * width_bit) =====================
+// 带宽延迟公式: delay_ns = 1000.0 * data_length_bytes * 8 / bandwidth_mbps
+static const uint32_t AXI_SLAVE_0_FREQ_MHZ  = 1000;   // axi_slave_from_pcie_noc_0_socket 频率(MHz)
+static const uint32_t AXI_SLAVE_0_WIDTH_BIT  = 512;    // axi_slave_from_pcie_noc_0_socket 数据位宽(bit)
+static const uint32_t AXI_SLAVE_0_BANDWIDTH_MBPS = AXI_SLAVE_0_FREQ_MHZ * AXI_SLAVE_0_WIDTH_BIT;  // 512000 Mbps = 64GB/s
+
+static const uint32_t AXI_MASTER_0_FREQ_MHZ = 1000;   // axi_master_0_to_pcie_noc 频率(MHz)
+static const uint32_t AXI_MASTER_0_WIDTH_BIT = 512;    // axi_master_0_to_pcie_noc 数据位宽(bit)
+static const uint32_t AXI_MASTER_0_BANDWIDTH_MBPS = AXI_MASTER_0_FREQ_MHZ * AXI_MASTER_0_WIDTH_BIT;  // 512000 Mbps = 64GB/s
+
+static const uint32_t AXI_MASTER_1_FREQ_MHZ = 1000;   // axi_master_1_to_cmn_rnd 频率(MHz)
+static const uint32_t AXI_MASTER_1_WIDTH_BIT = 128;    // axi_master_1_to_cmn_rnd 数据位宽(bit)
+static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_MASTER_1_WIDTH_BIT;  // 128000 Mbps = 16GB/s
+
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
 static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
 static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 256;        // PTW总outstanding任务数
+static const uint32_t PTW_REQ_PIPELINE_DELAY_NS = 10;         // PTW请求流水延时(ns, PEQ)
+static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 10;         // PTW响应流水延时(ns, PEQ)
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
 
 // ===================== PTW模块参数 =====================
@@ -110,6 +126,16 @@ static const uint32_t XDTW_DELAY_PER_ACCESS = 5;    // xDTW每次DDR访问延迟
 static const uint32_t PTW_DELAY_PER_ACCESS = 5;     // PTW每次DDR访问延迟
 static const uint32_t MSIPTW_DELAY_PER_ACCESS = 5;  // MSIPTW每次DDR访问延迟
 static const uint32_t FORWARDER_DELAY = 2;          // Forwarder转发延迟
+
+// ===================== 出口重排序与全局 Outstanding =====================
+// IOMMU 模块整体 outstanding 上限：
+//   入口 parser 申请，重排序输出后释放。
+static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = 256;
+// 重排序输出每次发送的延迟(ns)
+static const uint32_t REORDER_OUTPUT_DELAY = 1;
+
+// ===================== SLINK NoC延迟参数 =====================
+static const uint32_t SLINK_NOC_LATENCY_NS = 150;    // SLINK NoC单趟延迟(ns), 0.15us，请求和响应通路各一次
 
 // ===================== 系统参数 =====================
 static const uint32_t MAX_CONCURRENT_TASKS = 256;   // 最大并发任务数

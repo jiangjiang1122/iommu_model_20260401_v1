@@ -5,6 +5,7 @@
 #include "tlm.h"
 #include "tlm_utils/simple_initiator_socket.h"
 #include "tlm_utils/simple_target_socket.h"
+#include "tlm_utils/peq_with_get.h"
 #include <queue>
 #include <map>
 #include "iommu_struct.hh"
@@ -137,6 +138,10 @@ public:
     int ptw_outstanding_task_count;
     sc_event ptw_task_completed_event;
 
+    // PTW PEQ for pipeline delay (non-blocking, parallel timing)
+    tlm_utils::peq_with_get<iommu_task_t> ptw_req_peq;
+    tlm_utils::peq_with_get<ddr_rsp_entry_t> ptw_rsp_peq;
+
     std::map<uint32_t, iommu_task_t*> msiptw_active_walks;
     sc_mutex msiptw_walks_mtx;
     int msiptw_outstanding_task_count;
@@ -145,6 +150,28 @@ public:
     // ===================== Cache Mutex =====================
     sc_mutex iommu_cache_mtx;
     sc_mutex walker_cache_mtx;
+
+    // ===================== Output Reorder Buffer =====================
+    // 出口重排序：写请求按 task_id 单调保序输出；读请求到达即输出；读写互不影响。
+    // 任意 task 在重排序输出之后才释放 IOMMU 全局 outstanding。
+    struct reorder_entry_t {
+        iommu_task_t* task;
+        bool ready;       // 翻译完成（含 fault），已可输出
+        bool is_write;    // 1=写请求，需保序；0=读请求，可乱序
+    };
+    std::map<uint32_t, reorder_entry_t> reorder_buf;   // key = task_id
+    std::queue<uint32_t> reorder_write_order;          // 写请求到达顺序（task_id）
+    sc_mutex reorder_mtx;
+    sc_event reorder_ready_event;
+
+    // 全局 outstanding：parser 入侧申请，reorder 出口释放
+    int iommu_global_outstanding;
+    sc_event iommu_global_outstanding_freed_event;
+
+    // 重排序辅助方法
+    void reorder_register_task(iommu_task_t* task);    // 入口注册 + outstanding++
+    void reorder_mark_ready(iommu_task_t* task);        // 出口（forwarder/fault）标记就绪
+    void reorder_output_thread();                       // 重排序输出线程
 
     // ===================== Legacy CQ Event =====================
     sc_event cq_process_evt;
@@ -176,9 +203,11 @@ public:
     void pt_cache_result_thread();
     void pt_cache_ptw_rsp_thread();
 
-    // PTW (2 threads)
-    void ptw_req_thread();
-    void ptw_rsp_thread();
+    // PTW (4 threads: dispatch + process for req/rsp)
+    void ptw_req_thread();            // dispatch: flow control + PEQ notify
+    void ptw_req_process_thread();    // process: PEQ get + walk init + DDR send
+    void ptw_rsp_thread();            // dispatch: FIFO read + PEQ notify
+    void ptw_rsp_process_thread();    // process: PEQ get + PTE parse + state machine
 
     // MSIPT Cache (2 threads)
     void msipt_cache_query_thread();
@@ -256,9 +285,12 @@ public:
         collector_dc_walk_outstanding(0),
         collector_pc_walk_outstanding(0),
         ptw_outstanding_task_count(0),
+        ptw_req_peq("ptw_req_peq"),
+        ptw_rsp_peq("ptw_rsp_peq"),
         msiptw_outstanding_task_count(0),
         axi_master_1_to_cmn_rnd_outstanding(0),
-        axi_master_0_to_pcie_noc_outstanding(0)
+        axi_master_0_to_pcie_noc_outstanding(0),
+        iommu_global_outstanding(0)
     {
         iommu_inst.top = this;
 
@@ -287,7 +319,9 @@ public:
         // SC_THREAD(pt_cache_result_thread);   // Replaced by CacheSubsystem
         // SC_THREAD(pt_cache_ptw_rsp_thread);  // Replaced by CacheSubsystem
         SC_THREAD(ptw_req_thread);
+        SC_THREAD(ptw_req_process_thread);
         SC_THREAD(ptw_rsp_thread);
+        SC_THREAD(ptw_rsp_process_thread);
         SC_THREAD(msipt_cache_query_thread);
         SC_THREAD(msipt_cache_result_thread);
         SC_THREAD(msiptw_req_thread);
@@ -296,6 +330,7 @@ public:
         SC_THREAD(msipt_forwarder_thread);
         SC_THREAD(fault_cq_proc_thread);
         SC_THREAD(ddr_arbiter_thread);
+        SC_THREAD(reorder_output_thread);   // 出口重排序线程
 
         memset(ctrl_path_rsp_buf, 0, sizeof(ctrl_path_rsp_buf));
     }
