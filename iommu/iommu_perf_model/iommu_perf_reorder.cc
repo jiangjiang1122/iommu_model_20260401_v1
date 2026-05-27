@@ -38,6 +38,8 @@ void iommu_top::reorder_register_task(iommu_task_t* task) {
         reorder_write_order.push(task->task_id);
     }
     iommu_global_outstanding++;
+    if (iommu_global_outstanding > peak_iommu_global_outstanding)
+        peak_iommu_global_outstanding = iommu_global_outstanding;
     reorder_mtx.unlock();
 
     printf("[REORDER] register task_id=%u, %s, global_outstanding=%d\n",
@@ -135,6 +137,8 @@ void iommu_top::reorder_output_thread() {
                 wait(axi_master_0_slot_freed_event);
             }
             axi_master_0_to_pcie_noc_outstanding++;
+            if (axi_master_0_to_pcie_noc_outstanding > peak_axi_master_0_outstanding)
+                peak_axi_master_0_outstanding = axi_master_0_to_pcie_noc_outstanding;
 
             printf("[REORDER] output task_id=%u, %s, pa=0x%lx, axi_master_0_out=%d\n",
                    task->task_id,
@@ -143,14 +147,27 @@ void iommu_top::reorder_output_thread() {
                    axi_master_0_to_pcie_noc_outstanding);
             fflush(stdout);
 
-            // 维持原有出口节拍
-            wait(REORDER_OUTPUT_DELAY, SC_NS);
-
+            // [PERF] reorder_output 无需串行延时，出口速率由 master_0 带宽模型控制
             send_response_to_initiator(task);
+            iommu_total_completed++;  // [STAT] IOMMU 完成翻译计数
+            // [STAT] 累加端到端延时 (parser入口 -> reorder出口)
+            double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
+            iommu_total_e2e_latency_ns += e2e_ns;
+
+            // [STAT] 稳态IOPS采样：记录稳态开始/结束时刻
+            if (steady_start_ns == 0.0 && steady_start_count > 0 &&
+                iommu_total_completed >= steady_start_count) {
+                steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
+            }
+            if (steady_end_ns == 0.0 && steady_end_count > 0 &&
+                iommu_total_completed >= steady_end_count) {
+                steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
+            }
 
             // ===== Bandwidth control: master_0 port (翻译输出) =====
             // delay_ns = 1000 * length * 8 / bandwidth_mbps
             unsigned int resp_data_len = task->tlm_trans_ptr ? task->tlm_trans_ptr->get_data_length() : 16;
+            master_0_total_bytes += resp_data_len;  // [STAT] 出口字节计数
             double master0_bw_delay_ns = 1000.0 * resp_data_len * 8 / AXI_MASTER_0_BANDWIDTH_MBPS;
             wait(master0_bw_delay_ns, SC_NS);
 

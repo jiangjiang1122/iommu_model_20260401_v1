@@ -18,8 +18,12 @@ void iommu_top::ptw_req_thread() {
         }
 
         iommu_task_t* task = pt_cache_to_ptw_fifo.read();
+        // [STAT] 记录PTW任务入口时刻
+        ptw_task_start_ns[task->task_id] = sc_time_stamp().to_seconds() * 1e9;
         task->state = TASK_PTW_REQ;
         ptw_outstanding_task_count++;
+        if (ptw_outstanding_task_count > peak_ptw_outstanding)
+            peak_ptw_outstanding = ptw_outstanding_task_count;
 
         printf("[PTW_REQ] task_id=%u, iova=0x%lx, iosatp.MODE=%d, GV=%d -> dispatch to PEQ\n",
                task->task_id, task->iova, task->iosatp.MODE, task->GV);
@@ -82,7 +86,14 @@ void iommu_top::ptw_req_process_thread() {
                 task->g_pte.PBMT = PMA;
                 task->state = TASK_PTW_DONE;
                 ptw_outstanding_task_count--;
-                ptw_task_completed_event.notify(SC_ZERO_TIME); 
+                ptw_total_completed++;  // [STAT]
+                // [STAT] 累加PTW完成统计（Bare直通路径）
+                ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
+                { auto _s = ptw_task_start_ns.find(task->task_id);
+                  if (_s != ptw_task_start_ns.end()) {
+                      ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
+                      ptw_task_start_ns.erase(_s); } }
+                ptw_task_completed_event.notify(SC_ZERO_TIME);
                 
                 // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
                 iommu::CacheMessage pt_update_req = task_to_pt_update(task);
@@ -90,6 +101,8 @@ void iommu_top::ptw_req_process_thread() {
                 
                 // Also route to forwarder
                 pt_cache_to_fwd_fifo.write(task);
+                // VA Dedup: 恢复挂起的同页任务
+                va_dedup_recover(task, false);
                 continue;
             }
         }
@@ -130,6 +143,13 @@ void iommu_top::ptw_req_process_thread() {
                 task->cause = (task->is_exec ? 12 : task->is_read ? 13 : 15);
                 task->state = TASK_FAULT;
                 ptw_outstanding_task_count--;
+                ptw_total_completed++;  // [STAT]
+                // [STAT] 累加PTW完成统计（canonical fault）
+                ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
+                { auto _s = ptw_task_start_ns.find(task->task_id);
+                  if (_s != ptw_task_start_ns.end()) {
+                      ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
+                      ptw_task_start_ns.erase(_s); } }
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
                 
                 // Convert task to CacheMessage and write to cache_sub.pt_update_fifo (for fault recording)
@@ -138,6 +158,8 @@ void iommu_top::ptw_req_process_thread() {
                 
                 // Route to fault FIFO
                 collector_to_fault_fifo.write(task);
+                // VA Dedup: 恢复挂起的同页任务(fault)
+                va_dedup_recover(task, true);
                 continue;
             }
 
@@ -727,6 +749,13 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
+            ptw_total_completed++;  // [STAT]
+            // [STAT] 累加PTW完成统计（walk fault）
+            ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
+            { auto _s = ptw_task_start_ns.find(task->task_id);
+              if (_s != ptw_task_start_ns.end()) {
+                  ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
+                  ptw_task_start_ns.erase(_s); } }
             ptw_task_completed_event.notify(SC_ZERO_TIME);
             
             // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
@@ -735,6 +764,8 @@ void iommu_top::ptw_rsp_process_thread() {
             
             // Also route to forwarder after PT update
             pt_cache_to_fwd_fifo.write(task);
+            // VA Dedup: 恢复挂起的同页任务(fault)
+            va_dedup_recover(task, true);
         }
         else if (walk_complete) {
             printf("[PTW_RSP] task_id=%u -> WALK COMPLETE, pa=0x%lx, total_reads=%u -> pt_cache\n",
@@ -744,6 +775,13 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
+            ptw_total_completed++;  // [STAT]
+            // [STAT] 累加PTW完成统计（walk complete）
+            ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
+            { auto _s = ptw_task_start_ns.find(task->task_id);
+              if (_s != ptw_task_start_ns.end()) {
+                  ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
+                  ptw_task_start_ns.erase(_s); } }
             ptw_task_completed_event.notify(SC_ZERO_TIME);
             
             // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
@@ -773,6 +811,8 @@ void iommu_top::ptw_rsp_process_thread() {
             
             // Also route to forwarder after PT update
             pt_cache_to_fwd_fifo.write(task);
+            // VA Dedup: 恢复挂起的同页任务
+            va_dedup_recover(task, false);
         }
         else if (need_next_ddr) {
             printf("[PTW_RSP] task_id=%u -> need_next_ddr, addr=0x%lx, size=%d, phase=%d, read_count=%u\n",

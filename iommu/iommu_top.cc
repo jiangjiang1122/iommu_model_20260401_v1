@@ -3,6 +3,16 @@
 #include <cstdio>
 #include <iostream>
 
+// ===================== Cache命中率统计全局变量定义 =====================
+uint64_t g_dc_cache_hit_count = 0;
+uint64_t g_dc_cache_miss_count = 0;
+uint64_t g_pc_cache_hit_count = 0;
+uint64_t g_pc_cache_miss_count = 0;
+uint64_t g_pt_cache_hit_count = 0;
+uint64_t g_pt_cache_miss_count = 0;
+uint64_t g_msipt_cache_hit_count = 0;
+uint64_t g_msipt_cache_miss_count = 0;
+
 /**********************************************/
 // before_end_of_elaboration - IOMMU reset and initialization
 /**********************************************/
@@ -134,6 +144,7 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         // ===== Bandwidth control: slave port accept delay =====
         // delay_ns = 1000 * length * 8 / bandwidth_mbps
         unsigned int data_len = trans.get_data_length();
+        slave_0_total_bytes += data_len;  // [STAT] 入口字节计数
         double slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_0_BANDWIDTH_MBPS;
         wait(slave_bw_delay_ns, SC_NS);
 
@@ -375,10 +386,13 @@ void iommu_top::ddr_arbiter_thread() {
             // ===== Bandwidth control: master_1 port (DDR access) =====
             // delay_ns = 1000 * length * 8 / bandwidth_mbps
             double master1_bw_delay_ns = 1000.0 * req.size * 8 / AXI_MASTER_1_BANDWIDTH_MBPS;
+            master_1_total_bytes += req.size;  // [STAT] DDR字节计数
             wait(master1_bw_delay_ns, SC_NS);
 
             // Increment outstanding counter after successful send
             axi_master_1_to_cmn_rnd_outstanding++;
+            if (axi_master_1_to_cmn_rnd_outstanding > peak_axi_master_1_outstanding)
+                peak_axi_master_1_outstanding = axi_master_1_to_cmn_rnd_outstanding;
             printf("[DDR_ARBITER] axi_master_1 outstanding++ -> %d (task_id=%u)\n",
                    axi_master_1_to_cmn_rnd_outstanding, req.task_id);
             fflush(stdout);
@@ -458,14 +472,239 @@ void iommu_top::init_gstage_walk(iommu_task_t* task, uint64_t gpa) {
 }
 
 /**********************************************/
+// va_dedup_recover - VA去重恢复：PTW完成后将挂起的同页任务批量转发
+/**********************************************/
+void iommu_top::va_dedup_recover(iommu_task_t* completed_task, bool is_fault) {
+    if (!PT_CACHE_VA_DEDUP_ENABLED) return;
+
+    // [FIX] 提前缓存 completed_task 数据到局部变量，避免后续 FIFO write yield 时
+    //       forwarder 线程读取并修改 completed_task，导致 page_sz 等字段被破坏
+    uint64_t  saved_pa          = completed_task->pa;
+    uint64_t  saved_page_sz     = completed_task->page_sz;
+    uint64_t  saved_gst_page_sz = completed_task->gst_page_sz;
+    spte_t    saved_vs_pte      = completed_task->vs_pte;
+    gpte_t    saved_g_pte       = completed_task->g_pte;
+    uint32_t  saved_cause       = completed_task->cause;
+    uint32_t  saved_task_id     = completed_task->task_id;
+
+    va_dedup_key_t key;
+    key.gscid = completed_task->GSCID;
+    key.pscid = completed_task->PSCID;
+    key.page_iova = completed_task->iova & ~0xFFFULL;
+
+    va_dedup_mtx.lock();
+    auto it = va_dedup_table.find(key);
+    if (it == va_dedup_table.end() || !it->second.valid) {
+        va_dedup_mtx.unlock();
+        return;
+    }
+    std::vector<iommu_task_t*> pending = std::move(it->second.pending_tasks);
+    va_dedup_table.erase(it);
+    va_dedup_mtx.unlock();
+
+    for (auto* ptask : pending) {
+        if (is_fault) {
+            ptask->cause = saved_cause;
+            ptask->state = TASK_FAULT;
+        } else {
+            // 复制翻译结果，PA按各自的页内偏移计算
+            uint64_t page_mask = saved_page_sz - 1;
+            ptask->pa = (saved_pa & ~page_mask) | (ptask->iova & page_mask);
+            ptask->vs_pte = saved_vs_pte;
+            ptask->g_pte = saved_g_pte;
+            ptask->page_sz = saved_page_sz;
+            ptask->gst_page_sz = saved_gst_page_sz;
+            ptask->state = TASK_PTW_DONE;
+        }
+        printf("[VA_DEDUP_RECOVER] task_id=%u, pa=0x%lx (from task_id=%u)\n",
+               ptask->task_id, ptask->pa, saved_task_id);
+        fflush(stdout);
+        pt_cache_to_fwd_fifo.write(ptask);
+    }
+    if (!pending.empty()) {
+        printf("[VA_DEDUP_RECOVER] Recovered %zu tasks for page 0x%lx\n",
+               pending.size(), key.page_iova);
+        fflush(stdout);
+    }
+}
+
+/**********************************************/
 // print_cache_statistics - 打印Cache命中率统计信息
 /**********************************************/
 void iommu_top::print_cache_statistics() {
+    // [FIX] 等待 pt_update_worker_thread 处理完 FIFO 中所有剩余请求，修正仿真终止时的统计误差
+    while (cache_sub.pt_update_fifo.num_available() > 0) {
+        sc_core::wait(sc_core::SC_ZERO_TIME);
+    }
+
     printf("\n========== Cache Hit/Miss Statistics (CacheSubsystem Internal) ==========\n");
     
     // 使用CacheSubsystem内部的StatsCollector
     cache_sub.stats().print_summary(std::cout);
     
     printf("========================================================================\n\n");
+
+    // VA Dedup Statistics
+    printf("========== VA Dedup Statistics ==========\n");
+    printf("  VA Dedup Enabled:  %s\n", PT_CACHE_VA_DEDUP_ENABLED ? "YES" : "NO");
+    printf("  Dedup Table Miss:  %lu (sent to PTW)\n", (unsigned long)va_dedup_miss_count);
+    printf("  Dedup Table Hit:   %lu (saved PTW tasks)\n", (unsigned long)va_dedup_hit_count);
+    if (va_dedup_miss_count + va_dedup_hit_count > 0) {
+        printf("  PTW Tasks Saved:   %.1f%% reduction\n",
+               100.0 * va_dedup_hit_count / (va_dedup_miss_count + va_dedup_hit_count));
+    }
+    printf("==========================================\n\n");
+
+    // IOMMU / PTW IOPS
+    double sim_time_sec = sc_time_stamp().to_seconds();
+    printf("========== IOMMU / PTW Throughput (IOPS) ==========\n");
+    printf("  Sim Time:             %.3f us\n", sim_time_sec * 1e6);
+    if (sim_time_sec > 0) {
+        double iommu_iops_mps = (double)iommu_total_completed / sim_time_sec / 1e6;
+        double ptw_iops_mps   = (double)ptw_total_completed   / sim_time_sec / 1e6;
+        printf("  IOMMU Completed:      %lu trans\n",  (unsigned long)iommu_total_completed);
+        printf("  IOMMU IOPS:           %.2f M trans/s\n", iommu_iops_mps);
+        printf("  PTW  Completed:       %lu tasks\n",  (unsigned long)ptw_total_completed);
+        printf("  PTW  IOPS:            %.2f M tasks/s\n", ptw_iops_mps);
+        if (ptw_total_completed > 0) {
+            printf("  PTW  avg DDR reads:   %.2f reads/task\n",
+                   (double)ptw_total_ddr_reads / ptw_total_completed);
+            printf("  PTW  avg exec lat:    %.1f ns  (%.3f us)\n",
+                   ptw_total_exec_ns / ptw_total_completed,
+                   ptw_total_exec_ns / ptw_total_completed / 1000.0);
+        }
+        if (iommu_total_completed > 0) {
+            double avg_e2e_ns = iommu_total_e2e_latency_ns / iommu_total_completed;
+            double avg_req_ns = sim_time_sec * 1e9 / iommu_total_completed;
+            printf("  IO   avg e2e lat:     %.1f ns  (%.3f us)\n", avg_e2e_ns, avg_e2e_ns/1000.0);
+            printf("  IO   avg req time:    %.1f ns  (%.3f us)\n", avg_req_ns, avg_req_ns/1000.0);
+        }
+        // 稳态IOPS（跳过warmup/drain，只取中间稳定段）
+        if (steady_end_ns > steady_start_ns && steady_end_count > steady_start_count) {
+            double steady_duration_ns = steady_end_ns - steady_start_ns;
+            uint64_t steady_trans = steady_end_count - steady_start_count;
+            double steady_iops = (double)steady_trans / steady_duration_ns * 1e3; // M trans/s
+            double theory_iops = (double)AXI_SLAVE_0_BANDWIDTH_MBPS / 8.0 / 512.0; // Mbps / 8 / 512B = M/s
+            printf("  ---\n");
+            printf("  Steady IOPS:          %.2f M trans/s  (window: #%lu ~ #%lu, %.1f ns)\n",
+                   steady_iops,
+                   (unsigned long)steady_start_count, (unsigned long)steady_end_count,
+                   steady_duration_ns);
+            printf("  Theory peak:          %.2f M trans/s  (%.0f GB/s / 512B)\n",
+                   theory_iops, AXI_SLAVE_0_BANDWIDTH_MBPS / 8000.0);
+            printf("  Efficiency:           %.1f%%\n", steady_iops / theory_iops * 100.0);
+        }
+    }
+    printf("====================================================\n\n");
+
+    // Port Average Bandwidth
+    printf("========== Port Average Bandwidth ==========\n");
+    if (sim_time_sec > 0) {
+        // peak BW (GB/s): BANDWIDTH_MBPS is in Mbps = 1e6 bit/s; GB/s = MBPS*1e6/8/1e9 = MBPS/8000
+        const double peak_slave0_GBs  = AXI_SLAVE_0_BANDWIDTH_MBPS  / 8000.0;
+        const double peak_master0_GBs = AXI_MASTER_0_BANDWIDTH_MBPS / 8000.0;
+        const double peak_master1_GBs = AXI_MASTER_1_BANDWIDTH_MBPS / 8000.0;
+        double slave0_bw_GBs  = (double)slave_0_total_bytes  / sim_time_sec / 1e9;
+        double master0_bw_GBs = (double)master_0_total_bytes / sim_time_sec / 1e9;
+        double master1_bw_GBs = (double)master_1_total_bytes / sim_time_sec / 1e9;
+        printf("  slave_0  (入口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)slave_0_total_bytes,  slave0_bw_GBs,  peak_slave0_GBs,
+               slave0_bw_GBs  / peak_slave0_GBs  * 100.0);
+        printf("  master_0 (出口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)master_0_total_bytes, master0_bw_GBs, peak_master0_GBs,
+               master0_bw_GBs / peak_master0_GBs * 100.0);
+        printf("  master_1 (DDR):  %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)master_1_total_bytes, master1_bw_GBs, peak_master1_GBs,
+               master1_bw_GBs / peak_master1_GBs * 100.0);
+    }
+    printf("============================================\n\n");
+
+    // Outstanding Peak Statistics
+    printf("========== Outstanding Peak Statistics ==========\n");
+    printf("  %-30s peak=%4d / max=%4d\n", "IOMMU Global:",
+           peak_iommu_global_outstanding,  (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "PTW:",
+           peak_ptw_outstanding,            (int)PTW_MAX_OUTSTANDING_TASKS);
+    printf("  %-30s peak=%4d / max=%4d\n", "xDTW DC walk:",
+           peak_xdtw_dc_outstanding,        (int)XDTW_MAX_DC_OUTSTANDING_TASKS);
+    printf("  %-30s peak=%4d / max=%4d\n", "xDTW PC walk:",
+           peak_xdtw_pc_outstanding,        (int)XDTW_MAX_PC_OUTSTANDING_TASKS);
+    printf("  %-30s peak=%4d / max=%4d\n", "Collector DC walk:",
+           peak_collector_dc_walk_outstanding, (int)COLLECTOR_MAX_DC_WALK_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "Collector PC walk:",
+           peak_collector_pc_walk_outstanding, (int)COLLECTOR_MAX_PC_WALK_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "DDR (master_1):",
+           peak_axi_master_1_outstanding,   (int)AXI_MASTER_1_TO_CMN_RND_MAX_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "Output (master_0):",
+           peak_axi_master_0_outstanding,   (int)AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING);
+    printf("=================================================\n\n");
+
+    // Serial Cache Pipeline Busy-Time Analysis [DISABLED - causes segfault after sc_stop]
+    /*
+    printf("========== Serial Cache Pipeline Analysis ==========\n");
+    double sim_ns = sim_time_sec * 1e9;
+    if (sim_ns > 0) {
+        // DC Cache (CacheSubsystem internal)
+        const auto& dc_stats = cache_sub.stats().get_stats("dc_cache");
+        double dc_busy_ns = dc_stats.total_execution_latency_ns;
+        printf("  DC Cache (sub):     %lu reqs  exec_busy=%.0f ns (%.3f us)  util=%.1f%%\n",
+               (unsigned long)dc_stats.request_latency_samples,
+               dc_busy_ns, dc_busy_ns/1000.0,
+               dc_busy_ns / sim_ns * 100.0);
+        if (dc_stats.request_latency_samples > 0) {
+            printf("    avg exec=%.1f ns  avg total=%.1f ns\n",
+                   dc_stats.avg_execution_latency_ns(),
+                   dc_stats.avg_request_latency_ns());
+        }
+
+        // PC Cache (CacheSubsystem internal)
+        const auto& pc_stats = cache_sub.stats().get_stats("pc_cache");
+        double pc_busy_ns = pc_stats.total_execution_latency_ns;
+        printf("  PC Cache (sub):     %lu reqs  exec_busy=%.0f ns (%.3f us)  util=%.1f%%\n",
+               (unsigned long)pc_stats.request_latency_samples,
+               pc_busy_ns, pc_busy_ns/1000.0,
+               pc_busy_ns / sim_ns * 100.0);
+        if (pc_stats.request_latency_samples > 0) {
+            printf("    avg exec=%.1f ns  avg total=%.1f ns\n",
+                   pc_stats.avg_execution_latency_ns(),
+                   pc_stats.avg_request_latency_ns());
+        }
+
+        // PT Cache (CacheSubsystem internal)
+        const auto& pt_stats = cache_sub.stats().get_stats("pt_cache");
+        double pt_busy_ns = pt_stats.total_execution_latency_ns;
+        printf("  PT Cache (sub):     %lu reqs  exec_busy=%.0f ns (%.3f us)  util=%.1f%%\n",
+               (unsigned long)pt_stats.request_latency_samples,
+               pt_busy_ns, pt_busy_ns/1000.0,
+               pt_busy_ns / sim_ns * 100.0);
+        if (pt_stats.request_latency_samples > 0) {
+            printf("    avg exec=%.1f ns  avg total=%.1f ns\n",
+                   pt_stats.avg_execution_latency_ns(),
+                   pt_stats.avg_request_latency_ns());
+        }
+
+        // Walker Cache (CacheSubsystem internal)
+        const auto& wk_stats = cache_sub.stats().get_stats("walker_cache");
+        double wk_busy_ns = wk_stats.total_execution_latency_ns;
+        printf("  Walker Cache (sub): %lu reqs  exec_busy=%.0f ns (%.3f us)  util=%.1f%%\n",
+               (unsigned long)wk_stats.request_latency_samples,
+               wk_busy_ns, wk_busy_ns/1000.0,
+               wk_busy_ns / sim_ns * 100.0);
+        if (wk_stats.request_latency_samples > 0) {
+            printf("    avg exec=%.1f ns  avg total=%.1f ns\n",
+                   wk_stats.avg_execution_latency_ns(),
+                   wk_stats.avg_request_latency_ns());
+        }
+
+        // Pipeline drain analysis
+        double input_time_ns = (double)iommu_total_completed * 8.0; // 8ns per 512B @ 64GB/s
+        double drain_ns = sim_ns - input_time_ns;
+        printf("  ---\n");
+        printf("  Input active:       %.0f ns (%.3f us)\n", input_time_ns, input_time_ns/1000.0);
+        printf("  Pipeline drain:     %.0f ns (%.3f us)\n", drain_ns, drain_ns/1000.0);
+        printf("  Drain / SimTime:    %.1f%%\n", drain_ns / sim_ns * 100.0);
+    }
+    printf("===================================================\n\n");
+    */
     fflush(stdout);
 }

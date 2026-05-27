@@ -23,7 +23,7 @@ void iommu_top::pt_forwarder_thread() {
                task->task_id, task->iova, task->pa);
         fflush(stdout);
 
-        wait(FORWARDER_DELAY, SC_NS);
+        // [PERF] pt_forwarder 无需串行延时
         task->state = TASK_FORWARD;
 
         // ========== Step 20: Response Generation ==========
@@ -72,7 +72,7 @@ void iommu_top::msipt_forwarder_thread() {
                task->task_id, task->iova, task->pa, task->is_msi, task->is_mrif);
         fflush(stdout);
 
-        wait(FORWARDER_DELAY, SC_NS);
+        // [PERF] msipt_forwarder 无需串行延时
         task->state = TASK_FORWARD;
 
         // ========== Step 20: Response Generation ==========
@@ -121,7 +121,7 @@ void iommu_top::msipt_forwarder_thread() {
 void iommu_top::fault_cq_proc_thread() {
     while (true) {
         iommu_task_t* task = collector_to_fault_fifo.read();
-        wait(FORWARDER_DELAY, SC_NS);
+        // [PERF] fault_cq 无需串行延时
 
         printf("[FAULT_CQ] task_id=%u, cause=%d, device_id=0x%x, iova=0x%lx -> processing fault\n",
                task->task_id, task->cause, task->device_id, task->iova);

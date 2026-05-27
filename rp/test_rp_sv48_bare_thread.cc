@@ -131,7 +131,7 @@ void RP_Module::send_translation_request_1_thread()
 
             trans_array[i]->set_address(iova);
             trans_array[i]->set_data_ptr(data);
-            trans_array[i]->set_data_length(16);
+            trans_array[i]->set_data_length(512);  // [MODEL] 512B DMA 载荷占用入口带宽
             trans_array[i]->set_command(TLM_WRITE_COMMAND);
 
             ext_array[i] = new PayloadExtention();

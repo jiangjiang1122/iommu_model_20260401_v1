@@ -38,11 +38,14 @@ void iommu_top::xdtw_req_thread() {
         task->state = TASK_XDTW_REQ;
         if (task->walk_ctx.walk_type == WALK_DDT) {
             xdtw_dc_outstanding_task_count++;
+            if (xdtw_dc_outstanding_task_count > peak_xdtw_dc_outstanding)
+                peak_xdtw_dc_outstanding = xdtw_dc_outstanding_task_count;
         } else {
             xdtw_pc_outstanding_task_count++;
+            if (xdtw_pc_outstanding_task_count > peak_xdtw_pc_outstanding)
+                peak_xdtw_pc_outstanding = xdtw_pc_outstanding_task_count;
         }
-
-        wait(XDTW_COMPUTE_DELAY, SC_NS);
+        // [PERF] xdtw_req 无需串行延时，多任务并发进行
 
         if (task->walk_ctx.walk_type == WALK_DDT) {
             // ========== DDT Walk Initialization ==========
@@ -138,7 +141,7 @@ void iommu_top::xdtw_req_thread() {
 void iommu_top::xdtw_rsp_thread() {
     while (true) {
         ddr_rsp_entry_t rsp = xdtw_rsp_ddr_fifo.read();
-        wait(XDTW_PARSE_DELAY, SC_NS);
+        // [PERF] xdtw_rsp 无需串行延时
 
         // Find corresponding task
         xdtw_walks_mtx.lock();

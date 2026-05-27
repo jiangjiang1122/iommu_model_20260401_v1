@@ -90,6 +90,11 @@ void RP_Module::send_translation_request_1_thread()
 
         // Prepare and send 2000 translation requests
         const int NUM_REQUESTS = 2000;
+
+        // 设置稳态IOPS采样窗口 (跳过前10%和后10%)
+        iommu_ptr->steady_start_count = NUM_REQUESTS * STEADY_STATE_START_PERCENT / 100;
+        iommu_ptr->steady_end_count   = NUM_REQUESTS * STEADY_STATE_END_PERCENT / 100;
+
         tlm_generic_payload* trans_array[NUM_REQUESTS];
         PayloadExtention* ext_array[NUM_REQUESTS];
         uint64_t base_iova = 0x10000;
@@ -108,7 +113,7 @@ void RP_Module::send_translation_request_1_thread()
 
             trans_array[i]->set_address(iova);
             trans_array[i]->set_data_ptr(data);
-            trans_array[i]->set_data_length(16);
+            trans_array[i]->set_data_length(512);  // [MODEL] 512B DMA 载荷占用入口带宽
             trans_array[i]->set_command(TLM_WRITE_COMMAND);
 
             ext_array[i] = new PayloadExtention();

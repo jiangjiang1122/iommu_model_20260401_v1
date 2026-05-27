@@ -20,7 +20,7 @@ static const uint32_t FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY = 4;
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_XDTW = 4;
 
 // Cache到Walker
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 4;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 256;
 static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 4;
 
 // Walker返回Collector/Cache
@@ -110,6 +110,9 @@ static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstan
 // ===================== PTW模块参数 =====================
 static const bool PTW_WALKER_CACHE_ENABLED = true;           // Walker Cache开关（true=启用，false=禁用）
 
+// ===================== PT Cache VA去重参数 =====================
+static const bool PT_CACHE_VA_DEDUP_ENABLED = true;          // VA去重功能开关（true=启用，false=禁用）
+
 // ===================== Collector Outstanding 限制 =====================
 static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限
 static const uint32_t COLLECTOR_MAX_PC_WALK_OUTSTANDING = 64;   // Collector PC walk outstanding上限
@@ -136,6 +139,11 @@ static const uint32_t REORDER_OUTPUT_DELAY = 1;
 
 // ===================== SLINK NoC延迟参数 =====================
 static const uint32_t SLINK_NOC_LATENCY_NS = 150;    // SLINK NoC单趟延迟(ns), 0.15us，请求和响应通路各一次
+
+// ===================== 稳态IOPS采样窗口 =====================
+// 跳过前10%和后10%，只统计中间80%稳定段的IOPS
+static const uint32_t STEADY_STATE_START_PERCENT = 10;  // 稳态开始百分比
+static const uint32_t STEADY_STATE_END_PERCENT   = 90;  // 稳态结束百分比
 
 // ===================== 系统参数 =====================
 static const uint32_t MAX_CONCURRENT_TASKS = 256;   // 最大并发任务数

@@ -61,7 +61,39 @@ void iommu_top::collector_pt_response_thread() {
                 // Convert CacheMessage response to task
                 pt_miss_response_to_task(resp, task);
 
-                // Route to PTW for page table walk
+                // ===== VA Dedup Check =====
+                if (PT_CACHE_VA_DEDUP_ENABLED) {
+                    va_dedup_key_t key;
+                    key.gscid = task->GSCID;
+                    key.pscid = task->PSCID;
+                    key.page_iova = task->iova & ~0xFFFULL;
+
+                    va_dedup_mtx.lock();
+                    auto dedup_it = va_dedup_table.find(key);
+                    if (dedup_it != va_dedup_table.end() && dedup_it->second.valid) {
+                        // Dedup HIT: 挂入等待列表，不发PTW
+                        dedup_it->second.pending_tasks.push_back(task);
+                        va_dedup_hit_count++;
+                        va_dedup_mtx.unlock();
+                        printf("[VA_DEDUP] task_id=%u -> HIT (page=0x%lx, pending=%zu)\n",
+                               task->task_id, key.page_iova, dedup_it->second.pending_tasks.size());
+                        fflush(stdout);
+                        continue;  // 跳过发PTW
+                    } else {
+                        // Dedup MISS: 建新表项
+                        va_dedup_entry_t entry;
+                        entry.valid = true;
+                        entry.first_task_id = task->task_id;
+                        va_dedup_table[key] = entry;
+                        va_dedup_miss_count++;
+                        va_dedup_mtx.unlock();
+                        printf("[VA_DEDUP] task_id=%u -> MISS (new page=0x%lx)\n",
+                               task->task_id, key.page_iova);
+                        fflush(stdout);
+                    }
+                }
+
+                // Route to PTW for page table walk (仅 dedup miss 或功能关闭时到达此处)
                 printf("[PT_CACHE] task_id=%u -> MISS, routing to ptw_fifo\n",
                        task->task_id);
                 fflush(stdout);

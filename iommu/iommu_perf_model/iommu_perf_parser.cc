@@ -15,6 +15,7 @@ void iommu_top::parser_thread() {
 
         // 1. Read task from inbound FIFO
         iommu_task_t* task = inbound_fifo.read();
+        task->timestamp = sc_time_stamp();  // [STAT] 记录IO入口时刻
         printf("[PARSER] task_id=%u popped from inbound_fifo\n", task->task_id);
         fflush(stdout);
 
@@ -22,7 +23,7 @@ void iommu_top::parser_thread() {
         reorder_register_task(task);
 
         task->state = TASK_PARSING;
-        wait(PARSER_DELAY, SC_NS);
+        // [PERF] Parser无需串行延时：瓶颈由并发outstanding数和下游模块决定
 
         // 2. TTYP classification and access attribute extraction
         // Corresponds to iommu_translate.cc L46-89

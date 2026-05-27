@@ -7,6 +7,7 @@
 #include "tlm_utils/simple_target_socket.h"
 #include "tlm_utils/peq_with_get.h"
 #include <queue>
+#include <vector>
 #include <map>
 #include "iommu_struct.hh"
 #include "param_trans_def.hh"
@@ -118,6 +119,61 @@ public:
     // ===================== PT Cache Pending Tasks =====================
     std::map<uint32_t, iommu_task_t*> pt_cache_pending_tasks;  // Save original task for PT lookup
     sc_mutex pt_cache_mtx;
+
+    // ===================== VA Dedup Table (PT Cache VA去重) =====================
+    struct va_dedup_key_t {
+        uint32_t gscid;
+        uint32_t pscid;
+        uint64_t page_iova;  // iova & ~0xFFF (4KB页对齐)
+        bool operator<(const va_dedup_key_t& other) const {
+            if (gscid != other.gscid) return gscid < other.gscid;
+            if (pscid != other.pscid) return pscid < other.pscid;
+            return page_iova < other.page_iova;
+        }
+    };
+    struct va_dedup_entry_t {
+        bool valid;
+        uint32_t first_task_id;                    // 首笔(dedup miss)task_id
+        std::vector<iommu_task_t*> pending_tasks;  // 挂起的dedup hit任务
+    };
+    std::map<va_dedup_key_t, va_dedup_entry_t> va_dedup_table;
+    sc_mutex va_dedup_mtx;
+    uint64_t va_dedup_hit_count;   // 统计：去重命中次数
+    uint64_t va_dedup_miss_count;  // 统计：去重未命中次数
+
+    // ===================== IOMMU/PTW IOPS Counters =====================
+    uint64_t iommu_total_completed;  // IOMMU 出口完成翻译总数
+    uint64_t ptw_total_completed;    // PTW 完成任务总数
+
+    // ===================== Port Byte Counters =====================
+    uint64_t slave_0_total_bytes;    // axi_slave_0  入口接收总字节数
+    uint64_t master_0_total_bytes;   // axi_master_0 出口发送总字节数
+    uint64_t master_1_total_bytes;   // axi_master_1 DDR 访问总字节数
+    
+    // ===================== Outstanding Peak Trackers =====================
+    int peak_iommu_global_outstanding;     // IOMMU全局outstanding峰值
+    int peak_ptw_outstanding;              // PTW outstanding峰值
+    int peak_xdtw_dc_outstanding;          // xDTW DC walk outstanding峰值
+    int peak_xdtw_pc_outstanding;          // xDTW PC walk outstanding峰值
+    int peak_collector_dc_walk_outstanding; // Collector DC walk outstanding峰值
+    int peak_collector_pc_walk_outstanding; // Collector PC walk outstanding峰值
+    int peak_axi_master_1_outstanding;     // DDR端口outstanding峰值
+    int peak_axi_master_0_outstanding;     // 出口端口outstanding峰值
+
+    // ===================== PTW Per-Task Statistics =====================
+    uint64_t ptw_total_ddr_reads;         // 所有PTW任务DDR读次数总和
+    double   ptw_total_exec_ns;           // 所有PTW任务执行延时总和(ns)
+    std::map<uint32_t, double> ptw_task_start_ns; // task_id -> PTW入口时刻(ns)
+
+    // ===================== End-to-End Latency Statistics =====================
+    double   iommu_total_e2e_latency_ns;  // 所有IO端到端延时总和(ns)
+
+    // ===================== Steady-State IOPS Measurement =====================
+    // 跳过前10%和后10%，只统计中间80%稳定段
+    double   steady_start_ns;             // 稳态开始时刻(ns)
+    double   steady_end_ns;               // 稳态结束时刻(ns)
+    uint64_t steady_start_count;          // 稳态开始时的完成数
+    uint64_t steady_end_count;            // 稳态结束时的完成数
 
     // ===================== Walker Active Walks =====================
     std::map<uint32_t, iommu_task_t*> xdtw_active_walks;
@@ -240,6 +296,7 @@ public:
     void send_response_to_initiator(iommu_task_t* task);
     void configure_and_route(iommu_task_t* task);
     void init_gstage_walk(iommu_task_t* task, uint64_t gpa);
+    void va_dedup_recover(iommu_task_t* completed_task, bool is_fault);
 
     // Legacy b_transport (kept for AHB register access)
     void axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay);
@@ -290,7 +347,29 @@ public:
         msiptw_outstanding_task_count(0),
         axi_master_1_to_cmn_rnd_outstanding(0),
         axi_master_0_to_pcie_noc_outstanding(0),
-        iommu_global_outstanding(0)
+        iommu_global_outstanding(0),
+        va_dedup_hit_count(0),
+        va_dedup_miss_count(0),
+        iommu_total_completed(0),
+        ptw_total_completed(0),
+        slave_0_total_bytes(0),
+        master_0_total_bytes(0),
+        master_1_total_bytes(0),
+        peak_iommu_global_outstanding(0),
+        peak_ptw_outstanding(0),
+        peak_xdtw_dc_outstanding(0),
+        peak_xdtw_pc_outstanding(0),
+        peak_collector_dc_walk_outstanding(0),
+        peak_collector_pc_walk_outstanding(0),
+        peak_axi_master_1_outstanding(0),
+        peak_axi_master_0_outstanding(0),
+        ptw_total_ddr_reads(0),
+        ptw_total_exec_ns(0.0),
+        iommu_total_e2e_latency_ns(0.0),
+        steady_start_ns(0.0),
+        steady_end_ns(0.0),
+        steady_start_count(0),
+        steady_end_count(0)
     {
         iommu_inst.top = this;
 

@@ -81,7 +81,7 @@ void iommu_top::collector_cache_lookup_result_thread() {
             it = pending_tasks.erase(it);
             collector_mtx.unlock();
 
-            wait(COLLECTOR_DELAY, SC_NS);
+            // [PERF] Collector无需串行延时
             task->state = TASK_COLLECTING;
 
             // ===== DC Miss: need DDT walk =====
@@ -95,6 +95,8 @@ void iommu_top::collector_cache_lookup_result_thread() {
                     wait(collector_dc_walk_completed_event);
                 }
                 collector_dc_walk_outstanding++;
+                if (collector_dc_walk_outstanding > peak_collector_dc_walk_outstanding)
+                    peak_collector_dc_walk_outstanding = collector_dc_walk_outstanding;
                 collector_to_xdtw_dc_fifo.write(task);
                 collector_mtx.lock();
                 continue;
@@ -232,6 +234,8 @@ void iommu_top::collector_cache_lookup_result_thread() {
                     wait(collector_pc_walk_completed_event);
                 }
                 collector_pc_walk_outstanding++;
+                if (collector_pc_walk_outstanding > peak_collector_pc_walk_outstanding)
+                    peak_collector_pc_walk_outstanding = collector_pc_walk_outstanding;
                 collector_to_xdtw_pc_fifo.write(task);
                 collector_mtx.lock();
                 continue;
@@ -277,7 +281,7 @@ void iommu_top::collector_cache_lookup_result_thread() {
 void iommu_top::collector_xdtw_response_thread() {
     while (true) {
         iommu_task_t* task = xdtw_to_collector_fifo.read();
-        wait(COLLECTOR_DELAY, SC_NS);
+        // [PERF] collector_xdtw_response 无需串行延时
 
         // Fault from xDTW: forward to fault handler
         if (task->state == TASK_FAULT) {
