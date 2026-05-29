@@ -22,8 +22,12 @@ void iommu_top::ptw_req_thread() {
         ptw_task_start_ns[task->task_id] = sc_time_stamp().to_seconds() * 1e9;
         task->state = TASK_PTW_REQ;
         ptw_outstanding_task_count++;
-        if (ptw_outstanding_task_count > peak_ptw_outstanding)
+        if (ptw_outstanding_task_count > peak_ptw_outstanding) {
             peak_ptw_outstanding = ptw_outstanding_task_count;
+            printf("[PTW_STAT] New peak outstanding=%d at task_id=%u, time=%s\n",
+                   peak_ptw_outstanding, task->task_id, sc_time_stamp().to_string().c_str());
+            fflush(stdout);
+        }
 
         printf("[PTW_REQ] task_id=%u, iova=0x%lx, iosatp.MODE=%d, GV=%d -> dispatch to PEQ\n",
                task->task_id, task->iova, task->iosatp.MODE, task->GV);
@@ -70,6 +74,7 @@ void iommu_top::ptw_req_process_thread() {
                 req.addr = task->walk_ctx.read_addr;
                 req.size = task->walk_ctx.read_size;
                 req.is_write = false;
+                req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT] 记录DDR请求提交时间
                 printf("[PTW_REQ] task_id=%u, Bare mode -> GS_EXPLICIT, addr=0x%lx, read_count=1 -> ddr_req\n",
                        task->task_id, req.addr);
                 fflush(stdout);
@@ -213,6 +218,7 @@ void iommu_top::ptw_req_process_thread() {
             req.addr = task->walk_ctx.read_addr;
             req.size = task->walk_ctx.read_size;
             req.is_write = false;
+            req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT]
             task->walk_ctx.ddr_read_count = 1;
             printf("[PTW_REQ] task_id=%u, walk_phase=%d, addr=0x%lx, size=%d, read_count=1 -> ddr_req\n",
                    task->task_id, task->walk_ctx.walk_phase, req.addr, req.size);
@@ -262,6 +268,15 @@ void iommu_top::ptw_rsp_process_thread() {
         ptw_walks_mtx.unlock();
 
         memcpy(task->walk_ctx.read_buf, rsp.data, rsp.data_length);
+
+        // [STAT] 计算单次DDR访问延时
+        double ddr_latency_ns = sc_time_stamp().to_seconds() * 1e9 - rsp.submit_time_ns;
+        if (ddr_latency_ns > ptw_max_ddr_latency_ns)
+            ptw_max_ddr_latency_ns = ddr_latency_ns;
+        if (ddr_latency_ns < ptw_min_ddr_latency_ns)
+            ptw_min_ddr_latency_ns = ddr_latency_ns;
+        ptw_total_ddr_latency_ns += ddr_latency_ns;
+        ptw_ddr_latency_count++;
 
         bool walk_complete = false;
         bool walk_fault = false;
@@ -775,13 +790,30 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
+            printf("[PTW_STAT] task_id=%u completed, outstanding now=%d\n",
+                   task->task_id, ptw_outstanding_task_count);
+            fflush(stdout);
             ptw_total_completed++;  // [STAT]
             // [STAT] 累加PTW完成统计（walk complete）
             ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
+            
+            // [STAT] 更新DDR访问次数最大/最小值
+            if (task->walk_ctx.ddr_read_count > ptw_max_ddr_reads)
+                ptw_max_ddr_reads = task->walk_ctx.ddr_read_count;
+            if (task->walk_ctx.ddr_read_count < ptw_min_ddr_reads)
+                ptw_min_ddr_reads = task->walk_ctx.ddr_read_count;
+            
+            // [STAT] 计算任务总延时
             { auto _s = ptw_task_start_ns.find(task->task_id);
               if (_s != ptw_task_start_ns.end()) {
-                  ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
-                  ptw_task_start_ns.erase(_s); } }
+                  double task_latency = sc_time_stamp().to_seconds()*1e9 - _s->second;
+                  ptw_total_exec_ns += task_latency;
+                  if (task_latency > ptw_max_task_latency_ns)
+                      ptw_max_task_latency_ns = task_latency;
+                  if (task_latency < ptw_min_task_latency_ns)
+                      ptw_min_task_latency_ns = task_latency;
+                  ptw_task_start_ns.erase(_s);
+              } }
             ptw_task_completed_event.notify(SC_ZERO_TIME);
             
             // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
@@ -824,6 +856,7 @@ void iommu_top::ptw_rsp_process_thread() {
             req.addr = task->walk_ctx.read_addr;
             req.size = task->walk_ctx.read_size;
             req.is_write = (task->walk_ctx.walk_phase == PTW_AD_UPDATE);
+            req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT]
             if (req.is_write) {
                 memcpy(req.write_data, &task->walk_ctx.ad_pte,
                        task->walk_ctx.ptesize);

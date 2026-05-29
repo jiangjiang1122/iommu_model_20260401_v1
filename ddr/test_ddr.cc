@@ -84,7 +84,7 @@ void DDR_Module::ddr_dispatch_thread() {
         fflush(stdout);
 
         // Schedule into PEQ: response fires at dispatch_time + 100ns
-        ddr_peq.notify(*trans, sc_time(DDR_INTERNAL_LATENCY_NS, SC_NS));
+        ddr_peq.notify(*trans, sc_time(DDR_INTERNAL_LATENCY_NS,SC_NS));
     }
 }
 

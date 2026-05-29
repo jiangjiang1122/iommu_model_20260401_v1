@@ -373,7 +373,8 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
                            PageSize input_page_size = PageSize::PAGE_4K,
                            bool iova_is_va = true,
                            bool sv48 = true,
-                           bool gstage_x4 = false) {
+                           bool gstage_x4 = false,
+                           bool ad_bit_set = true) {  // [AD] A/D位是否已设置
     PTData data;
     data.reserved.valid = 1;
     data.reserved.trans_type = static_cast<uint32_t>(stage);
@@ -387,15 +388,15 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
     data.vs_pte.R = (permissions & 0x1U) ? 1U : 0U;
     data.vs_pte.W = (permissions & 0x2U) ? 1U : 0U;
     data.vs_pte.X = (permissions & 0x4U) ? 1U : 0U;
-    data.vs_pte.A = 1;
-    data.vs_pte.D = data.vs_pte.W;
+    data.vs_pte.A = ad_bit_set ? 1 : 0;  // [AD] 使用实际A位值
+    data.vs_pte.D = ad_bit_set ? data.vs_pte.W : 0;  // [AD] 使用实际D位值
 
     data.g_pte.V = 1;
     data.g_pte.R = data.vs_pte.R;
     data.g_pte.W = data.vs_pte.W;
     data.g_pte.X = data.vs_pte.X;
-    data.g_pte.A = 1;
-    data.g_pte.D = data.g_pte.W;
+    data.g_pte.A = ad_bit_set ? 1 : 0;  // [AD] 使用实际A位值
+    data.g_pte.D = ad_bit_set ? data.g_pte.W : 0;  // [AD] 使用实际D位值
 
     const spa_t base_spa = spa & ~(page_size_bytes(page_size) - 1ULL);
     const uint64_t ppn = base_spa >> 12;

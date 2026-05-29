@@ -33,11 +33,25 @@ void iommu_top::collector_pt_response_thread() {
                 // Convert CacheMessage response to task
                 pt_hit_response_to_task(resp, task);
 
-                // Route to forwarder
-                printf("[PT_CACHE] task_id=%u -> HIT, routing to fwd_fifo (pa=0x%lx)\n",
-                       task->task_id, task->pa);
-                fflush(stdout);
-                pt_cache_to_fwd_fifo.write(task);
+                // [AD] 检查 A/D 位是否需要更新
+                // 如果 Cache 中的 PTE 的 A/D 未设置，仍需送 PTW 进行硬件更新
+                bool need_ad_update = (task->vs_pte.A == 0 || (task->is_write && task->vs_pte.D == 0));
+                
+                if (need_ad_update && task->SADE == 1) {
+                    // A/D 未设置且 SADE=1，需要送 PTW 进行硬件更新
+                    printf("[PT_CACHE] task_id=%u -> HIT but A/D update needed (A=%d, D=%d), routing to PTW\n",
+                           task->task_id, task->vs_pte.A, task->vs_pte.D);
+                    fflush(stdout);
+                    
+                    task->state = TASK_PTW_REQ;
+                    pt_cache_to_ptw_fifo.write(task);
+                } else {
+                    // A/D 已设置或 SADE=0，直接转发
+                    printf("[PT_CACHE] task_id=%u -> HIT, routing to fwd_fifo (pa=0x%lx, A=%d, D=%d)\n",
+                           task->task_id, task->pa, task->vs_pte.A, task->vs_pte.D);
+                    fflush(stdout);
+                    pt_cache_to_fwd_fifo.write(task);
+                }
             } else {
                 pt_cache_mtx.unlock();
                 printf("[PT_CACHE] WARNING: task_id=%u not found in pending map!\n", resp.task_id);

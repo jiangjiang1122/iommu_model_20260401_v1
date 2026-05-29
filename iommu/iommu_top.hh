@@ -163,6 +163,16 @@ public:
     // ===================== PTW Per-Task Statistics =====================
     uint64_t ptw_total_ddr_reads;         // 所有PTW任务DDR读次数总和
     double   ptw_total_exec_ns;           // 所有PTW任务执行延时总和(ns)
+    // [STAT] PTW DDR访问详细统计
+    uint32_t ptw_max_ddr_reads;           // 单笔任务最大DDR访问次数
+    uint32_t ptw_min_ddr_reads;           // 单笔任务最小DDR访问次数
+    double   ptw_max_ddr_latency_ns;      // 单次DDR访问最大延时
+    double   ptw_min_ddr_latency_ns;      // 单次DDR访问最小延时
+    double   ptw_total_ddr_latency_ns;    // 单次DDR访问总延时（用于平均）
+    uint64_t ptw_ddr_latency_count;       // DDR延时采样次数
+    // [STAT] PTW任务延时统计
+    double   ptw_max_task_latency_ns;     // 单笔任务最大延时
+    double   ptw_min_task_latency_ns;     // 单笔任务最小延时
     std::map<uint32_t, double> ptw_task_start_ns; // task_id -> PTW入口时刻(ns)
 
     // ===================== End-to-End Latency Statistics =====================
@@ -365,6 +375,14 @@ public:
         peak_axi_master_0_outstanding(0),
         ptw_total_ddr_reads(0),
         ptw_total_exec_ns(0.0),
+        ptw_max_ddr_reads(0),
+        ptw_min_ddr_reads(999999),
+        ptw_max_ddr_latency_ns(0.0),
+        ptw_min_ddr_latency_ns(999999999.0),
+        ptw_total_ddr_latency_ns(0.0),
+        ptw_ddr_latency_count(0),
+        ptw_max_task_latency_ns(0.0),
+        ptw_min_task_latency_ns(999999999.0),
         iommu_total_e2e_latency_ns(0.0),
         steady_start_ns(0.0),
         steady_end_ns(0.0),

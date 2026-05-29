@@ -230,8 +230,9 @@ struct ddr_req_entry_t {
     uint32_t size;
     bool is_write;
     uint8_t write_data[64];
+    double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)
 
-    ddr_req_entry_t() : task_id(0), addr(0), size(0), is_write(false) {
+    ddr_req_entry_t() : task_id(0), addr(0), size(0), is_write(false), submit_time_ns(0.0) {
         memset(write_data, 0, sizeof(write_data));
     }
 };
@@ -242,8 +243,9 @@ struct ddr_rsp_entry_t {
     uint8_t data[64];
     uint32_t data_length;
     bool error;
+    double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)，从req传递到rsp
 
-    ddr_rsp_entry_t() : task_id(0), data_length(0), error(false) {
+    ddr_rsp_entry_t() : task_id(0), data_length(0), error(false), submit_time_ns(0.0) {
         memset(data, 0, sizeof(data));
     }
 };
@@ -255,9 +257,10 @@ struct ddr_pending_entry_t {
     uint64_t addr;
     uint32_t size;
     tlm::tlm_generic_payload* trans_ptr;
+    double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)
 
     ddr_pending_entry_t() : task_id(0), source_module(0), addr(0),
-                            size(0), trans_ptr(nullptr) {}
+                            size(0), trans_ptr(nullptr), submit_time_ns(0.0) {}
 };
 
 // ===================== Control Path DDR Request =====================

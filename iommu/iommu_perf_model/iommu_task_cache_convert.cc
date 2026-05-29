@@ -204,10 +204,20 @@ void pt_hit_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
         uint64_t page_size = 4096;  // Default 4K
         uint64_t offset = task->iova & (page_size - 1);
         task->pa = (ppn << 12) | offset;
+        
+        // [AD] 从 Cache 中提取 A/D 位信息
+        if (resp.stage == iommu::TransStage::STAGE2_ONLY) {
+            task->vs_pte.A = resp.pt_data.g_pte.A;
+            task->vs_pte.D = resp.pt_data.g_pte.D;
+        } else {
+            task->vs_pte.A = resp.pt_data.vs_pte.A;
+            task->vs_pte.D = resp.pt_data.vs_pte.D;
+        }
+        
         task->state = TASK_DONE;
         
-        printf("[CONVERT] task_id=%u <- PT_LOOKUP response (HIT, pa=0x%lx)\n",
-               task->task_id, task->pa);
+        printf("[CONVERT] task_id=%u <- PT_LOOKUP response (HIT, pa=0x%lx, A=%d, D=%d)\n",
+               task->task_id, task->pa, task->vs_pte.A, task->vs_pte.D);
         fflush(stdout);
     }
 }
@@ -263,6 +273,9 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
     
     req.from_prefetch = false;
     
+    // [AD] 判断 A/D 位是否已设置（从 DDR 读取的实际值）
+    bool ad_set = (task->vs_pte.A == 1 && (!task->is_write || task->vs_pte.D == 1));
+    
     // (4) 使用make_pt_data构造PTData
     // 根据task->pa和req.stage构造完整的PTData
     req.pt_data = iommu::make_pt_data(
@@ -273,12 +286,14 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
         iommu::PageSize::PAGE_4K,          // input_page_size
         (req.stage == iommu::TransStage::STAGE2_ONLY) ? false : true,  // iova_is_va
         req.pt_sv48,                       // sv48标志
-        req.pt_gstage_x4                   // gstage_x4标志
+        req.pt_gstage_x4,                  // gstage_x4标志
+        ad_set                             // [AD] A/D位实际值
     );
     
-    printf("[CONVERT] task_id=%u -> PT_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, pa=0x%lx, stage=%d, sv48=%d, x4=%d)\n",
+    printf("[CONVERT] task_id=%u -> PT_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, pa=0x%lx, stage=%d, sv48=%d, x4=%d, A=%d, D=%d)\n",
            task->task_id, task->GSCID, task->PSCID, task->iova, task->pa,
-           static_cast<int>(req.stage), req.pt_sv48, req.pt_gstage_x4);
+           static_cast<int>(req.stage), req.pt_sv48, req.pt_gstage_x4,
+           task->vs_pte.A, task->vs_pte.D);
     fflush(stdout);
     
     return req;

@@ -226,6 +226,7 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
         if (rsp.data_length > sizeof(rsp.data)) rsp.data_length = sizeof(rsp.data);
         memcpy(rsp.data, trans.get_data_ptr(), rsp.data_length);
         rsp.error = (trans.get_response_status() != tlm::TLM_OK_RESPONSE);
+        rsp.submit_time_ns = pending.submit_time_ns;  // [STAT] 传递时间戳
 
         // Route to corresponding rsp_ddr_fifo based on source_module
         // Use blocking write() to prevent silent drop when fifo is full
@@ -353,6 +354,7 @@ void iommu_top::ddr_arbiter_thread() {
             pending.source_module = source_module;
             pending.addr = req.addr;
             pending.size = req.size;
+            pending.submit_time_ns = req.submit_time_ns;  // [STAT] 传递时间戳
 
             // Allocate TLM payload
             tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload();
@@ -572,6 +574,23 @@ void iommu_top::print_cache_statistics() {
             printf("  PTW  avg exec lat:    %.1f ns  (%.3f us)\n",
                    ptw_total_exec_ns / ptw_total_completed,
                    ptw_total_exec_ns / ptw_total_completed / 1000.0);
+            
+            // [STAT] PTW详细DDR访问统计
+            printf("  ---\n");
+            printf("  PTW DDR access detail:\n");
+            printf("    Max DDR reads/task:  %u\n", ptw_max_ddr_reads);
+            printf("    Min DDR reads/task:  %u\n", ptw_min_ddr_reads == 999999 ? 0 : ptw_min_ddr_reads);
+            printf("    Avg DDR latency:     %.1f ns\n",
+                   ptw_ddr_latency_count > 0 ? ptw_total_ddr_latency_ns / ptw_ddr_latency_count : 0);
+            printf("    Max DDR latency:     %.1f ns\n", ptw_max_ddr_latency_ns);
+            printf("    Min DDR latency:     %.1f ns\n", ptw_min_ddr_latency_ns == 999999999.0 ? 0 : ptw_min_ddr_latency_ns);
+            printf("  ---\n");
+            printf("  PTW task latency:\n");
+            printf("    Max task latency:    %.1f ns  (%.3f us)\n",
+                   ptw_max_task_latency_ns, ptw_max_task_latency_ns / 1000.0);
+            printf("    Min task latency:    %.1f ns  (%.3f us)\n",
+                   ptw_min_task_latency_ns == 999999999.0 ? 0 : ptw_min_task_latency_ns,
+                   ptw_min_task_latency_ns == 999999999.0 ? 0 : ptw_min_task_latency_ns / 1000.0);
         }
         if (iommu_total_completed > 0) {
             double avg_e2e_ns = iommu_total_e2e_latency_ns / iommu_total_completed;
