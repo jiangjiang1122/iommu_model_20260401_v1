@@ -269,53 +269,64 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
     latency = SC_ZERO_TIME;
     hit_level = 0;
 
-    WalkerData candidate;
-    sc_time candidate_latency = SC_ZERO_TIME;
-    if (ptw_c3_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
-                        sv48_flag, x4_mode_flag, candidate, candidate_latency)) {
-        out_data = candidate;
-        hit_level = 3;
-        latency += candidate_latency;
+    // [串行全查] 查询所有三级 Cache，模拟并行查询的统计效果
+    // 每级都查询，不提前退出，最后仲裁返回最高级命中结果
+    
+    WalkerData data_c3, data_c2, data_c1;
+    sc_time lat_c3 = SC_ZERO_TIME, lat_c2 = SC_ZERO_TIME, lat_c1 = SC_ZERO_TIME;
+    bool hit_c3 = false, hit_c2 = false, hit_c1 = false;
+    
+    // 查询 C3
+    hit_c3 = ptw_c3_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
+                             sv48_flag, x4_mode_flag, data_c3, lat_c3);
+    if (hit_c3) {
         printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
                (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-               gscid, pscid, va, candidate.next_ppn);
+               gscid, pscid, va, data_c3.next_ppn);
         fflush(stdout);
-        return true;
     }
-    latency += candidate_latency;
-
-    candidate_latency = SC_ZERO_TIME;
-    if (ptw_c2_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
-                        sv48_flag, x4_mode_flag, candidate, candidate_latency)) {
-        out_data = candidate;
-        hit_level = 2;
-        latency += candidate_latency;
+    
+    // 查询 C2
+    hit_c2 = ptw_c2_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
+                             sv48_flag, x4_mode_flag, data_c2, lat_c2);
+    if (hit_c2) {
         printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
                (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-               gscid, pscid, va, candidate.next_ppn);
+               gscid, pscid, va, data_c2.next_ppn);
         fflush(stdout);
-        return true;
     }
-    latency += candidate_latency;
-
-    if (sv39_mode_ || !sv48_flag) {
-        return false;
+    
+    // 查询 C1（仅 Sv48 模式）
+    if (!sv39_mode_ && sv48_flag) {
+        hit_c1 = ptw_c1_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
+                                 sv48_flag, x4_mode_flag, data_c1, lat_c1);
+        if (hit_c1) {
+            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   gscid, pscid, va, data_c1.next_ppn);
+            fflush(stdout);
+        }
     }
-
-    candidate_latency = SC_ZERO_TIME;
-    if (ptw_c1_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
-                        sv48_flag, x4_mode_flag, candidate, candidate_latency)) {
-        out_data = candidate;
+    
+    // [仲裁] 按 C3 > C2 > C1 优先级选择最高级命中
+    if (hit_c3) {
+        out_data = data_c3;
+        hit_level = 3;
+        latency = lat_c3;  // 只计最高级的延时
+    } else if (hit_c2) {
+        out_data = data_c2;
+        hit_level = 2;
+        latency = lat_c2;
+    } else if (hit_c1) {
+        out_data = data_c1;
         hit_level = 1;
-        latency += candidate_latency;
-        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
-               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-               gscid, pscid, va, candidate.next_ppn);
-        fflush(stdout);
-        return true;
+        latency = lat_c1;
+    } else {
+        // 全未命中：延时累加
+        latency = lat_c3 + lat_c2 + lat_c1;
     }
-    latency += candidate_latency;
-    return false;
+    
+    return (hit_c3 || hit_c2 || hit_c1);
 }
 
 void WalkerCache::fill(gscid_t gscid, pscid_t pscid, iova_t va,
