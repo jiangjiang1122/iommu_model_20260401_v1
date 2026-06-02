@@ -13,7 +13,17 @@
 - [iommu_perf_params.hh](file://iommu/iommu_perf_model/iommu_perf_params.hh)
 - [iommu_perf_reorder.cc](file://iommu/iommu_perf_model/iommu_perf_reorder.cc)
 - [iommu_perf_model.hh](file://iommu/iommu_perf_model/iommu_perf_model.hh)
+- [iommu_top.cc](file://iommu/iommu_top.cc)
+- [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
+- [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 </cite>
+
+## 更新摘要
+**变更内容**
+- 移除了Forwarder线程中的串行延迟（FORWARDER_DELAY），提升了转发性能
+- 新增了全面的峰值统计功能，包括outstanding峰值监控
+- 增强了性能监控能力，支持更详细的性能分析
+- 更新了性能考量部分以反映最新的优化改进
 
 ## 目录
 1. [简介](#简介)
@@ -29,6 +39,8 @@
 ## 简介
 本文档深入解析IOMMU性能模型中的Forwarder/Fault模块实现机制。该模块负责数据包转发和故障处理两大核心功能，通过三个独立线程实现高性能的数据转发（PT Cache和MSIPT Cache路径）以及故障记录与命令队列处理。文档详细说明了数据包转发流程、命令队列处理、故障检测与报告机制，并提供故障类型处理策略、错误码定义和恢复机制的完整说明。
 
+**更新** 本版本反映了最新的性能优化改进，包括移除串行延迟和新增峰值统计功能。
+
 ## 项目结构
 Forwarder/Fault模块位于IOMMU性能模型子系统中，采用SystemC多线程架构设计，包含以下关键组件：
 
@@ -39,10 +51,14 @@ PTF["PT Forwarder<br/>PT Cache转发器"]
 MSF["MSIPT Forwarder<br/>MSIPT Cache转发器"]
 FCQ["Fault/CQ处理线程<br/>故障记录+命令队列处理"]
 end
-subgraph "性能模型参数"
-FP["Forwarder延迟<br/>2ns"]
+subgraph "性能优化参数"
+FP["移除串行延迟<br/>FORWARDER_DELAY=0ns"]
 RD["重排序输出延迟<br/>1ns"]
 OOL["全局outstanding上限<br/>256"]
+end
+subgraph "峰值统计监控"
+PS["峰值统计追踪器<br/>peak_*_outstanding"]
+PP["性能监控<br/>详细统计报告"]
 end
 subgraph "数据结构"
 TF["任务结构体<br/>iommu_task_t"]
@@ -62,6 +78,7 @@ RC --> TF
 **图表来源**
 - [iommu_perf_forwarder_fault_cq.cc:13-179](file://iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc#L13-L179)
 - [iommu_top.hh:251-257](file://iommu/iommu_top.hh#L251-L257)
+- [iommu_top.hh:153-161](file://iommu/iommu_top.hh#L153-L161)
 
 **章节来源**
 - [iommu_top.hh:251-257](file://iommu/iommu_top.hh#L251-L257)
@@ -78,6 +95,8 @@ Forwarder/Fault模块包含三个核心线程，每个线程都有特定的职�
 
 ### Fault/CQ处理线程
 负责故障记录、ATS请求分类处理以及命令队列的执行控制。
+
+**更新** 所有Forwarder线程现在移除了串行延迟，提升了转发效率。
 
 **章节来源**
 - [iommu_perf_forwarder_fault_cq.cc:13-179](file://iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc#L13-L179)
@@ -102,9 +121,9 @@ MSIPTW-->>Collector : 返回MSIPT Cache响应
 Collector->>PTForwarder : 发送PT Cache转发请求
 Collector->>MSIPTForwarder : 发送MSIPT Cache转发请求
 Collector->>FaultCQ : 发送故障处理请求
-PTForwarder->>Reorder : 标记任务就绪
-MSIPTForwarder->>Reorder : 标记任务就绪
-FaultCQ->>Reorder : 标记任务就绪
+PTForwarder->>Reorder : 标记任务就绪无延迟
+MSIPTForwarder->>Reorder : 标记任务就绪无延迟
+FaultCQ->>Reorder : 标记任务就绪无延迟
 Reorder->>Initiator : 按规则输出响应
 ```
 
@@ -116,7 +135,7 @@ Reorder->>Initiator : 按规则输出响应
 
 ### PT Forwarder组件分析
 
-PT Forwarder线程实现了PT Cache路径的高效数据转发：
+PT Forwarder线程实现了PT Cache路径的高效数据转发，现已移除串行延迟：
 
 ```mermaid
 flowchart TD
@@ -124,8 +143,7 @@ Start([开始处理]) --> CheckFIFO["检查pt_cache_to_fwd_fifo"]
 CheckFIFO --> HasData{"FIFO是否有数据?"}
 HasData --> |否| WaitEvent["等待数据写入事件"]
 HasData --> |是| ReadTask["读取任务"]
-ReadTask --> Delay["等待FORWARDER_DELAY(2ns)"]
-Delay --> SetState["设置任务状态为TASK_FORWARD"]
+ReadTask --> SetState["设置任务状态为TASK_FORWARD"]
 SetState --> CheckTrans{"是否有TLM负载?"}
 CheckTrans --> |否| MarkReady["标记重排序就绪"]
 CheckTrans --> |是| SetResponse["设置响应状态为TLM_OK_RESPONSE"]
@@ -136,6 +154,8 @@ ReleaseTask --> End([结束])
 WaitEvent --> ReadTask
 ```
 
+**更新** 移除了原有的2ns串行延迟，直接标记任务就绪，提升了转发效率。
+
 **图表来源**
 - [iommu_perf_forwarder_fault_cq.cc:13-53](file://iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc#L13-L53)
 
@@ -144,7 +164,7 @@ WaitEvent --> ReadTask
 
 ### MSIPT Forwarder组件分析
 
-MSIPT Forwarder线程处理MSI和MRIF类型的地址转换：
+MSIPT Forwarder线程处理MSI和MRIF类型的地址转换，同样移除了串行延迟：
 
 ```mermaid
 flowchart TD
@@ -152,8 +172,7 @@ Start([开始处理]) --> CheckFIFO["检查msipt_cache_to_fwd_fifo"]
 CheckFIFO --> HasData{"FIFO是否有数据?"}
 HasData --> |否| WaitEvent["等待数据写入事件"]
 HasData --> |是| ReadTask["读取任务"]
-ReadTask --> Delay["等待FORWARDER_DELAY(2ns)"]
-Delay --> SetState["设置任务状态为TASK_FORWARD"]
+ReadTask --> SetState["设置任务状态为TASK_FORWARD"]
 SetState --> CheckTrans{"是否有TLM负载?"}
 CheckTrans --> |否| MarkReady["标记重排序就绪"]
 CheckTrans --> |是| SetResponse["设置响应状态为TLM_OK_RESPONSE"]
@@ -169,6 +188,8 @@ ReleaseTask --> End([结束])
 WaitEvent --> ReadTask
 ```
 
+**更新** 移除了原有的2ns串行延迟，直接进行路由决策和标记就绪。
+
 **图表来源**
 - [iommu_perf_forwarder_fault_cq.cc:62-114](file://iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc#L62-L114)
 
@@ -177,13 +198,12 @@ WaitEvent --> ReadTask
 
 ### Fault/CQ处理组件分析
 
-Fault/CQ处理线程实现了复杂的故障分类和命令队列处理逻辑：
+Fault/CQ处理线程实现了复杂的故障分类和命令队列处理逻辑，移除了串行延迟：
 
 ```mermaid
 flowchart TD
 Start([开始处理]) --> ReadFIFO["读取collector_to_fault_fifo"]
-ReadFIFO --> Delay["等待FORWARDER_DELAY(2ns)"]
-Delay --> LogFault["调用report_fault记录故障"]
+ReadFIFO --> LogFault["调用report_fault记录故障"]
 LogFault --> CheckTrans{"是否有TLM负载?"}
 CheckTrans --> |否| DeleteTask["删除任务并返回"]
 CheckTrans --> |是| CheckATS{"是否为PCIe ATS请求?"}
@@ -200,6 +220,8 @@ SetUR --> MarkReady
 MarkReady --> End([结束])
 DeleteTask --> End
 ```
+
+**更新** 移除了原有的2ns串行延迟，直接进行故障记录和响应分类。
 
 **图表来源**
 - [iommu_perf_forwarder_fault_cq.cc:121-179](file://iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc#L121-L179)
@@ -311,12 +333,44 @@ Task --> FaultRec
 
 ## 性能考量
 
-Forwarder/Fault模块在设计时充分考虑了性能优化：
+Forwarder/Fault模块在设计时充分考虑了性能优化，最新版本移除了串行延迟并增强了监控能力：
 
 ### 转发延迟分析
-- **Forwarder延迟**: 2ns，确保快速数据转发
+- **Forwarder延迟**: 已移除（设为0ns），确保零延迟数据转发
 - **重排序输出延迟**: 1ns，维持输出节拍一致性
 - **全局outstanding上限**: 256，防止内存溢出
+
+### 峰值统计监控
+**新增** 全面的峰值统计功能，实时监控系统各组件的峰值使用情况：
+
+```mermaid
+graph TB
+subgraph "峰值统计追踪器"
+PG["IOMMU Global<br/>peak_iommu_global_outstanding"]
+PT["PTW<br/>peak_ptw_outstanding"]
+XD["xDTW DC walk<br/>peak_xdtw_dc_outstanding"]
+XP["xDTW PC walk<br/>peak_xdtw_pc_outstanding"]
+CD["Collector DC walk<br/>peak_collector_dc_walk_outstanding"]
+CP["Collector PC walk<br/>peak_collector_pc_walk_outstanding"]
+MD["DDR (master_1)<br/>peak_axi_master_1_outstanding"]
+MO["Output (master_0)<br/>peak_axi_master_0_outstanding"]
+end
+subgraph "监控输出"
+PO["Outstanding Peak Statistics<br/>峰值统计报告"]
+end
+PG --> PO
+PT --> PO
+XD --> PO
+XP --> PO
+CD --> PO
+CP --> PO
+MD --> PO
+MO --> PO
+```
+
+**图表来源**
+- [iommu_top.hh:153-161](file://iommu/iommu_top.hh#L153-L161)
+- [iommu_top.cc:622-640](file://iommu/iommu_top.cc#L622-L640)
 
 ### 队列管理策略
 - **写保序读乱序**: 写请求严格按task_id保序，读请求可乱序输出
@@ -324,6 +378,14 @@ Forwarder/Fault模块在设计时充分考虑了性能优化：
 - **并发流控**: 通过outstanding计数器控制AXI端口并发度
 
 ### 性能监控方法
+**增强** 新增详细的性能监控能力：
+
+#### 峰值统计报告
+- **IOMMU全局峰值**: 实时监控全局outstanding使用峰值
+- **各组件峰值**: PTW、xDTW、Collector等组件的outstanding峰值
+- **端口峰值**: DDR和输出端口的outstanding峰值
+
+#### 传统性能指标
 - **IOMMU完成计数**: `iommu_total_completed`统计翻译完成数量
 - **缓存命中率**: 全局统计变量跟踪各缓存命中情况
 - **字节计数器**: 监控各端口数据流量
@@ -332,6 +394,7 @@ Forwarder/Fault模块在设计时充分考虑了性能优化：
 - [iommu_perf_params.hh:131](file://iommu/iommu_perf_model/iommu_perf_params.hh#L131)
 - [iommu_perf_reorder.cc:89-154](file://iommu/iommu_perf_model/iommu_perf_reorder.cc#L89-L154)
 - [iommu_top.hh:144-152](file://iommu/iommu_top.hh#L144-L152)
+- [iommu_top.cc:622-640](file://iommu/iommu_top.cc#L622-L640)
 
 ## 故障处理指南
 
@@ -376,11 +439,17 @@ Forwarder/Fault模块在设计时充分考虑了性能优化：
 
 ## 结论
 
-Forwarder/Fault模块通过精心设计的多线程架构和严格的SPEC实现，提供了高效的IOMMU数据转发和故障处理能力。模块的主要优势包括：
+Forwarder/Fault模块通过精心设计的多线程架构和严格的SPEC实现，提供了高效的IOMMU数据转发和故障处理能力。最新版本的性能优化显著提升了系统性能：
 
+### 主要性能改进
+1. **零延迟转发**: 移除所有Forwarder线程的串行延迟，提升转发效率
+2. **全面峰值监控**: 新增详细的峰值统计功能，实时监控系统使用情况
+3. **增强性能分析**: 提供更丰富的性能监控指标和统计报告
+
+### 模块优势
 1. **高并发处理**: 三个独立线程并行处理不同类型的任务
 2. **精确的故障分类**: 基于SPEC的完整故障处理策略
 3. **灵活的队列管理**: 支持写保序读乱序的输出机制
 4. **完善的性能监控**: 提供详细的统计和监控指标
 
-该模块为IOMMU性能模型提供了坚实的基础设施，确保了系统的可靠性和高性能运行。
+**更新** 该模块为IOMMU性能模型提供了坚实的基础设施，确保了系统的可靠性和高性能运行，同时通过移除串行延迟和新增峰值统计功能进一步提升了性能表现。

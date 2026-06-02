@@ -1,0 +1,10 @@
+
+        SystemC 2.3.3-Accellera --- Mar 17 2022 13:55:26
+        Copyright (c) 1996-2018 by all Contributors,
+        ALL RIGHTS RESERVED
+2.3.3-Accellera
+Copyright (c) 1996-2018 by all Contributors,
+ALL RIGHTS RESERVED
+Starting RISC-V IOMMU SystemC Model
+[WALKER_CACHE] POWER-ON RESET: all entries invalidated (cleared=0)
+iommu_model: malloc.c:2617: sysmalloc: Assertion `(old_top == initial_top (av) && old_size == 0) || ((unsigned long) (old_size) >= MINSIZE && prev_inuse (old_top) && ((unsigned long) old_end & (pagesize - 1)) == 0)' failed.

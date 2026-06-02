@@ -30,11 +30,13 @@
 ## 简介
 本文件针对RISC-V IOMMU中的页表遍历缓存(Walker Cache)进行全面技术文档化。Walker Cache通过缓存多级页表遍历过程中的中间结果，显著减少重复访问时的DDR请求次数，从而大幅降低页表遍历延迟。其核心价值体现在：
 
-- **多级缓存架构**：包含PTWc_1(直接映射，缓存第1级中间结果)、PTWc_2(2路组相联，缓存第2级中间结果)、PTWc_3(4路组相联，缓存第3级中间结果)，形成从高层到低层的渐进式加速。
-- **智能查询策略**：按level 3→2→1顺序查询，命中即短路返回，避免不必要的低层访问。
-- **精确失效机制**：支持按GSCID/PSCID/VMA/GVMA等粒度进行精确或扫描失效，确保缓存一致性。
-- **更新优化**：支持并行更新多个level的中间结果，减少更新时延。
-- **与PT Cache协作**：Walker Cache缓存中间结果，PT Cache缓存最终页表项，两者配合实现端到端的翻译加速。
+- **全面串行查询机制**：查询所有三级缓存并在仲裁后返回最高级命中结果，替代早期退出策略
+- **智能缓存污染预防**：内置无效数据检查机制，防止缓存被无效中间结果污染
+- **上电复位功能**：初始化时主动清除所有缓存条目，确保干净的初始状态
+- **多级缓存架构**：包含PTWc_1(直接映射，缓存第1级中间结果)、PTWc_2(2路组相联，缓存第2级中间结果)、PTWc_3(4路组相联，缓存第3级中间结果)，形成从高层到低层的渐进式加速
+- **精确失效机制**：支持按GSCID/PSCID/VMA/GVMA等粒度进行精确或扫描失效，确保缓存一致性
+- **更新优化**：支持并行更新多个level的中间结果，减少更新时延
+- **与PT Cache协作**：Walker Cache缓存中间结果，PT Cache缓存最终页表项，两者配合实现端到端的翻译加速
 
 ## 项目结构
 Walker Cache位于iommu/cache_src/cache目录下，采用SystemC模块化设计，继承统一的CacheBase基类，具备完整的查找、填充、失效、统计等功能。整体文件组织如下：
@@ -81,7 +83,7 @@ CS --> RESP
 ## 核心组件
 Walker Cache由一个主模块和三个子表组成，每个子表负责缓存对应级别的中间结果。其核心接口包括：
 
-- **查找接口**：lookup(gscid, pscid, va, ...)，内部按level 3→2→1顺序查询，命中即返回
+- **查找接口**：lookup(gscid, pscid, va, ...)，现在采用全面串行查询机制，查询所有三级缓存并在仲裁后返回最高级命中结果
 - **填充接口**：fill(gscid, pscid, va, level, data)，按level写入对应子表
 - **更新接口**：update(gscid, pscid, va, kind, data1, data2, data3)，支持并行更新多级结果
 - **失效接口**：按GSCID/PSCID/VMA/GVMA等粒度进行精确或扫描失效
@@ -91,6 +93,8 @@ Walker Cache的关键特性：
 - **地址段提取**：根据Sv39/Sv48和x4模式提取对应level的地址段作为缓存索引
 - **Sv39模式兼容**：Sv39无PTWc_1，自动跳过第1级查询
 - **替换策略**：PTWc_1无替换(直接映射)，PTWc_2/3支持PLRU或SRRIP
+- **缓存污染预防**：内置无效数据检查，防止缓存被无效中间结果污染
+- **上电复位**：初始化时主动清除所有缓存条目
 
 **章节来源**
 - [walker_cache.h:15-92](file://iommu/cache_src/cache/walker_cache.h#L15-L92)
@@ -108,45 +112,37 @@ participant PTWC3 as "PTWc_3(4路)"
 participant PTWC2 as "PTWc_2(2路)"
 participant PTWC1 as "PTWc_1(1路)"
 PTW->>WC : 查询(gscid, pscid, va)
+Note over WC : 全面串行查询机制
 WC->>PTWC3 : lookup(level=3)
-alt 命中
-PTWC3-->>WC : 返回next_ppn
-WC-->>PTW : 命中(level=3)
-else 未命中
+PTWC3-->>WC : 返回next_ppn或未命中
 WC->>PTWC2 : lookup(level=2)
-alt 命中
-PTWC2-->>WC : 返回next_ppn
-WC-->>PTW : 命中(level=2)
-else 未命中
-WC->>PTWC1 : lookup(level=1)
-alt 命中
-PTWC1-->>WC : 返回next_ppn
-WC-->>PTW : 命中(level=1)
-else 未命中
-WC-->>PTW : 未命中
-end
-end
-end
+PTWC2-->>WC : 返回next_ppn或未命中
+WC->>PTWC1 : lookup(level=1) - 仅Sv48模式
+PTWC1-->>WC : 返回next_ppn或未命中
+Note over WC : 仲裁返回最高级命中
+WC-->>PTW : 返回最高级命中结果
 ```
 
 **图表来源**
-- [walker_cache.cpp:264-319](file://iommu/cache_src/cache/walker_cache.cpp#L264-L319)
+- [walker_cache.cpp:264-330](file://iommu/cache_src/cache/walker_cache.cpp#L264-L330)
 
 **章节来源**
-- [walker_cache.cpp:264-319](file://iommu/cache_src/cache/walker_cache.cpp#L264-L319)
+- [walker_cache.cpp:264-330](file://iommu/cache_src/cache/walker_cache.cpp#L264-L330)
 
 ## 详细组件分析
 
 ### WalkerCache类分析
 WalkerCache是顶层模块，管理三个WalkerSubCache子表。其主要职责包括：
-- **查询协调**：按level 3→2→1顺序查询，短路返回最高命中level
+- **全面串行查询**：查询所有三级缓存并在仲裁后返回最高级命中结果
 - **填充路由**：根据level将数据写入对应子表
 - **并行更新**：使用SystemC进程并行更新多个子表，最大化吞吐
 - **失效聚合**：提供按GSCID/PSCID/VMA/GVMA的失效接口
+- **上电复位**：初始化时主动清除所有缓存条目
 
 ```mermaid
 classDiagram
 class WalkerCache {
++WalkerCache(name, cfg1, cfg2, cfg3, stats)
 +lookup(gscid, pscid, va, ...)
 +fill(gscid, pscid, va, level, data)
 +update(gscid, pscid, va, kind, data1, data2, data3)
@@ -166,7 +162,7 @@ class WalkerSubCache {
 +invalidate_by_gscid(...)
 +invalidate_by_gscid_pscid(...)
 +invalidate_global()
--hash_function(tag)
++hash_function(tag)
 }
 WalkerCache --> WalkerSubCache : "管理3个子表"
 ```
@@ -185,6 +181,7 @@ WalkerSubCache继承自CacheBase，实现具体的查找、更新和失效逻辑
 - **查找流程**：hash→set内way比较→命中返回，未命中继续
 - **更新策略**：支持直接写入(direct_write)和普通更新两种路径，避免无效数据污染
 - **失效策略**：支持精确失效(仅hash定位set)和扫描失效(全表扫描)
+- **缓存污染预防**：检查数据有效性(valid)，无效数据直接跳过更新
 
 ```mermaid
 flowchart TD
@@ -343,6 +340,25 @@ CacheBase对各类操作的延迟进行了精细建模：
 - **写入延迟(write_way_latency_cycles)**：1周期
 - **索引计算延迟(fill_compute_index_*)**：命中1、空闲2、替换4周期
 
+### 全面串行查询优化
+WalkerCache::lookup现在采用全面串行查询机制：
+- **查询所有三级缓存**：不提前退出，最后仲裁返回最高级命中结果
+- **延迟统计**：每级查询都有独立的延迟统计，便于性能分析
+- **仲裁策略**：按C3 > C2 > C1优先级选择最高级命中
+- **未命中处理**：全未命中时延迟累加
+
+### 缓存污染预防机制
+WalkerSubCache::update_entry内置了缓存污染预防：
+- **无效数据检查**：检查WalkerData.valid字段
+- **跳过更新**：无效数据直接跳过，记录调试信息
+- **防止误命中**：避免将(next_ppn=0x0, valid=0)写入缓存
+
+### 上电复位功能
+WalkerCache构造函数实现了上电复位：
+- **主动失效**：初始化时调用invalidate_global清除所有条目
+- **状态监控**：记录清除的条目数量
+- **确保清洁**：避免残留数据影响系统行为
+
 ### 并行更新优化
 WalkerCache::update支持并行更新多个子表，使用SystemC进程池：
 - **条件更新**：仅在对应level有效且非Sv39模式下更新PTWc_1
@@ -353,6 +369,8 @@ WalkerCache::update支持并行更新多个子表，使用SystemC进程池：
 - [default_config.json:45-59](file://iommu/cache_config/default_config.json#L45-L59)
 - [cache_base.h:154-202](file://iommu/cache_src/cache/cache_base.h#L154-L202)
 - [walker_cache.cpp:347-435](file://iommu/cache_src/cache/walker_cache.cpp#L347-L435)
+- [walker_cache.cpp:55-71](file://iommu/cache_src/cache/walker_cache.cpp#L55-L71)
+- [walker_cache.cpp:253-260](file://iommu/cache_src/cache/walker_cache.cpp#L253-L260)
 
 ## 故障排除指南
 Walker Cache相关的常见问题与排查方法：
@@ -361,6 +379,8 @@ Walker Cache相关的常见问题与排查方法：
 现象：缓存命中但返回无效数据
 原因：更新了无效的中间结果(valid=0)
 解决：WalkerSubCache::update_entry已内置保护，检查数据构造逻辑
+
+**更新**：现在有专门的缓存污染预防机制，无效数据会被自动跳过
 
 ### 命中率偏低
 可能原因：
@@ -378,14 +398,24 @@ Walker Cache相关的常见问题与排查方法：
 原因：Walker Cache查询阻塞
 解决：确保walker_response_fifo深度充足(≥16)，避免背压
 
+### 上电状态异常
+现象：系统启动时出现异常行为
+原因：缓存中残留数据影响初始化
+解决：WalkerCache构造函数已实现上电复位，检查初始化日志
+
+**更新**：现在有上电复位功能，初始化时会主动清除所有缓存条目
+
 **章节来源**
 - [walker_cache.cpp:55-71](file://iommu/cache_src/cache/walker_cache.cpp#L55-L71)
 - [cache_base.h:560-647](file://iommu/cache_src/cache/cache_base.h#L560-L647)
+- [walker_cache.cpp:253-260](file://iommu/cache_src/cache/walker_cache.cpp#L253-L260)
 
 ## 结论
 Walker Cache通过缓存多级页表遍历中间结果，实现了对重复访问场景的显著加速。其设计特点包括：
+- **全面串行查询机制**：查询所有三级缓存并在仲裁后返回最高级命中结果
+- **智能缓存污染预防**：内置无效数据检查，防止缓存被无效中间结果污染
+- **上电复位功能**：初始化时主动清除所有缓存条目，确保干净的初始状态
 - **分层缓存架构**：PTWc_1/2/3分别缓存不同层级的中间结果
-- **智能查询策略**：按level降序查询，命中即短路
 - **精确失效机制**：支持多种粒度的失效策略
 - **并行更新优化**：最大化更新吞吐
 - **与PT Cache协作**：形成从中间结果到最终页表项的完整加速链
@@ -395,6 +425,7 @@ Walker Cache通过缓存多级页表遍历中间结果，实现了对重复访�
 - 启用适当的替换策略(SRRIP适用于高冲突场景)
 - 监控统计指标，及时发现异常
 - 合理配置FIFO深度，避免背压
+- 利用上电复位功能确保系统稳定启动
 
 ## 附录
 
@@ -411,6 +442,18 @@ Walker Cache通过缓存多级页表遍历中间结果，实现了对重复访�
 - **WalkerTag**：缓存标签，包含gscid、pscid、level、va_segment等
 - **WalkerUpdateKind**：更新类型枚举，支持批量更新
 
+### 缓存污染预防机制
+- **无效数据检测**：检查WalkerData.reserved.valid字段
+- **自动跳过更新**：无效数据直接跳过，记录调试信息
+- **防止误命中**：避免将无效中间结果写入缓存
+
+### 上电复位功能
+- **初始化清除**：构造函数中主动调用invalidate_global
+- **状态监控**：记录清除的条目数量
+- **确保清洁**：避免残留数据影响系统行为
+
 **章节来源**
 - [types.h:424-474](file://iommu/cache_src/common/types.h#L424-L474)
 - [types.h:573-589](file://iommu/cache_src/common/types.h#L573-L589)
+- [walker_cache.cpp:55-71](file://iommu/cache_src/cache/walker_cache.cpp#L55-L71)
+- [walker_cache.cpp:253-260](file://iommu/cache_src/cache/walker_cache.cpp#L253-L260)

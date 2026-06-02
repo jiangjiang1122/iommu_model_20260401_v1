@@ -138,7 +138,7 @@ static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = 256;
 static const uint32_t REORDER_OUTPUT_DELAY = 1;
 
 // ===================== SLINK NoC延迟参数 =====================
-static const uint32_t SLINK_NOC_LATENCY_NS = 300;           // SLINK NoC单趟延时(ns)，300ns（性能分析场景）
+static const uint32_t SLINK_NOC_LATENCY_NS = 2000;    // [TEST T2] SLINK NoC单趟延迟(ns), 2us
 
 // ===================== 稳态IOPS采样窗口 =====================
 // 跳过前10%和后10%，只统计中间80%稳定段的IOPS
@@ -151,5 +151,3 @@ static const uint32_t MAX_DEVICES = 64;           // 最大设备数
 static const uint32_t MAX_PROCESSES = 64;        // 最大进程数
 static const uint32_t MAX_DEVID_WIDTH = 24;         // 设备ID最大位宽
 
-
-#endif // __IOMMU_PERF_PARAMS_HH__
