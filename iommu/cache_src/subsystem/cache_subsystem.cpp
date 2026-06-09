@@ -513,6 +513,7 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_RESPONSE;
     resp.task_id = req.task_id;
+    resp.iova = req.iova;  // FIX: 复制IOVA到响应
     PTData data;
     resp.hit = pt_cache_->lookup_pt(req.gscid, req.pscid, req.iova, req.stage,
                                     req.pt_sv48,
@@ -520,11 +521,68 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                                     data, resp.latency);
     resp.gscid = req.gscid;
     resp.pscid = req.pscid;
+    
     if (resp.hit) {
         resp.stage = pt_stage(data);
         resp.from_prefetch = pt_from_prefetch(data);
         resp.pt_data = data;
+    } else if (pt_dedup_enabled_ && dedup_buffer_ != nullptr) {
+        // [NEW] MISS + 去重使能：自动插入占位CL（lookup+insert原子操作）
+        uint64_t page_iova = req.iova & ~0xFFFULL;  // 4KB对齐
+        
+        // 步骤1: 分配Buffer Entry
+        uint8_t head_idx = dedup_buffer_->allocate_entry();
+        if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
+            // 步骤2: 填充Buffer Entry
+            auto& entry = dedup_buffer_->entries[head_idx];
+            entry.gscid = req.gscid;
+            entry.pscid = req.pscid;
+            entry.iova = req.iova;
+            entry.stage = req.stage;
+            entry.sv48 = req.pt_sv48;
+            entry.gstage_x4 = req.pt_gstage_x4;
+            entry.task_ptr = nullptr;  // 初始化为nullptr，collector层会填充
+            entry.next_index = DEDUP_BUFFER_INVALID_IDX;
+            
+            // 步骤3: 插入占位CL到PT Cache
+            sc_time insert_latency;
+            bool insert_success = pt_cache_->insert_placeholder(
+                req.gscid, req.pscid, page_iova,
+                req.stage, req.pt_sv48, req.pt_gstage_x4,
+                head_idx, head_idx,  // head_index = tail_index = head_idx
+                true,  // is_req = 1（主任务）
+                &insert_latency
+            );
+            
+            if (insert_success) {
+                // 步骤4: 返回HIT（占位CL已插入）
+                resp.hit = true;
+                resp.dedup_head_index = head_idx;  // 传递Buffer索引给collector
+                resp.latency += insert_latency;
+                
+                // 填充resp.pt_data，标记为占位CL
+                resp.pt_data.reserved.is_ph = 1;
+                resp.pt_data.reserved.head_index = head_idx;
+                resp.pt_data.reserved.tail_index = head_idx;
+                resp.pt_data.reserved.is_req = 1;
+                resp.pt_data.reserved.valid = 1;
+                
+                printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, inserted placeholder (head_idx=%u, iova=0x%lx)\n",
+                       req.task_id, head_idx, page_iova);
+                fflush(stdout);
+            } else {
+                // 插入失败（Cache满），释放Buffer Entry
+                dedup_buffer_->free_entry(head_idx);
+                printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, placeholder insert FAILED (Cache full)\n",
+                       req.task_id);
+                fflush(stdout);
+            }
+        } else {
+            printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, Buffer full\n", req.task_id);
+            fflush(stdout);
+        }
     }
+    
     return resp;
 }
 
@@ -532,6 +590,7 @@ CacheMessage CacheSubsystem::execute_walker_request(const CacheMessage& req) {
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_RESPONSE;
     resp.task_id = req.task_id;
+    resp.iova = req.iova;  // FIX: 复制IOVA到响应
     WalkerData data;
     uint8_t hit_level = 0;
     resp.hit = walker_cache_->lookup(req.gscid, req.pscid, req.iova,

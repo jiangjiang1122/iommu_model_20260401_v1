@@ -76,6 +76,12 @@ public:
     // 启用/关闭 PTWc_1 (Sv39模式关闭)
     void set_sv39_mode(bool sv39) { sv39_mode_ = sv39; }
 
+    // 获取更新统计
+    uint64_t get_update_ptwc_123_count() const { return update_ptwc_123_count_; }
+    uint64_t get_update_ptwc_23_count() const { return update_ptwc_23_count_; }
+    uint64_t get_update_ptwc_3_count() const { return update_ptwc_3_count_; }
+    uint64_t get_update_none_count() const { return update_none_count_; }
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -88,6 +94,12 @@ private:
     std::unique_ptr<WalkerSubCache> ptw_c3_;
 
     bool sv39_mode_ = false;
+
+    // 更新类型统计
+    uint64_t update_ptwc_123_count_ = 0;  // PTWC_1_2_3 更新次数
+    uint64_t update_ptwc_23_count_ = 0;   // PTWC_2_3 更新次数
+    uint64_t update_ptwc_3_count_ = 0;    // PTWC_3 更新次数
+    uint64_t update_none_count_ = 0;      // NONE 跳过次数（避免冗余更新）
 
 };
 

@@ -126,6 +126,10 @@ private:
     void process_next_invalidation_request();
     void push_fifo(sc_fifo<CacheMessage>& fifo, const CacheMessage& msg);
     bool pop_fifo(sc_fifo<CacheMessage>& fifo, CacheMessage& msg);
+    
+    // NEW: Public accessor for PT Cache (用于去重+预取模块)
+    PTCache* get_pt_cache() { return pt_cache_.get(); }
+    
     CacheMessage execute_dc_request(const CacheMessage& req);
     CacheMessage execute_pc_request(const CacheMessage& req);
     CacheMessage execute_pt_request(const CacheMessage& req);

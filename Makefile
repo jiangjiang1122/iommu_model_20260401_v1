@@ -3,6 +3,8 @@
 # Test scenario selection:
 #   make TEST=sv39_bare       (default) Sv39 + Bare, 2000 requests
 #   make TEST=sv48_bare       Sv48 + Bare, 1000 requests
+#   make test_dedup_unit      PT Cache去重+预取单元测试
+#   make test_dedup_integration PT Cache去重+预取集成测试
 #
 TEST ?= sv39_bare
 
@@ -62,6 +64,7 @@ CXX_SOURCES = \
     iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc \
     iommu/iommu_perf_model/iommu_perf_xdtw.cc \
     iommu/iommu_perf_model/iommu_perf_ptw.cc \
+    iommu/iommu_perf_model/iommu_perf_pt_dedup_flush.cc \
     iommu/iommu_perf_model/iommu_perf_msipt_cache.cc \
     iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc \
     iommu/iommu_perf_model/iommu_perf_reorder.cc \
@@ -124,7 +127,29 @@ clean:
 rebuild: clean all
 
 # Phony targets
-.PHONY: all clean rebuild
+.PHONY: all clean rebuild test_dedup_unit test_dedup_integration
+
+# ===================== Unit Test Target =====================
+test_dedup_unit:
+	@echo "=========================================="
+	@echo "编译 PT Cache去重+预取 单元测试"
+	@echo "=========================================="
+	g++ -std=c++17 -Wall -Wextra -g \
+		-o test_dedup_unit test_dedup_prefetch_unit.cpp
+	@echo "✅ 单元测试编译成功"
+	@echo ""
+	@echo "=========================================="
+	@echo "运行单元测试"
+	@echo "=========================================="
+	./test_dedup_unit
+
+# ===================== Integration Test Target =====================
+test_dedup_integration: iommu_model
+	@echo "=========================================="
+	@echo "运行 PT Cache去重+预取 集成测试"
+	@echo "=========================================="
+	chmod +x test_integration_dedup_prefetch.sh
+	./test_integration_dedup_prefetch.sh
 
 # Dependencies
 iommu_command_queue.o: iommu_struct.hh iommu_registers.hh iommu_data_structures.hh

@@ -417,21 +417,71 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
         has_update = true;
     }
     
-    // 设置 update kind：根据实际缓存的中间结果层级
-    // Walker Cache 只缓存中间映射，不缓存叶子节点
-    if (task->walk_ctx.walker_cache_entries.valid_level0) {
-        // Sv48: 有 PTWc_1/PTWc_2/PTWc_3 三级缓存
-        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
-    } else if (task->walk_ctx.walker_cache_entries.valid_level1) {
-        // 有 PTWc_2/PTWc_3 两级缓存 (Sv39 或 Sv48 的浅层 walk)
-        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
-    } else if (task->walk_ctx.walker_cache_entries.valid_level2) {
-        // 只有 PTWc_3 一级缓存
-        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+    // 设置 update kind：根据 lookup 命中层级和 PTW 访问层级共同决定
+    // 核心原则：只更新 lookup 未命中的层级，避免冗余更新
+    //
+    // Sv39 场景（当前测试场景）：
+    //   - walker_hit_level=3 (c3 hit): PTW只访问L0(叶子)，无需更新
+    //   - walker_hit_level=2 (c2 hit): PTW访问L1→L0，需更新c3 (L1中间结果)
+    //   - walker_hit_level=0 (miss):   PTW访问L2→L1→L0，需更新c2+c3
+    //
+    // Sv48 场景：
+    //   - walker_hit_level=3 (c3 hit): PTW访问L1→L0，需更新c3
+    //   - walker_hit_level=2 (c2 hit): PTW访问L2→L1→L0，需更新c2+c3
+    //   - walker_hit_level=1 (c1 hit): PTW访问L3→L2→L1→L0，需更新c1+c2+c3
+    //   - walker_hit_level=0 (miss):   PTW访问L3→L2→L1→L0，需更新c1+c2+c3
+    
+    if (task->walk_ctx.walker_hit_level == 3) {
+        // c3 命中：L2级已缓存，无需更新（Sv39）或只需更新c3（Sv48）
+        if (task->iosatp.MODE == IOSATP_Sv48) {
+            // Sv48: c3 hit意味着L3缓存，PTW访问L2→L1→L0，需要更新c3
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        } else {
+            // Sv39: c3 hit意味着L2缓存，PTW只访问L0(叶子)，无需更新
+            req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
+        }
+    } else if (task->walk_ctx.walker_hit_level == 2) {
+        // c2 命中，c3 未命中
+        // 架构原理：c2 hit意味着L2级结果(PPN_L2)已缓存
+        //          c3 miss意味着L1级结果(PPN_L1)未缓存
+        //          PTW访问了L1，获取了PPN_L1
+        //          必须更新c3！写入(PPN_L2 + PPN_L1)
+        
+        if (task->iosatp.MODE == IOSATP_Sv48) {
+            // Sv48: 同时更新c2（刷新LRU）
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+        } else {
+            // Sv39: 只更新c3
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        }
+    } else if (task->walk_ctx.walker_hit_level == 1) {
+        // c1 命中（仅Sv48）：L3+L2+L1已缓存，PTW访问L0，需更新c1+c2+c3
+        if (task->walk_ctx.walker_cache_entries.valid_level0) {
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+        } else {
+            req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
+        }
+    } else {
+        // 全部未命中：根据 PTW 实际访问的层级决定
+        if (task->walk_ctx.walker_cache_entries.valid_level0) {
+            // Sv48: 有 PTWc_1/PTWc_2/PTWc_3 三级缓存
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+        } else if (task->walk_ctx.walker_cache_entries.valid_level1) {
+            // 有 PTWc_2/PTWc_3 两级缓存 (Sv39 或 Sv48 的浅层 walk)
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+        } else if (task->walk_ctx.walker_cache_entries.valid_level2) {
+            // 只有 PTWc_3 一级缓存
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        } else {
+            // 没有中间结果（理论不会发生）
+            req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
+        }
     }
     
-    printf("[CONVERT] task_id=%u -> WALKER_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, L2=%d, L1=%d, L0=%d)\n",
+    printf("[CONVERT] task_id=%u -> WALKER_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, hit_level=%d, kind=%d, L2=%d, L1=%d, L0=%d)\n",
            task->task_id, task->GSCID, task->PSCID, task->iova,
+           task->walk_ctx.walker_hit_level,
+           static_cast<int>(req.walker_update_kind),
            task->walk_ctx.walker_cache_entries.valid_level2,
            task->walk_ctx.walker_cache_entries.valid_level1,
            task->walk_ctx.walker_cache_entries.valid_level0);

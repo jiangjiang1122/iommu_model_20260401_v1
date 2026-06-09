@@ -11,6 +11,11 @@
 #include "iommu_req_rsp.hh"
 #include "iommu_perf_params.hh"
 
+// Forward declaration for iommu namespace types
+namespace iommu {
+    using iova_t = uint64_t;
+}
+
 // ===================== Task State Enum =====================
 enum task_state_t {
     TASK_INIT = 0,
@@ -64,7 +69,8 @@ enum ptw_walk_phase_t {
     PTW_VS_WALK = 0,
     PTW_GS_IMPLICIT,
     PTW_GS_EXPLICIT,
-    PTW_AD_UPDATE
+    PTW_AD_UPDATE,
+    PTW_PREFETCH_WAIT  // NEW: 等待预取DDR响应
 };
 
 // ===================== MSIPTW Walk Phase Enum =====================
@@ -113,6 +119,54 @@ struct walk_context_t {
         bool valid_level1 = false;
         bool valid_level0 = false;
     } walker_cache_entries;
+
+    // Walker Cache lookup命中层级（用于update时避免冗余更新）
+    // 0=全部miss, 3=c3 hit, 2=c2 hit, 1=c1 hit
+    uint8_t walker_hit_level = 0;
+
+    // NEW: 预取相关
+    bool      prefetch_enabled = false;     // 是否启用预取
+    uint32_t  prefetch_depth = 0;           // 预取深度（页数量，默认=8）
+    uint64_t  prefetch_base_iova = 0;       // 预取起始IOVA
+    uint32_t  prefetch_count = 0;           // 已预取的页数量
+    uint64_t  prefetch_iovas[16];           // 预取的IOVA列表（最大16页）
+
+    // NEW: 主任务特有: 预取组状态追踪
+    struct {
+        uint32_t completed_count = 0;       // 已完成的walk数
+        bool     all_completed = false;     // 全部完成标志
+        uint64_t group_iovas[17];           // 组内所有IOVA
+        spte_t   group_vs_ptes[17];         // 组内所有VS-stage PTE
+        gpte_t   group_g_ptes[17];          // 组内所有G-stage PTE
+        uint64_t group_pas[17];             // 组内所有PA
+        uint64_t group_page_szs[17];        // 组内所有页大小
+    } prefetch_group;
+    
+    // NEW: PT Cache批量更新(保留原有字段)
+    uint32_t  pt_update_count = 0;          // 需要更新的PT Cache条目数
+    struct {
+        uint64_t iova;                        // 目标IOVA
+        spte_t vs_pte;                      // VS-stage PTE
+        gpte_t g_pte;                       // G-stage PTE
+        uint64_t pa;                        // 物理地址
+        uint64_t page_sz;                   // 页大小
+    } pt_updates[17];                       // 1个主任务 + 16个预取
+
+    // NEW: 预取等待状态
+    int8_t prefetch_ddr_pending = 0;        // 待完成的预取DDR响应数
+    
+    // NEW: 预取组管理(Burst预取方案)
+    uint32_t  prefetch_group_id = 0;        // 预取组ID(同一组共享,使用主task_id)
+    bool      is_prefetch_task = false;     // 是否为预取任务(非主任务)
+    uint32_t  prefetch_idx = 0;             // 预取索引(0=主任务, 1~D=预取)
+    uint32_t  prefetch_total = 0;           // 预取组总任务数(1+D)
+    uint64_t  leaf_pt_base_addr = 0;        // Leaf页表基址(用于地址计算)
+    uint8_t   leaf_ptesize = 8;             // Leaf页表PTE大小
+    
+    // NEW: Burst预取专用字段
+    uint64_t  burst_start_addr = 0;         // Burst DDR读起始地址
+    uint32_t  burst_size = 0;               // Burst DDR读大小(字节)
+    bool      prefetch_burst_pending = false;  // Burst DDR请求是否未完成
 
     walk_context_t() = default;
 };
@@ -178,6 +232,9 @@ struct iommu_task_t {
     uint8_t is_bare_translation;
     uint8_t is_b_transport;         // 1 if task created via b_transport (don't delete in forwarder)
 
+    // NEW: 去重模块相关
+    uint8_t dedup_head_index = 0xFF;  // Buffer任务链头指针（0-255，0xFF=无效）
+
     // Pipeline state
     task_state_t state;
     uint8_t dc_valid;
@@ -206,6 +263,7 @@ struct iommu_task_t {
           is_msi(0), is_mrif(0), mrif_nid(0), dest_mrif_addr(0),
           cause(0), iotval(0), iotval2(0),
           is_bare_translation(0), is_b_transport(0),
+          dedup_head_index(0xFF),
           state(TASK_INIT), dc_valid(0), dc_hit(0), pc_valid(0), pc_hit(0),
           need_pc(0), tlm_trans_ptr(nullptr), walk_ctx() {}
 

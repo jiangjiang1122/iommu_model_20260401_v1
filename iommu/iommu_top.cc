@@ -557,6 +557,35 @@ void iommu_top::print_cache_statistics() {
     }
     printf("==========================================\n\n");
 
+    // Walker Cache Update Statistics
+    printf("========== Walker Cache Update Statistics ==========\n");
+    printf("  PTWC_1_2_3 updates:  %lu  (update c1+c2+c3)\n", 
+           (unsigned long)cache_sub.walker_cache().get_update_ptwc_123_count());
+    printf("  PTWC_2_3 updates:    %lu  (update c2+c3)\n",
+           (unsigned long)cache_sub.walker_cache().get_update_ptwc_23_count());
+    printf("  PTWC_3 updates:      %lu  (update c3 only)\n",
+           (unsigned long)cache_sub.walker_cache().get_update_ptwc_3_count());
+    printf("  NONE (skipped):      %lu  (redundant updates avoided)\n",
+           (unsigned long)cache_sub.walker_cache().get_update_none_count());
+    uint64_t total_updates = cache_sub.walker_cache().get_update_ptwc_123_count() +
+                             cache_sub.walker_cache().get_update_ptwc_23_count() +
+                             cache_sub.walker_cache().get_update_ptwc_3_count();
+    uint64_t total_requests = total_updates + cache_sub.walker_cache().get_update_none_count();
+    printf("  Total updates:       %lu\n", (unsigned long)total_updates);
+    printf("  Total requests:      %lu\n", (unsigned long)total_requests);
+    if (total_requests > 0) {
+        printf("  Update distribution:\n");
+        printf("    PTWC_1_2_3: %.1f%%\n", 
+               100.0 * cache_sub.walker_cache().get_update_ptwc_123_count() / total_requests);
+        printf("    PTWC_2_3:   %.1f%%\n",
+               100.0 * cache_sub.walker_cache().get_update_ptwc_23_count() / total_requests);
+        printf("    PTWC_3:     %.1f%%\n",
+               100.0 * cache_sub.walker_cache().get_update_ptwc_3_count() / total_requests);
+        printf("    NONE:       %.1f%%  (redundancy elimination rate)\n",
+               100.0 * cache_sub.walker_cache().get_update_none_count() / total_requests);
+    }
+    printf("======================================================\n\n");
+
     // IOMMU / PTW IOPS
     double sim_time_sec = sc_time_stamp().to_seconds();
     printf("========== IOMMU / PTW Throughput (IOPS) ==========\n");

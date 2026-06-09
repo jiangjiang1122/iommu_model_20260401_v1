@@ -99,9 +99,10 @@ enum class CacheMsgType : uint8_t {
 };
 
 enum class WalkerUpdateKind : uint8_t {
-    PTWC_1_2_3,
-    PTWC_2_3,
-    PTWC_3
+    NONE,           // 不需要更新（lookup已命中所有层级）
+    PTWC_1_2_3,     // 更新 PTWc_1/PTWc_2/PTWc_3
+    PTWC_2_3,       // 更新 PTWc_2 和 PTWc_3
+    PTWC_3          // 仅更新 PTWc_3
 };
 
 struct CacheMessage;
@@ -220,8 +221,12 @@ union pt_reserved_t {
         uint32_t iova_is_va:1;
         uint32_t sv48:1;
         uint32_t gstage_x4:1;
+        uint32_t is_ph:1;              // 占位标志（1=占位，0=常规）
+        uint32_t head_index:8;         // 链表头Buffer编号（创建后永久不变）
+        uint32_t tail_index:8;         // [新增] 链表尾Buffer编号
+        uint32_t is_req:1;             // [新增] 1=主任务(有实际请求), 0=预取占位
         uint32_t replacement_info:2;
-        uint32_t reserved:16;
+        uint32_t reserved:6;           // 减少9bit以容纳新字段
     };
     uint32_t raw = 0;
 };
@@ -401,24 +406,10 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
     const spa_t base_spa = spa & ~(page_size_bytes(page_size) - 1ULL);
     const uint64_t ppn = base_spa >> 12;
 
-    switch (page_size) {
-        case PageSize::PAGE_4K:
-            data.vs_pte.PPN = ppn;
-            data.g_pte.PPN = ppn;
-            break;
-        case PageSize::PAGE_2M:
-            data.vs_pte.PPN = ppn;
-            data.g_pte.PPN = ppn;
-            break;
-        case PageSize::PAGE_1G:
-            data.vs_pte.PPN = ppn;
-            data.g_pte.PPN = ppn;
-            break;
-        case PageSize::PAGE_512G:
-            data.vs_pte.PPN = ppn;
-            data.g_pte.PPN = ppn;
-            break;
-    }
+    // [优化] PPN 设置与页大小无关，统一赋值即可
+    data.vs_pte.PPN = ppn;
+    data.g_pte.PPN = ppn;
+
     return data;
 }
 
@@ -541,6 +532,14 @@ struct CacheMessage {
 
     // invalidate 实际影响条目数。 cache内部使用
     uint32_t        affected_entries = 0;
+
+    // NEW: 批量更新相关（用于PT Cache去重+预取）
+    bool            is_batch_update = false;        // 是否为批量更新
+    uint32_t        batch_update_count = 0;         // 批量更新条目数
+    struct {
+        iova_t      iova;
+        PTData      pt_data;
+    } batch_updates[17];                            // 1+16个更新条目
 
     // 时序信息：用于性能建模和统计。cache内部使用
     sc_time         timestamp = SC_ZERO_TIME;

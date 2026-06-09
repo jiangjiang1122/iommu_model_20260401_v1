@@ -381,7 +381,39 @@ void CacheBase<TagT, DataT>::fill_with_hash_tag(const TagT& hash_tag,
         const sc_time latency = execution_latency_with_arbiter(access_latency);
         uint32_t victim_way = 0;
         if (replacement_) {
-            victim_way = replacement_->find_victim(set);
+            // [PT Cache去重+预取] 特殊处理: 保护is_req=1的占位CL不被替换
+            // 先尝试找到可替换的victim (跳过is_req=1的占位CL)
+            bool found_safe_victim = false;
+            for (uint32_t try_way = 0; try_way < num_ways_; try_way++) {
+                uint32_t candidate_way = replacement_->find_victim(set);
+                
+                // 检查该way是否为PT Cache的占位CL且is_req=1
+                bool is_protected = false;
+                if constexpr (std::is_same_v<DataT, PTData>) {
+                    if (cache_array_[set][candidate_way].valid && 
+                        cache_array_[set][candidate_way].data.reserved.is_ph == 1 &&
+                        cache_array_[set][candidate_way].data.reserved.is_req == 1) {
+                        is_protected = true;
+                        // 这个占位CL有实际任务在等待,不能替换
+                        std::cout << "[PT_CACHE_PROTECT] Set " << set << " Way " << candidate_way 
+                                  << " is protected (is_req=1 placeholder), trying next..." << std::endl;
+                    }
+                }
+                
+                if (!is_protected) {
+                    victim_way = candidate_way;
+                    found_safe_victim = true;
+                    break;
+                }
+            }
+            
+            if (!found_safe_victim) {
+                // 所有way都是受保护的占位CL或常规CL,无法安全替换
+                std::cout << "[PT_CACHE_WARN] Set " << set << " full, no safe victim found! Insertion skipped." << std::endl;
+                stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
+                consume_delay(access_latency);
+                return;  // 放弃插入,避免数据丢失
+            }
         }
 
         // 统计淘汰

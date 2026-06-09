@@ -111,7 +111,13 @@ static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstan
 static const bool PTW_WALKER_CACHE_ENABLED = true;           // Walker Cache开关（true=启用，false=禁用）
 
 // ===================== PT Cache VA去重参数 =====================
-static const bool PT_CACHE_VA_DEDUP_ENABLED = true;          // VA去重功能开关（true=启用，false=禁用）
+static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能开关（true=启用，false=禁用）
+
+// ===================== PT Cache去重+预取模块参数 =====================
+static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
+static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
+static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 8;           // 预取深度（页数量，默认=8）
+static const uint8_t DEDUP_BUFFER_INVALID_IDX = 0xFF;        // 无效索引标记
 
 // ===================== Collector Outstanding 限制 =====================
 static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限

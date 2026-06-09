@@ -380,9 +380,29 @@ WalkerCache::UpdateResult WalkerCache::update(gscid_t gscid, pscid_t pscid,
     };
 
     UpdateResult result;
+    
+    // 处理 NONE 类型：不需要更新，直接返回
+    if (kind == WalkerUpdateKind::NONE) {
+        update_none_count_++;  // 统计跳过次数
+        printf("[t=%llu ns][WALKER_CACHE] UPDATE: NONE (skip), gscid=%u, pscid=%u, iova=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, va);
+        fflush(stdout);
+        return result;
+    }
+    
     const bool update_ptwc1 = kind == WalkerUpdateKind::PTWC_1_2_3;
     const bool update_ptwc2 = kind == WalkerUpdateKind::PTWC_1_2_3 ||
                               kind == WalkerUpdateKind::PTWC_2_3;
+
+    // 统计更新类型
+    if (kind == WalkerUpdateKind::PTWC_1_2_3) {
+        update_ptwc_123_count_++;
+    } else if (kind == WalkerUpdateKind::PTWC_2_3) {
+        update_ptwc_23_count_++;
+    } else if (kind == WalkerUpdateKind::PTWC_3) {
+        update_ptwc_3_count_++;
+    }
 
     auto merge_result = [&result](bool& updated_flag,
                                   const WalkerSubCache::UpdateResult& partial) {

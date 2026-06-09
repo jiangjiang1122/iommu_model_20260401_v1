@@ -45,6 +45,19 @@ public:
                                        sc_time* latency = nullptr);
     uint32_t invalidate_global(sc_time* latency = nullptr);
 
+    // NEW: PT Cache去重+预取接口（4KB页简化版）
+    // 插入占位Cache Line
+    // 返回值: true=插入成功, false=替换失败(Cache full且所有CL都是is_req=1)
+    bool insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
+                           TransStage stage, bool sv48, bool gstage_x4,
+                           uint8_t head_index, uint8_t tail_index = 0xFF, bool is_req = true,
+                           sc_time* latency = nullptr);
+    
+    // 批量更新占位CL为常规CL
+    void batch_update_placeholders(gscid_t gscid, pscid_t pscid,
+                                   const std::vector<std::pair<iova_t, PTData>>& updates,
+                                   TransStage stage, bool sv48, bool gstage_x4);
+
 protected:
     uint32_t hash_function(const PTTag& tag) const override;
 

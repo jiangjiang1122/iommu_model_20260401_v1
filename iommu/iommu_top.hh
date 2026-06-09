@@ -17,6 +17,7 @@
 
 #include "json_config.h"
 #include "cache_subsystem.h"
+#include "dedup_buffer.h"  // NEW: Dedup Buffer for PT Cache deduplication
 #include <iostream>
 #include <cassert>
 
@@ -121,6 +122,7 @@ public:
     sc_mutex pt_cache_mtx;
 
     // ===================== VA Dedup Table (PT Cache VA去重) =====================
+    // ... 保留旧去重代码（暂时不删除，后续清理） ...
     struct va_dedup_key_t {
         uint32_t gscid;
         uint32_t pscid;
@@ -140,6 +142,49 @@ public:
     sc_mutex va_dedup_mtx;
     uint64_t va_dedup_hit_count;   // 统计：去重命中次数
     uint64_t va_dedup_miss_count;  // 统计：去重未命中次数
+
+    // ===================== NEW: Dedup Buffer for PT Cache =====================
+    iommu::DedupBuffer pt_dedup_buffer;  // Buffer for deduplication (256 entries)
+    sc_mutex pt_dedup_buffer_mtx;  // Mutex for Buffer concurrent access protection
+    
+    // NEW: Flush Dedup Buffer chain (唤醒挂起任务、计算PA、释放Entry)
+    void flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
+                                  iommu_task_t* main_task,
+                                  const spte_t* vs_ptes,
+                                  const gpte_t* g_ptes,
+                                  const uint64_t* page_szs,
+                                  const uint64_t* group_iovas,
+                                  uint32_t total_tasks);
+    
+    // [新增] Flush单个PT Cache条目 (占位CL → 常规CL)
+    void flush_single_pt_cache(uint64_t iova,
+                               const iommu::PTData& pt_data,
+                               uint64_t page_size,
+                               iommu::gscid_t gscid,
+                               iommu::pscid_t pscid,
+                               iommu::TransStage stage,
+                               bool sv48,
+                               bool gstage_x4);
+    
+    // ===================== NEW: Prefetch Group Tracking =====================
+    // 预取组状态追踪(完整9笔独立walk方案)
+    struct PrefetchGroupState {
+        iommu_task_t* main_task = nullptr;    // 主任务指针
+        uint32_t pending_tasks = 0;           // 待完成walk数
+        uint32_t total_tasks = 0;             // 总任务数(1+D)
+        bool     completed = false;           // 组完成标志
+        
+        // 收集所有walk结果
+        spte_t   vs_ptes[17];
+        gpte_t   g_ptes[17];
+        uint64_t pas[17];
+        uint64_t page_szs[17];
+        uint64_t group_iovas[17];             // 组内所有IOVA
+    };
+    
+    std::map<uint32_t, PrefetchGroupState> prefetch_groups;  // key=group_id
+    sc_mutex prefetch_group_mtx;
+    sc_event prefetch_group_completed_event;
 
     // ===================== IOMMU/PTW IOPS Counters =====================
     uint64_t iommu_total_completed;  // IOMMU 出口完成翻译总数
@@ -274,6 +319,9 @@ public:
     void ptw_req_process_thread();    // process: PEQ get + walk init + DDR send
     void ptw_rsp_thread();            // dispatch: FIFO read + PEQ notify
     void ptw_rsp_process_thread();    // process: PEQ get + PTE parse + state machine
+    
+    // NEW: 预取组监控线程
+    void prefetch_group_monitor_thread();  // monitor prefetch group completion
 
     // MSIPT Cache (2 threads)
     void msipt_cache_query_thread();
@@ -419,6 +467,7 @@ public:
         SC_THREAD(ptw_req_process_thread);
         SC_THREAD(ptw_rsp_thread);
         SC_THREAD(ptw_rsp_process_thread);
+        SC_THREAD(prefetch_group_monitor_thread);  // NEW: 预取组监控
         SC_THREAD(msipt_cache_query_thread);
         SC_THREAD(msipt_cache_result_thread);
         SC_THREAD(msiptw_req_thread);

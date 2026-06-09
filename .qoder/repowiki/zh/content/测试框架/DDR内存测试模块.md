@@ -7,11 +7,15 @@
 - [main.cpp](file://main.cpp)
 - [iommu_perf_params.hh](file://iommu/iommu_perf_model/iommu_perf_params.hh)
 - [README.md](file://README.md)
-- [Makefile](file://Makefile)
 - [GDB_DEBUG_GUIDE.md](file://GDB_DEBUG_GUIDE.md)
-- [test_rp.hh](file://rp/test_rp.hh)
-- [test_slink.hh](file://slink/test_slink.hh)
 </cite>
+
+## 更新摘要
+**变更内容**
+- 更新了DDR模块配置参数的关注点，从综合性能测试框架转向具体的DDR模块配置
+- 新增了系统级性能参数与DDR模块配置的关系分析
+- 更新了内存访问模式和并发控制机制的描述
+- 增强了调试工具和故障排查指南
 
 ## 目录
 1. [简介](#简介)
@@ -19,13 +23,15 @@
 3. [核心组件](#核心组件)
 4. [架构概览](#架构概览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖关系分析](#依赖关系分析)
+6. [配置参数详解](#配置参数详解)
 7. [性能考量](#性能考量)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 
 ## 简介
-本文件为RISC-V IOMMU项目中的DDR内存测试模块提供全面的技术文档。该模块实现了基于SystemC和TLM（Transaction Level Modeling）的DDR内存仿真，用于验证IOMMU系统中的内存访问路径、带宽控制和延迟测量功能。文档重点涵盖test_ddr.cc中的测试用例实现、内存访问模式设计、性能基准测试方法，以及内存控制器的测试策略、数据完整性验证和错误检测机制。
+本文件为RISC-V IOMMU项目中的DDR内存测试模块提供全面的技术文档。该模块实现了基于SystemC和TLM（Transaction Level Modeling）的DDR内存仿真，专注于DDR模块的配置管理和性能参数设置。文档重点涵盖DDR_Module类的配置参数、内存访问处理流程、并发控制机制，以及与系统级性能参数的集成关系。
+
+**更新** 本版本重点关注DDR模块的具体配置而非综合性能测试框架，强调模块化配置和参数管理的重要性。
 
 ## 项目结构
 该项目采用分层模块化设计，主要包含以下核心模块：
@@ -66,8 +72,6 @@ PCIE_NOC --> IOMMU_TOP
 
 **图表来源**
 - [main.cpp:39-94](file://main.cpp#L39-L94)
-- [test_rp.hh:54-94](file://rp/test_rp.hh#L54-L94)
-- [test_slink.hh:21-55](file://slink/test_slink.hh#L21-L55)
 
 **章节来源**
 - [README.md:63-76](file://README.md#L63-L76)
@@ -86,6 +90,7 @@ DDR内存测试模块的核心组件包括：
 - **最大未完成请求数**: 读写均为64个
 - **内部延迟**: 100纳秒（固定）
 - **内存容量**: 1MB（1024×1024字节）
+- **FIFO深度**: 512个请求队列深度
 
 **章节来源**
 - [test_ddr.hh:17-61](file://ddr/test_ddr.hh#L17-L61)
@@ -202,37 +207,55 @@ DDR模块支持多种内存访问模式：
 - [test_ddr.cc:132-153](file://ddr/test_ddr.cc#L132-L153)
 - [test_ddr.cc:145-149](file://ddr/test_ddr.cc#L145-L149)
 
-### 带宽控制测试
-系统提供了多层次的带宽控制机制：
+## 配置参数详解
+
+### DDR模块配置参数
+DDR模块的配置参数直接影响其性能和行为：
+
+| 参数类别 | 参数名称 | 值 | 描述 |
+|---------|---------|----|------|
+| 内存容量 | DDR_MEMORY_SIZE | 1MB | 模拟内存空间大小 |
+| 并发控制 | DDR_READ_MAX_OUTSTANDING | 64 | 读请求最大未完成数 |
+| 并发控制 | DDR_WRITE_MAX_OUTSTANDING | 64 | 写请求最大未完成数 |
+| 延迟控制 | DDR_INTERNAL_LATENCY_NS | 100ns | 固定内部处理延迟 |
+| FIFO深度 | DDR_REQ_FIFO_DEPTH | 512 | 请求队列深度 |
+| 事件通知 | SLOT_EVENTS | read/write | 槽位释放通知 |
+
+### 系统级性能参数集成
+DDR模块配置与系统级性能参数存在密切关系：
 
 ```mermaid
 graph LR
-subgraph "请求源"
-RP["RP模块"]
-IOMMU["IOMMU核心"]
+subgraph "系统级参数"
+DDR_MAX_OUTSTANDING["DDR_MAX_OUTSTANDING<br/>512"]
+DDR_READ_LATENCY["DDR_READ_LATENCY<br/>10ns"]
+DDR_WRITE_LATENCY["DDR_WRITE_LATENCY<br/>8ns"]
+DDR_BANDWIDTH_GBPS["DDR_BANDWIDTH_GBPS<br/>128GB/s"]
 end
-subgraph "带宽控制层"
-OUTSTANDING["未完成请求数控制<br/>读:64, 写:64"]
-FIFO["FIFO深度控制<br/>256/128/64"]
-LATENCY["延迟控制<br/>100ns固定延迟"]
+subgraph "模块级参数"
+DDR_READ_MAX_OUTSTANDING["读请求上限<br/>64"]
+DDR_WRITE_MAX_OUTSTANDING["写请求上限<br/>64"]
+DDR_INTERNAL_LATENCY_NS["内部延迟<br/>100ns"]
 end
-subgraph "物理层"
-DDR_MEM["1MB DDR内存"]
+subgraph "性能影响"
+PERFORMANCE["系统性能"]
 end
-RP --> OUTSTANDING
-IOMMU --> OUTSTANDING
-OUTSTANDING --> FIFO
-FIFO --> LATENCY
-LATENCY --> DDR_MEM
+DDR_MAX_OUTSTANDING --> PERFORMANCE
+DDR_READ_LATENCY --> PERFORMANCE
+DDR_WRITE_LATENCY --> PERFORMANCE
+DDR_BANDWIDTH_GBPS --> PERFORMANCE
+DDR_READ_MAX_OUTSTANDING --> PERFORMANCE
+DDR_WRITE_MAX_OUTSTANDING --> PERFORMANCE
+DDR_INTERNAL_LATENCY_NS --> PERFORMANCE
 ```
 
 **图表来源**
+- [iommu_perf_params.hh:78-82](file://iommu/iommu_perf_model/iommu_perf_params.hh#L78-L82)
 - [test_ddr.hh:20-22](file://ddr/test_ddr.hh#L20-L22)
-- [iommu_perf_params.hh:40-49](file://iommu/iommu_perf_model/iommu_perf_params.hh#L40-L49)
 
 **章节来源**
 - [iommu_perf_params.hh:78-82](file://iommu/iommu_perf_model/iommu_perf_params.hh#L78-L82)
-- [test_ddr.cc:61-71](file://ddr/test_ddr.cc#L61-L71)
+- [test_ddr.hh:20-25](file://ddr/test_ddr.hh#L20-L25)
 
 ### 内存延迟测量
 DDR模块实现了精确的延迟测量机制：
@@ -247,52 +270,6 @@ DDR模块实现了精确的延迟测量机制：
 **章节来源**
 - [test_ddr.cc:74-84](file://ddr/test_ddr.cc#L74-L84)
 - [test_ddr.cc:99-108](file://ddr/test_ddr.cc#L99-L108)
-
-## 依赖关系分析
-
-### 模块间依赖关系
-```mermaid
-graph TB
-subgraph "系统依赖"
-SYSTEMC["SystemC库"]
-TLM["TLM库"]
-JSON_CONFIG["JSON配置"]
-STATS_COLLECTOR["统计收集器"]
-end
-subgraph "核心模块"
-DDR_MODULE["DDR_Module"]
-IOMMU_TOP["iommu_top"]
-RP_MODULE["RP_Module"]
-SLINK_MODULE["SLINK_Module"]
-end
-SYSTEMC --> DDR_MODULE
-TLM --> DDR_MODULE
-JSON_CONFIG --> IOMMU_TOP
-STATS_COLLECTOR --> IOMMU_TOP
-DDR_MODULE --> IOMMU_TOP
-RP_MODULE --> IOMMU_TOP
-SLINK_MODULE --> IOMMU_TOP
-IOMMU_TOP --> DDR_MODULE
-```
-
-**图表来源**
-- [test_ddr.hh:4-15](file://ddr/test_ddr.hh#L4-L15)
-- [main.cpp:10-13](file://main.cpp#L10-L13)
-
-### 性能参数依赖
-DDR模块的性能表现依赖于多个系统级参数：
-
-| 参数类别 | 参数名称 | 值 | 用途 |
-|---------|---------|----|-----|
-| 内存容量 | DDR_MEMORY_SIZE | 1MB | 模拟内存空间大小 |
-| 并发控制 | MAX_OUTSTANDING | 64 | 读写最大未完成请求数 |
-| 延迟控制 | INTERNAL_LATENCY | 100ns | 固定内部处理延迟 |
-| FIFO深度 | REQ_FIFO_DEPTH | 512 | 请求队列深度 |
-| 事件通知 | SLOT_EVENTS | read/write | 槽位释放通知 |
-
-**章节来源**
-- [test_ddr.hh:20-25](file://ddr/test_ddr.hh#L20-L25)
-- [test_ddr.hh:34-43](file://ddr/test_ddr.hh#L34-L43)
 
 ## 性能考量
 
@@ -410,10 +387,13 @@ LATENCY --> LOGGING
 ## 结论
 DDR内存测试模块为RISC-V IOMMU系统提供了完整的内存访问验证能力。通过精确的并发控制、延迟测量和数据完整性验证，该模块能够有效评估IOMMU系统的内存子系统性能。模块采用的PEQ调度机制和事件驱动架构确保了高精度的时间控制和良好的系统性能。
 
+**更新** 本版本强调了DDR模块配置参数的重要性，这些参数直接影响系统的整体性能表现。通过合理配置DDR模块参数，可以有效提升IOMMU系统的内存访问效率和稳定性。
+
 未来可以考虑的改进方向包括：
 - 增加更多内存访问模式的支持
 - 实现更精细的性能统计功能
 - 优化内存布局以支持更大的内存容量
 - 增强错误检测和恢复机制
+- 提供动态参数调整能力
 
 该模块为IOMMU系统的开发和调试提供了重要的基础设施支持，是整个系统验证流程中不可或缺的一部分。

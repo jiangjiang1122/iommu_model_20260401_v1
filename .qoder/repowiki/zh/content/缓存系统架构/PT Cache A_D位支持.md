@@ -15,6 +15,13 @@
 - [iommu_top.hh](file://iommu/iommu_top.hh)
 </cite>
 
+## 更新摘要
+**变更内容**
+- 更新了A/D位提取逻辑的实现细节
+- 增强了缓存响应处理的A/D位检查机制
+- 改进了性能验证系统的A/D位支持
+- 完善了A/D位处理的错误诊断和故障排除指南
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -33,6 +40,8 @@
 该功能的核心目标是：
 - 首次访问时：PTW从DDR读取PTE（A=0, D=0），触发A/D更新，写回DDR（A=1, D=1），更新PT Cache（A=1, D=1）
 - 后续访问时：PT Cache HIT时提取A/D位，如果A=1, D=1则直接转发，不触发PTW更新
+
+**更新** 本次更新重点加强了A/D位提取逻辑的准确性和缓存响应处理的可靠性。
 
 ## 项目结构
 
@@ -271,7 +280,7 @@ Miss --> End
 
 A/D位处理是本次修改的核心功能，主要包括以下几个方面：
 
-#### 1. make_pt_data函数修改
+#### 1. make_pt_data函数增强
 
 原始实现中A/D位被硬编码设置，修改后支持传入实际的A/D位值：
 
@@ -282,7 +291,9 @@ Old --> |"硬编码设置"| A1["A=1<br/>D=data.vs_pte.W"]
 New --> |"使用参数"| A2["A=ad_bit_set ? 1 : 0<br/>D=ad_bit_set ? data.vs_pte.W : 0"]
 ```
 
-#### 2. 任务到缓存更新转换
+**更新** make_pt_data函数现在接受ad_bit_set参数，允许外部模块传入真实的A/D位状态。
+
+#### 2. 任务到缓存更新转换增强
 
 在任务转换过程中提取实际的A/D位状态：
 
@@ -302,10 +313,9 @@ end
 MakePT->>Cache : 创建PTData并填充
 ```
 
-**图表来源**
-- [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L291)
+**更新** task_to_pt_update函数现在正确实现A/D位检查逻辑，只有当A=1且满足写操作条件时才标记为已设置。
 
-#### 3. 缓存响应处理
+#### 3. 缓存响应处理增强
 
 PT Cache响应处理逻辑检查A/D位并决定是否需要PTW更新：
 
@@ -327,8 +337,7 @@ SendPTW --> End([结束])
 DirectForward --> End
 ```
 
-**图表来源**
-- [iommu_perf_pt_cache_response.cc:36-53](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L53)
+**更新** PT Cache响应处理现在包含更精确的A/D位检查逻辑，确保只有在必要时才触发PTW更新。
 
 **章节来源**
 - [PT_CACHE_AD_BIT_MODIFICATION.md:1-224](file://PT_CACHE_AD_BIT_MODIFICATION.md#L1-L224)
@@ -429,6 +438,8 @@ end
 2. **批量更新**：合并多个A/D更新请求，减少PTW调用频率
 3. **智能调度**：根据访问模式动态调整A/D位检查策略
 
+**更新** 当前PT Cache命中率为0%，这是由于更新时序问题导致的。建议通过预填充策略来验证A/D位逻辑的正确性。
+
 **章节来源**
 - [default_config.json:38-43](file://iommu/cache_config/default_config.json#L38-L43)
 - [cache_base.h:154-206](file://iommu/cache_src/cache/cache_base.h#L154-L206)
@@ -449,6 +460,8 @@ end
 - 实现预填充PT Cache功能
 - 修改测试场景，增加重复访问同一页面的测试用例
 
+**更新** 这是当前已知的限制，正在开发预填充策略来解决这个问题。
+
 #### 2. A/D位更新异常
 
 **问题描述**：A/D位没有按预期更新
@@ -458,6 +471,8 @@ end
 2. 验证task_to_pt_update函数中的A/D位状态判断
 3. 确认pt_hit_response_to_task函数正确提取A/D位
 
+**更新** 增加了更详细的日志输出，可以在日志中看到A/D位的状态变化。
+
 #### 3. 性能退化
 
 **问题描述**：启用A/D位支持后系统性能下降
@@ -466,6 +481,8 @@ end
 - 检查PT Cache配置参数
 - 分析A/D位检查逻辑的开销
 - 评估PTW调用频率的变化
+
+**更新** 根据验证结果显示性能保持不变，但需要进一步的基准测试来确认。
 
 **章节来源**
 - [PT_CACHE_AD_BIT_MODIFICATION.md:150-162](file://PT_CACHE_AD_BIT_MODIFICATION.md#L150-L162)
@@ -479,5 +496,7 @@ PT Cache A/D位支持功能的实现成功地增强了IOMMU缓存系统的功能
 2. **逻辑准确性**：基于A/D位状态智能决定是否需要PTW更新
 3. **性能优化**：避免了不必要的PTW调用，提高了系统效率
 4. **可维护性**：通过模块化设计和清晰的接口定义，便于后续扩展
+
+**更新** 本次更新进一步完善了A/D位提取逻辑的准确性和缓存响应处理的可靠性，为未来的功能扩展提供了更加稳固的基础。
 
 尽管目前还存在PT Cache命中率为0的限制，但通过预填充策略和优化测试场景，可以进一步验证A/D位支持的完整功能。该实现为IOMMU系统的性能优化奠定了坚实的基础，并为未来的功能扩展提供了良好的框架。
