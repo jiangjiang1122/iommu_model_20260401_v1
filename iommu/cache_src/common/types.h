@@ -540,6 +540,18 @@ struct CacheMessage {
         iova_t      iova;
         PTData      pt_data;
     } batch_updates[17];                            // 1+16个更新条目
+    
+    // NEW: Dedup Buffer索引（用于传递占位CL的Buffer entry索引）
+    uint8_t         dedup_head_index = 0xFF;
+    uint8_t         dedup_tail_index = 0xFF;  // 用于后续HIT挂接
+    uint8_t         dedup_new_index = 0xFF;   // 新分配的Entry索引
+    
+    // Task指针（用于在execute_pt_request中传递task，避免在collector中操作Buffer）
+    void*           task_ptr = nullptr;  // iommu_task_t* 类型
+    
+    // [NEW] 预取参数（用于Phase 1和Phase 2）
+    bool            prefetch_enabled = false;  // 是否启用预取
+    uint32_t        prefetch_depth = 0;        // 预取深度(D值)
 
     // 时序信息：用于性能建模和统计。cache内部使用
     sc_time         timestamp = SC_ZERO_TIME;

@@ -180,6 +180,18 @@ iommu::CacheMessage task_to_pt_request(iommu_task_t* task) {
            static_cast<int>(req.stage), req.pt_sv48, req.pt_gstage_x4);
     fflush(stdout);
     
+    // [NEW] 携带task指针，用于execute_pt_request中直接填充Buffer
+    req.task_ptr = static_cast<void*>(task);
+    
+    // [NEW] Phase 1: 传递预取参数
+    req.prefetch_enabled = task->walk_ctx.prefetch_enabled;
+    req.prefetch_depth = task->walk_ctx.prefetch_depth;
+    
+    if (req.prefetch_enabled && req.prefetch_depth > 0) {
+        printf("[CONVERT] task_id=%u -> Prefetch ENABLED (D=%u)\n",
+               task->task_id, req.prefetch_depth);
+    }
+    
     return req;
 }
 

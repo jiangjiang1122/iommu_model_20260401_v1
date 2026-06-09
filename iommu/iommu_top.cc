@@ -445,6 +445,14 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     }
 
     task->state = TASK_ROUTE_DECISION;
+    
+    // [NEW] Phase 1: 启用预取功能 (默认D=8)
+    if (!task->walk_ctx.prefetch_enabled) {
+        task->walk_ctx.prefetch_enabled = true;
+        task->walk_ctx.prefetch_depth = 8;  // 默认预取深度
+        printf("[CONFIGURE] task_id=%u -> Prefetch enabled (D=%u)\n",
+               task->task_id, task->walk_ctx.prefetch_depth);
+    }
 
     // Save original task to pending map for PT cache response correlation
     pt_cache_mtx.lock();
