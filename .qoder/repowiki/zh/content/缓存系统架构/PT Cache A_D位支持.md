@@ -17,10 +17,10 @@
 
 ## 更新摘要
 **变更内容**
-- 更新了A/D位提取逻辑的实现细节
-- 增强了缓存响应处理的A/D位检查机制
-- 改进了性能验证系统的A/D位支持
-- 完善了A/D位处理的错误诊断和故障排除指南
+- 更新了A/D位提取逻辑的实现细节，增强了make_pt_data函数的参数支持
+- 改进了缓存响应处理的A/D位检查机制，优化了task_to_pt_update函数的逻辑
+- 完善了性能验证系统的A/D位支持，增强了日志输出和错误诊断能力
+- 新增了PT Cache去重+预取接口，支持占位Cache Line处理
 
 ## 目录
 1. [简介](#简介)
@@ -41,7 +41,7 @@
 - 首次访问时：PTW从DDR读取PTE（A=0, D=0），触发A/D更新，写回DDR（A=1, D=1），更新PT Cache（A=1, D=1）
 - 后续访问时：PT Cache HIT时提取A/D位，如果A=1, D=1则直接转发，不触发PTW更新
 
-**更新** 本次更新重点加强了A/D位提取逻辑的准确性和缓存响应处理的可靠性。
+**更新** 本次更新重点加强了A/D位提取逻辑的准确性和缓存响应处理的可靠性，同时新增了PT Cache去重+预取功能。
 
 ## 项目结构
 
@@ -71,12 +71,12 @@ G --> E
 ```
 
 **图表来源**
-- [pt_cache.h:1-59](file://iommu/cache_src/cache/pt_cache.h#L1-L59)
+- [pt_cache.h:1-72](file://iommu/cache_src/cache/pt_cache.h#L1-L72)
 - [types.h:1-618](file://iommu/cache_src/common/types.h#L1-L618)
 - [default_config.json:1-69](file://iommu/cache_config/default_config.json#L1-L69)
 
 **章节来源**
-- [pt_cache.h:1-59](file://iommu/cache_src/cache/pt_cache.h#L1-L59)
+- [pt_cache.h:1-72](file://iommu/cache_src/cache/pt_cache.h#L1-L72)
 - [types.h:1-618](file://iommu/cache_src/common/types.h#L1-L618)
 - [default_config.json:1-69](file://iommu/cache_config/default_config.json#L1-L69)
 
@@ -89,6 +89,7 @@ PT Cache是IOMMU缓存系统中的关键组件，负责缓存页表条目（PTE�
 1. **标签结构（PTTag）**：包含gscid、pscid、iova、翻译阶段、SV48模式等关键信息
 2. **数据结构（PTData）**：包含VS-stage和G-stage的PTE信息，以及保留字段
 3. **缓存操作**：支持查找、填充、失效等基本操作
+4. **去重+预取接口**：支持占位Cache Line插入和批量更新
 
 ### 缓存基类架构
 
@@ -99,7 +100,7 @@ CacheBase提供了统一的缓存基础设施，包括：
 - RAM端口仲裁机制
 
 **章节来源**
-- [pt_cache.cpp:1-146](file://iommu/cache_src/cache/pt_cache.cpp#L1-L146)
+- [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [cache_base.h:26-676](file://iommu/cache_src/cache/cache_base.h#L26-L676)
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
 
@@ -131,7 +132,7 @@ Task->>Task : 直接转发，无需PTW更新
 ```
 
 **图表来源**
-- [iommu_perf_pt_cache_response.cc:13-122](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L13-L122)
+- [iommu_perf_pt_cache_response.cc:13-166](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L13-L166)
 - [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-L300)
 
 ## 详细组件分析
@@ -159,6 +160,8 @@ class PTCache {
 +invalidate_by_gscid(gscid, latency) uint32_t
 +invalidate_by_gscid_pscid(gscid, pscid, latency) uint32_t
 +invalidate_global(latency) uint32_t
++insert_placeholder(gscid, pscid, iova, stage, sv48, gstage_x4, head_index, tail_index, is_req, latency) bool
++batch_update_placeholders(gscid, pscid, updates, stage, sv48, gstage_x4) void
 -hash_function(tag) uint32_t
 -align_iova(iova, ps) iova_t
 }
@@ -181,7 +184,7 @@ PTCache --> PTData : 处理
 ```
 
 **图表来源**
-- [pt_cache.h:8-54](file://iommu/cache_src/cache/pt_cache.h#L8-L54)
+- [pt_cache.h:8-72](file://iommu/cache_src/cache/pt_cache.h#L8-L72)
 - [cache_base.h:27-34](file://iommu/cache_src/cache/cache_base.h#L27-L34)
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
 
@@ -273,7 +276,7 @@ Miss --> End
 - [cache_base.h:258-294](file://iommu/cache_src/cache/cache_base.h#L258-L294)
 
 **章节来源**
-- [pt_cache.cpp:1-146](file://iommu/cache_src/cache/pt_cache.cpp#L1-L146)
+- [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [types.h:174-235](file://iommu/cache_src/common/types.h#L174-L235)
 
 ### A/D位处理逻辑
@@ -339,10 +342,29 @@ DirectForward --> End
 
 **更新** PT Cache响应处理现在包含更精确的A/D位检查逻辑，确保只有在必要时才触发PTW更新。
 
+#### 4. PT Cache去重+预取接口
+
+新增的去重功能支持占位Cache Line处理：
+
+```mermaid
+flowchart TD
+Start([插入占位CL]) --> CheckFull["检查Cache是否已满"]
+CheckFull --> |是| CheckProtected["检查是否所有Way都被保护"]
+CheckProtected --> |是| Fallback["降级处理：直接PTW"]
+CheckProtected --> |否| Insert["插入占位CL"]
+CheckFull --> |否| Insert
+Insert --> Update["更新占位CL数据"]
+Update --> Success["插入成功"]
+Fallback --> End([结束])
+Success --> End
+```
+
+**更新** 新增了insert_placeholder和batch_update_placeholders方法，支持PT Cache去重和预取功能。
+
 **章节来源**
 - [PT_CACHE_AD_BIT_MODIFICATION.md:1-224](file://PT_CACHE_AD_BIT_MODIFICATION.md#L1-L224)
-- [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L291)
-- [iommu_perf_pt_cache_response.cc:36-53](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L53)
+- [iommu_task_cache_convert.cc:276-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L300)
+- [iommu_perf_pt_cache_response.cc:36-120](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L120)
 
 ## 依赖关系分析
 
@@ -378,14 +400,14 @@ H --> C
 
 **图表来源**
 - [types.h:231-264](file://iommu/cache_src/common/types.h#L231-L264)
-- [pt_cache.h:8-54](file://iommu/cache_src/cache/pt_cache.h#L8-L54)
+- [pt_cache.h:8-72](file://iommu/cache_src/cache/pt_cache.h#L8-L72)
 - [cache_base.h:27-34](file://iommu/cache_src/cache/cache_base.h#L27-L34)
-- [iommu_task_cache_convert.cc:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L1-L200)
-- [iommu_perf_pt_cache_response.cc:1-123](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L1-L123)
+- [iommu_task_cache_convert.cc:1-492](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L1-L492)
+- [iommu_perf_pt_cache_response.cc:1-166](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L1-L166)
 
 **章节来源**
 - [types.h:1-618](file://iommu/cache_src/common/types.h#L1-L618)
-- [pt_cache.h:1-59](file://iommu/cache_src/cache/pt_cache.h#L1-L59)
+- [pt_cache.h:1-72](file://iommu/cache_src/cache/pt_cache.h#L1-L72)
 - [cache_base.h:1-676](file://iommu/cache_src/cache/cache_base.h#L1-L676)
 
 ## 性能考虑
@@ -437,8 +459,9 @@ end
 1. **预填充策略**：在测试前预填充PT Cache，提高命中率
 2. **批量更新**：合并多个A/D更新请求，减少PTW调用频率
 3. **智能调度**：根据访问模式动态调整A/D位检查策略
+4. **去重优化**：利用PT Cache去重功能减少重复PTW访问
 
-**更新** 当前PT Cache命中率为0%，这是由于更新时序问题导致的。建议通过预填充策略来验证A/D位逻辑的正确性。
+**更新** 当前PT Cache命中率为0%，这是由于更新时序问题导致的。建议通过预填充策略来验证A/D位逻辑的正确性。新增的去重功能可以显著减少重复的PTW访问。
 
 **章节来源**
 - [default_config.json:38-43](file://iommu/cache_config/default_config.json#L38-L43)
@@ -455,12 +478,14 @@ end
 **可能原因**：
 - PT Cache更新时间晚于查询（时序问题）
 - 测试场景设计不当
+- 缓存配置参数不合适
 
 **解决方案**：
 - 实现预填充PT Cache功能
 - 修改测试场景，增加重复访问同一页面的测试用例
+- 调整缓存配置参数，如增加num_sets和num_ways
 
-**更新** 这是当前已知的限制，正在开发预填充策略来解决这个问题。
+**更新** 这是当前已知的限制，正在开发预填充策略来解决这个问题。新增的去重功能可以帮助改善命中率。
 
 #### 2. A/D位更新异常
 
@@ -470,10 +495,23 @@ end
 1. 检查make_pt_data函数的ad_bit_set参数传递
 2. 验证task_to_pt_update函数中的A/D位状态判断
 3. 确认pt_hit_response_to_task函数正确提取A/D位
+4. 检查日志输出中的A/D位状态
 
 **更新** 增加了更详细的日志输出，可以在日志中看到A/D位的状态变化。
 
-#### 3. 性能退化
+#### 3. 去重功能异常
+
+**问题描述**：PT Cache去重功能无法正常工作
+
+**诊断步骤**：
+1. 检查insert_placeholder函数的占位CL插入逻辑
+2. 验证batch_update_placeholders函数的批量更新功能
+3. 确认占位CL的is_ph标志位设置正确
+4. 检查占位CL的head_index和tail_index参数传递
+
+**更新** 新增的去重功能需要更多的测试验证，建议先验证基础A/D位功能的正确性。
+
+#### 4. 性能退化
 
 **问题描述**：启用A/D位支持后系统性能下降
 
@@ -481,12 +519,13 @@ end
 - 检查PT Cache配置参数
 - 分析A/D位检查逻辑的开销
 - 评估PTW调用频率的变化
+- 评估去重功能对性能的影响
 
 **更新** 根据验证结果显示性能保持不变，但需要进一步的基准测试来确认。
 
 **章节来源**
-- [PT_CACHE_AD_BIT_MODIFICATION.md:150-162](file://PT_CACHE_AD_BIT_MODIFICATION.md#L150-L162)
-- [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L291)
+- [PT_CACHE_AD_BIT_MODIFICATION.md:150-224](file://PT_CACHE_AD_BIT_MODIFICATION.md#L150-L224)
+- [iommu_task_cache_convert.cc:276-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L300)
 
 ## 结论
 
@@ -496,7 +535,8 @@ PT Cache A/D位支持功能的实现成功地增强了IOMMU缓存系统的功能
 2. **逻辑准确性**：基于A/D位状态智能决定是否需要PTW更新
 3. **性能优化**：避免了不必要的PTW调用，提高了系统效率
 4. **可维护性**：通过模块化设计和清晰的接口定义，便于后续扩展
+5. **去重支持**：新增的去重+预取功能进一步提升了缓存效率
 
-**更新** 本次更新进一步完善了A/D位提取逻辑的准确性和缓存响应处理的可靠性，为未来的功能扩展提供了更加稳固的基础。
+**更新** 本次更新进一步完善了A/D位提取逻辑的准确性和缓存响应处理的可靠性，同时新增的去重功能为未来的功能扩展提供了更加稳固的基础。
 
-尽管目前还存在PT Cache命中率为0的限制，但通过预填充策略和优化测试场景，可以进一步验证A/D位支持的完整功能。该实现为IOMMU系统的性能优化奠定了坚实的基础，并为未来的功能扩展提供了良好的框架。
+尽管目前还存在PT Cache命中率为0的限制，但通过预填充策略和优化测试场景，可以进一步验证A/D位支持的完整功能。新增的去重功能也为系统性能优化提供了新的可能性。该实现为IOMMU系统的性能优化奠定了坚实的基础，并为未来的功能扩展提供了良好的框架。

@@ -342,12 +342,22 @@ void iommu_top::ptw_rsp_process_thread() {
             // 标记Burst预取完成
             task->walk_ctx.prefetch_burst_pending = false;
             
-            // 通知预取组监控线程处理批量更新
-            printf("[PTW_PREFETCH] task_id=%u -> Burst prefetch complete, notifying monitor\n",
-                   task->task_id);
+            // [FIX] 减少pending_tasks并通知monitor
+            prefetch_group_mtx.lock();
+            auto& group = prefetch_groups[task->task_id];
+            group.pending_tasks--;
+            
+            printf("[PTW_PREFETCH] task_id=%u -> Burst complete, pending_tasks=%u\n",
+                   task->task_id, group.pending_tasks);
             fflush(stdout);
             
-            prefetch_group_completed_event.notify(SC_ZERO_TIME);
+            if (group.pending_tasks == 0 && group.completed) {
+                printf("[PTW_PREFETCH] task_id=%u -> Notifying monitor (all pending done)\n",
+                       task->task_id);
+                fflush(stdout);
+                prefetch_group_completed_event.notify(SC_ZERO_TIME);
+            }
+            prefetch_group_mtx.unlock();
             
             break;
         }
@@ -920,6 +930,12 @@ void iommu_top::ptw_rsp_process_thread() {
                 uint32_t ptesize = task->walk_ctx.ptesize;         // PTE大小 (Sv39=8字节)
                 uint32_t prefetch_depth = task->walk_ctx.prefetch_depth;
                 
+                // [FIX] 初始化prefetch_iovas数组
+                uint64_t base_iova = task->iova & ~0xFFFULL;  // 4KB页对齐
+                for (uint32_t d = 0; d < prefetch_depth; d++) {
+                    task->walk_ctx.prefetch_iovas[d] = base_iova + (d + 1) * 0x1000;
+                }
+                
                 // Burst起始地址: L0_base + (VPN[0]+1) * PTE_size
                 uint64_t burst_start_addr = leaf_pt_base + (current_vpn0 + 1) * ptesize;
                 uint32_t burst_size = prefetch_depth * ptesize;  // D * 8字节
@@ -966,9 +982,9 @@ void iommu_top::ptw_rsp_process_thread() {
                 prefetch_group_mtx.lock();
                 auto& group = prefetch_groups[group_id];
                 group.main_task = task;
-                group.pending_tasks = 2;  // 主任务 + 1次Burst DDR响应
+                group.pending_tasks = 1;  // [FIX] 仅等待1次Burst DDR响应 (主任务已完成)
                 group.total_tasks = task->walk_ctx.prefetch_total;
-                group.completed = false;
+                group.completed = true;  // [FIX] Burst方案: 主任务已完成,设置completed=true
                 
                 // 复制IOVA列表
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
