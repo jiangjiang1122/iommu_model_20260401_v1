@@ -148,7 +148,7 @@ iova_t PTCache::align_iova(iova_t iova, PageSize ps) {
 
 bool PTCache::insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                                  TransStage stage, bool sv48, bool gstage_x4,
-                                 uint8_t head_index, uint8_t tail_index, bool is_req,
+                                 uint8_t head_index, bool is_req,
                                  sc_time* latency) {
     // 构造占位CL的tag
     PTTag tag;
@@ -216,8 +216,8 @@ bool PTCache::insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
     placeholder_data.reserved.gstage_x4 = gstage_x4 ? 1U : 0U;
     placeholder_data.reserved.is_ph = 1;  // 占位标志
     placeholder_data.reserved.head_index = head_index;  // Buffer链头索引
-    placeholder_data.reserved.tail_index = tail_index;  // [新增] Buffer链尾索引
-    placeholder_data.reserved.is_req = is_req ? 1U : 0U;  // [新增] 是否主任务
+    // [V3.0] tail_index已移至Buffer entry，PT Cache不再存储
+    placeholder_data.reserved.is_req = is_req ? 1U : 0U;  // 是否主任务
 
     // 调用基类fill插入（如果Cache满会触发替换）
     fill(tag, placeholder_data, false);
@@ -228,7 +228,6 @@ bool PTCache::insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
 
     std::cout << "[PT_CACHE] insert_placeholder: iova=0x" << std::hex << tag.iova 
               << ", head_index=" << std::dec << static_cast<int>(head_index)
-              << ", tail_index=" << static_cast<int>(tail_index)
               << ", is_req=" << (is_req ? 1 : 0) << std::endl;
 
     return true;  // 插入成功
@@ -296,7 +295,7 @@ void PTCache::batch_update_placeholders(gscid_t gscid, pscid_t pscid,
 
 bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                                  TransStage stage, bool sv48, bool gstage_x4,
-                                 uint8_t head_index, uint8_t tail_index, bool is_req) {
+                                 uint8_t head_index, bool is_req) {
     // 构造tag
     PTTag tag;
     tag.gscid = gscid;
@@ -323,9 +322,8 @@ bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
         return false;
     }
     
-    // 更新占位CL的head_index、tail_index和is_req
+    // [V3.0] 更新占位CL的head_index和is_req（不再包含tail_index）
     existing_data.reserved.head_index = head_index;
-    existing_data.reserved.tail_index = tail_index;
     existing_data.reserved.is_req = is_req ? 1U : 0U;
     
     // 重新fill更新cache line
@@ -333,7 +331,6 @@ bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
     
     std::cout << "[PT_CACHE] update_placeholder: iova=0x" << std::hex << tag.iova
               << ", head=" << std::dec << static_cast<int>(head_index)
-              << ", tail=" << static_cast<int>(tail_index)
               << ", is_req=" << (is_req ? 1 : 0) << std::endl;
     
     return true;

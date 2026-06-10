@@ -973,8 +973,8 @@ void iommu_top::ptw_rsp_process_thread() {
                 task->walk_ctx.prefetch_total = 1 + prefetch_depth;
                 task->walk_ctx.prefetch_idx = 0;  // 0=主任务
                 
-                // 保存所有IOVA到组上下文
-                task->walk_ctx.prefetch_group.group_iovas[0] = task->iova;
+                // 保存所有IOVA到组上下文（[P6] 主任务IOVA也需要4KB对齐，与flush中比较逻辑一致）
+                task->walk_ctx.prefetch_group.group_iovas[0] = task->iova & ~0xFFFULL;
                 for (uint32_t d = 0; d < prefetch_depth; d++) {
                     task->walk_ctx.prefetch_group.group_iovas[1+d] = task->walk_ctx.prefetch_iovas[d];
                 }

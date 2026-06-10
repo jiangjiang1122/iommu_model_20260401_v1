@@ -1,6 +1,6 @@
 // IOMMU Performance Model - PT Dedup Buffer Flush Logic
 // Implements flush_dedup_buffer_chain() for PT Cache deduplication + prefetch
-// v2.0: 支持is_req/tail_index字段,批量更新占位CL
+// v3.0: tail_index已移至Buffer entry, 批量更新占位CL
 
 #include "iommu_top.hh"
 #include "iommu_task_cache_convert.hh"
@@ -75,7 +75,6 @@ void iommu_top::flush_single_pt_cache(uint64_t iova,
         iommu::PTData regular_data = pt_data;
         regular_data.reserved.is_ph = 0;
         regular_data.reserved.head_index = 0xFF;
-        regular_data.reserved.tail_index = 0xFF;
         regular_data.reserved.is_req = 0;
         
         cache_sub.pt_cache().fill_pt(gscid, pscid, iova_aligned, stage, regular_data, false);

@@ -223,10 +223,9 @@ union pt_reserved_t {
         uint32_t gstage_x4:1;
         uint32_t is_ph:1;              // 占位标志（1=占位，0=常规）
         uint32_t head_index:8;         // 链表头Buffer编号（创建后永久不变）
-        uint32_t tail_index:8;         // [新增] 链表尾Buffer编号
-        uint32_t is_req:1;             // [新增] 1=主任务(有实际请求), 0=预取占位
+        uint32_t is_req:1;             // 1=主任务(有实际请求), 0=预取占位
         uint32_t replacement_info:2;
-        uint32_t reserved:6;           // 减少9bit以容纳新字段
+        uint32_t reserved:10;          // [V3.0] 原tail_index已移至Buffer entry
     };
     uint32_t raw = 0;
 };
@@ -543,7 +542,7 @@ struct CacheMessage {
     
     // NEW: Dedup Buffer索引（用于传递占位CL的Buffer entry索引）
     uint8_t         dedup_head_index = 0xFF;
-    uint8_t         dedup_tail_index = 0xFF;  // 用于后续HIT挂接
+    // [V3.0] dedup_tail_index已移除: tail_index仅在Buffer entry中
     uint8_t         dedup_new_index = 0xFF;   // 新分配的Entry索引
     
     // Task指针（用于在execute_pt_request中传递task，避免在collector中操作Buffer）

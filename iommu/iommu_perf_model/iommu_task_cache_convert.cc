@@ -244,8 +244,12 @@ void pt_miss_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
     // [FIX] 复制Buffer链头索引到task,供Monitor flush时使用
     task->dedup_head_index = resp.dedup_head_index;
     
-    printf("[CONVERT] task_id=%u <- PT_LOOKUP response (MISS, dedup_head=%u)\n",
-           task->task_id, resp.dedup_head_index);
+    // [P3] 复制预取参数（降级场景: resp.prefetch_enabled=false, depth=0）
+    task->walk_ctx.prefetch_enabled = resp.prefetch_enabled;
+    task->walk_ctx.prefetch_depth = resp.prefetch_depth;
+    
+    printf("[CONVERT] task_id=%u <- PT_LOOKUP response (MISS, dedup_head=%u, prefetch=%d, depth=%u)\n",
+           task->task_id, resp.dedup_head_index, resp.prefetch_enabled, resp.prefetch_depth);
     fflush(stdout);
 }
 

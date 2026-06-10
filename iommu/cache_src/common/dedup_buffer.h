@@ -11,11 +11,11 @@ struct iommu_task_t;
 namespace iommu {
 
 /**
- * @brief Dedup Buffer Entry结构
+ * @brief Dedup Buffer Entry结构 (V3.0)
  * 
  * 用于管理等待PTW完成的任务链表
- * - 简化版: tail_index和is_req已移至PT Cache的pt_reserved_t
- * - 核心字段: valid, iova, next_index, task_ptr
+ * - V3.0: tail_index从PT Cache cacheline移至Buffer entry（仅链头有效）
+ * - 核心字段: valid, iova, next_index, tail_index, task_ptr
  */
 struct DedupBufferEntry {
     uint8_t  valid = 0;                    // V: 1=有效占用，0=空闲
@@ -32,6 +32,7 @@ struct DedupBufferEntry {
     
     // 链表指针
     uint8_t   next_index = 0xFF;           // 后继Buffer下标，无后继=0xFF
+    uint8_t   tail_index = 0xFF;           // [V3.0] 任务链尾编号（仅链头有效，非链头=0xFF）
     
     // 任务指针
     iommu_task_t* task_ptr = nullptr;
@@ -44,6 +45,7 @@ struct DedupBufferEntry {
         pscid = 0;
         iova = 0;
         next_index = 0xFF;
+        tail_index = 0xFF;
         task_ptr = nullptr;
     }
 };
@@ -59,6 +61,7 @@ struct DedupBufferEntry {
 struct DedupBuffer {
     DedupBufferEntry entries[PT_DEDUP_BUFFER_SIZE];
     uint8_t          valid_count = 0;       // 当前有效Entry数量
+    sc_event         free_event;            // [P3/P5] Buffer释放事件（反压通知）
     
     /**
      * @brief 分配Entry（按顺序线性查找第一个空闲）
@@ -93,6 +96,8 @@ struct DedupBuffer {
         if (entries[idx].is_valid()) {
             entries[idx].clear();
             valid_count--;
+            // [P5] 通知反压等待者：有Buffer Entry被释放
+            free_event.notify(SC_ZERO_TIME);
         }
     }
     
