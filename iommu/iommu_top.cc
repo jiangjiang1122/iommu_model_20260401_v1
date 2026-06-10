@@ -446,10 +446,10 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
 
     task->state = TASK_ROUTE_DECISION;
     
-    // [NEW] Phase 1: 启用预取功能 (默认D=8)
+    // [NEW] Phase 1: 启用预取功能 (默认D=3,用于50包测试)
     if (!task->walk_ctx.prefetch_enabled) {
         task->walk_ctx.prefetch_enabled = true;
-        task->walk_ctx.prefetch_depth = 8;  // 默认预取深度
+        task->walk_ctx.prefetch_depth = 3;  // [TEST] 预取深度D=3 (50包测试)
         printf("[CONFIGURE] task_id=%u -> Prefetch enabled (D=%u)\n",
                task->task_id, task->walk_ctx.prefetch_depth);
     }

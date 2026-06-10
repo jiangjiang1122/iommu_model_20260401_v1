@@ -294,4 +294,49 @@ void PTCache::batch_update_placeholders(gscid_t gscid, pscid_t pscid,
     }
 }
 
+bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
+                                 TransStage stage, bool sv48, bool gstage_x4,
+                                 uint8_t head_index, uint8_t tail_index, bool is_req) {
+    // 构造tag
+    PTTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    tag.iova = align_iova(iova, PageSize::PAGE_4K);
+    tag.stage = stage;
+    tag.sv48 = sv48;
+    tag.gstage_x4 = gstage_x4;
+    
+    // 查找对应的占位CL
+    PTData existing_data;
+    sc_time latency;
+    bool hit = lookup(tag, existing_data, latency);
+    
+    if (!hit) {
+        std::cout << "[PT_CACHE] update_placeholder: iova=0x" << std::hex << tag.iova
+                  << " -> MISS, cannot update" << std::dec << std::endl;
+        return false;
+    }
+    
+    if (existing_data.reserved.is_ph == 0) {
+        std::cout << "[PT_CACHE] update_placeholder: iova=0x" << std::hex << tag.iova
+                  << " -> HIT regular CL, cannot update" << std::dec << std::endl;
+        return false;
+    }
+    
+    // 更新占位CL的head_index、tail_index和is_req
+    existing_data.reserved.head_index = head_index;
+    existing_data.reserved.tail_index = tail_index;
+    existing_data.reserved.is_req = is_req ? 1U : 0U;
+    
+    // 重新fill更新cache line
+    fill(tag, existing_data, false);
+    
+    std::cout << "[PT_CACHE] update_placeholder: iova=0x" << std::hex << tag.iova
+              << ", head=" << std::dec << static_cast<int>(head_index)
+              << ", tail=" << static_cast<int>(tail_index)
+              << ", is_req=" << (is_req ? 1 : 0) << std::endl;
+    
+    return true;
+}
+
 } // namespace iommu

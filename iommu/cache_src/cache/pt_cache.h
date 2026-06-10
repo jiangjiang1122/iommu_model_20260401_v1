@@ -57,6 +57,12 @@ public:
     void batch_update_placeholders(gscid_t gscid, pscid_t pscid,
                                    const std::vector<std::pair<iova_t, PTData>>& updates,
                                    TransStage stage, bool sv48, bool gstage_x4);
+    
+    // [FIX] 更新预取占位CL的head_index、tail_index和is_req
+    // 用于分支3: 预取占位CL首次HIT时,将is_req=0更新为is_req=1
+    bool update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
+                           TransStage stage, bool sv48, bool gstage_x4,
+                           uint8_t head_index, uint8_t tail_index, bool is_req);
 
 protected:
     uint32_t hash_function(const PTTag& tag) const override;

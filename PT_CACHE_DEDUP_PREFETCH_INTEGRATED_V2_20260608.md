@@ -812,10 +812,10 @@ PTW Walk完成,返回结果Res_A
     │   │           └─ flush_pt_cache(iova_A + i*4KB, Res_A+i)
     │   │
     │   └─ [4KB标准页场景] (实际页大小 = 4KB)
-    │       ├─ Step 4.1: 构造iova,刷新PT Cache (主任务)
+    │       ├─ Step 4.1: 构造iova,刷新PT Cache (主任务) -> 执行步骤5
     │       │   └─ flush_pt_cache(iova_A, Res_A)
     │       │
-    │       └─ Step 4.2: 构造D个4KB级iova,刷新PT Cache (预取)
+    │       └─ Step 4.2: 构造D个4KB级iova,刷新PT Cache (预取) -> D个iova，每个执行步骤5
     │           └─ for i = 1 to D:
     │               └─ flush_pt_cache(iova_A + i*4KB, Res_A+i)
     │

@@ -117,15 +117,12 @@ void iommu_top::flush_single_pt_cache(uint64_t iova,
 // 参数:
 // - head_index: Buffer链头索引
 // - group_id: 预取组ID(用于日志)
-// - main_task: 主任务指针
-// - vs_ptes/g_ptes/page_szs/group_iovas: 预取组walk结果
+// - main_task: 主任务指针(通过walk_ctx.pt_updates访问PTE)
+// - group_iovas: 预取组IOVA列表
 // - total_tasks: 预取组总任务数(1+D)
 // ============================================================
 void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
                                          iommu_task_t* main_task,
-                                         const spte_t* vs_ptes,
-                                         const gpte_t* g_ptes,
-                                         const uint64_t* page_szs,
                                          const uint64_t* group_iovas,
                                          uint32_t total_tasks) {
     if (head_index == DEDUP_BUFFER_INVALID_IDX) {
@@ -138,56 +135,14 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
            group_id, head_index);
     fflush(stdout);
     
-    // [新增] Step 0: 批量更新PT Cache (占位CL → 常规CL)
-    // 构建更新列表
-    std::vector<std::pair<uint64_t, iommu::PTData>> pt_updates;
+    // 注意: batch_update_placeholders已在Monitor中调用,此处不再重复
     
-    for (uint32_t i = 0; i < total_tasks; i++) {
-        if (group_iovas[i] == 0) continue;  // 跳过无效entry
-        
-        uint64_t iova = group_iovas[i];
-        uint64_t page_sz = page_szs[i];
-        const spte_t& vs_pte = vs_ptes[i];
-        const gpte_t& g_pte = g_ptes[i];
-        
-        // 构建PTData
-        iommu::PTData pt_data;
-        pt_data.reserved.raw = 0;
-        pt_data.reserved.valid = 1;
-        pt_data.reserved.trans_type = main_task->walk_ctx.walk_type == WALK_VS_PT ? 
-                                       static_cast<uint32_t>(iommu::TransStage::STAGE1_AND_2) :
-                                       static_cast<uint32_t>(iommu::TransStage::STAGE2_ONLY);
-        pt_data.reserved.input_page_size = 0;  // 4KB
-        pt_data.reserved.result_page_size = (page_sz == 0x1000) ? 0 : 
-                                            (page_sz == 0x200000) ? 1 : 2;
-        pt_data.reserved.iova_is_va = 1;
-        pt_data.reserved.sv48 = (main_task->iosatp.MODE == IOSATP_Sv48) ? 1 : 0;
-        pt_data.reserved.gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4) ? 1 : 0;
-        pt_data.reserved.is_ph = 0;  // 常规CL
-        pt_data.reserved.head_index = 0xFF;
-        pt_data.reserved.tail_index = 0xFF;
-        pt_data.reserved.is_req = 0;
-        
-        // 复制PTE数据
-        pt_data.vs_pte.raw = vs_ptes[i].raw;
-        pt_data.g_pte.raw = g_ptes[i].raw;
-        
-        pt_updates.push_back({iova, pt_data});
-    }
-    
-    // 调用批量更新
-    if (!pt_updates.empty()) {
-        iommu::TransStage stage = main_task->walk_ctx.walk_type == WALK_VS_PT ?
-                                   iommu::TransStage::STAGE1_AND_2 :
-                                   iommu::TransStage::STAGE2_ONLY;
-        bool sv48 = (main_task->iosatp.MODE == IOSATP_Sv48);
-        bool gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4);
-        
-        cache_sub.pt_cache().batch_update_placeholders(main_task->GSCID, main_task->PSCID,
-                                                       pt_updates, stage, sv48, gstage_x4);
-        printf("[DEDUP_FLUSH] group_id=%u -> Batch updated %lu PT Cache entries\n",
-               group_id, pt_updates.size());
+    // [FIX] 使用CacheSubsystem的dedup_buffer_（而非iommu_top::pt_dedup_buffer）
+    auto* dedup_buf = cache_sub.get_pt_dedup_buffer();
+    if (dedup_buf == nullptr) {
+        printf("[DEDUP_FLUSH] group_id=%u -> ERROR: dedup_buffer is nullptr!\n", group_id);
         fflush(stdout);
+        return;
     }
     
     uint8_t cur = head_index;
@@ -195,7 +150,7 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
     
     // 遍历Buffer链表
     while (cur != DEDUP_BUFFER_INVALID_IDX) {
-        auto& entry = pt_dedup_buffer.entries[cur];
+        auto& entry = dedup_buf->entries[cur];
         uint8_t next_idx = entry.next_index;
         
         if (entry.task_ptr != nullptr) {
@@ -205,21 +160,21 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
             uint64_t page_iova = pending_task->iova & ~0xFFFULL;  // 4KB页对齐
             uint64_t offset = pending_task->iova & 0xFFFL;         // 页内偏移
             
-            // 查找对应的PTE（在group.vs_ptes中）
+            // [FIX] 使用main_task->walk_ctx.pt_updates访问PTE数据
             bool found = false;
             for (uint32_t i = 0; i < total_tasks; i++) {
                 if (group_iovas[i] == page_iova) {
                     // 找到匹配的IOVA，计算PA
-                    uint64_t pa = (vs_ptes[i].PPN << 12) | offset;
+                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].vs_pte.PPN << 12) | offset;
                     pending_task->pa = pa;
-                    pending_task->vs_pte = vs_ptes[i];
-                    pending_task->g_pte = g_ptes[i];
-                    pending_task->page_sz = page_szs[i];
+                    pending_task->vs_pte = main_task->walk_ctx.pt_updates[i].vs_pte;
+                    pending_task->g_pte = main_task->walk_ctx.pt_updates[i].g_pte;
+                    pending_task->page_sz = main_task->walk_ctx.pt_updates[i].page_sz;
                     found = true;
                     
                     printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (iova=0x%lx, PPN=0x%lx, offset=0x%lx)\n",
                            pending_task->task_id, pa, pending_task->iova,
-                           vs_ptes[i].PPN, offset);
+                           main_task->walk_ctx.pt_updates[i].vs_pte.PPN, offset);
                     fflush(stdout);
                     break;
                 }
@@ -227,14 +182,14 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
             
             if (!found) {
                 // 未找到对应PTE，使用主任务的PPN（同页场景）
-                uint64_t pa = (vs_ptes[0].PPN << 12) | offset;
+                uint64_t pa = (main_task->walk_ctx.pt_updates[0].vs_pte.PPN << 12) | offset;
                 pending_task->pa = pa;
-                pending_task->vs_pte = vs_ptes[0];
-                pending_task->g_pte = g_ptes[0];
-                pending_task->page_sz = page_szs[0];
+                pending_task->vs_pte = main_task->walk_ctx.pt_updates[0].vs_pte;
+                pending_task->g_pte = main_task->walk_ctx.pt_updates[0].g_pte;
+                pending_task->page_sz = main_task->walk_ctx.pt_updates[0].page_sz;
                 
                 printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (using main PPN=0x%lx, iova=0x%lx)\n",
-                       pending_task->task_id, pa, vs_ptes[0].PPN, pending_task->iova);
+                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].vs_pte.PPN, pending_task->iova);
                 fflush(stdout);
             }
             
@@ -251,7 +206,7 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
         }
         
         // 释放Buffer Entry
-        pt_dedup_buffer.free_entry(cur);
+        dedup_buf->free_entry(cur);
         
         // 移动到下一个
         cur = next_idx;

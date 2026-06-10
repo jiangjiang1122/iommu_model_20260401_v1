@@ -80,8 +80,8 @@ void RP_Module::send_translation_request_1_thread()
         // Reset response counter
         response_count = 0;
 
-        // Prepare and send 10 translation requests
-        const int NUM_REQUESTS = 10;
+        // Prepare and send 20 translation requests (D=3 test)
+        const int NUM_REQUESTS = 20;
 
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for %d-request test...\n", NUM_REQUESTS);
@@ -100,11 +100,14 @@ void RP_Module::send_translation_request_1_thread()
         uint64_t base_iova = 0x10000;
 
         printf("\n[TEST] Sending %d translation requests back-to-back (device_id=0x0A)...\n", NUM_REQUESTS);
-        printf("[TEST] Strategy: Back-to-back injection, no artificial delays\n");
+        printf("[TEST] Strategy: 512B step, 8 requests per 4KB page (D=3 prefetch test)\n");
+        printf("[TEST] Prefetch depth D=3, each page MISS triggers 3 prefetch placeholders\n");
+        printf("[TEST] Expected: task 1 MISS+3prefetch, task 2-8 HIT dedup, task 9 MISS+3prefetch...\n");
         fflush(stdout);
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
-            uint64_t iova = base_iova + i * 512;
+            // 512B步长: 每8个请求在同一4KB页 (8*512B = 4KB)
+            uint64_t iova = base_iova + i * 0x200;  // 512B步长
             uint64_t expected_pa = iova + 0x10000;
 
             trans_array[i] = new tlm_generic_payload();
@@ -132,6 +135,12 @@ void RP_Module::send_translation_request_1_thread()
 
             printf("[TEST] Sent request %3d: IOVA=0x%lx (expected PA=0x%lx), nb_status=%d\n",
                    i, iova, expected_pa, status);
+            
+            // 每10个请求打印进度
+            if ((i + 1) % 10 == 0) {
+                printf("[TEST] Progress: %d/%d requests injected\n", i + 1, NUM_REQUESTS);
+                fflush(stdout);
+            }
 
             // 姣?涓姹傦紙鍚屼竴涓?KB椤碉級涓轰竴缁勶紝缁勯棿寤惰繜50ns璁㏄T cache鏈夋椂闂存洿鏂?
             // Back-to-back injection: no wait between requests
@@ -144,6 +153,11 @@ void RP_Module::send_translation_request_1_thread()
         // Wait for all responses
         while (response_count < NUM_REQUESTS) {
             wait(response_count_event);
+            // 每10个响应打印进度
+            if (response_count % 10 == 0) {
+                printf("[TEST] Progress: %d/%d responses received\n", response_count, NUM_REQUESTS);
+                fflush(stdout);
+            }
         }
 
         printf("[TEST] All %d responses received! response_count=%d\n", NUM_REQUESTS, response_count);

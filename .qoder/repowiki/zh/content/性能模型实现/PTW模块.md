@@ -17,10 +17,12 @@
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
 - [iommu_top.cc](file://iommu\iommu_top.cc)
+- [PTW_RESPONSE_ANALYSIS_20260609.md](file://PTW_RESPONSE_ANALYSIS_20260609.md)
 </cite>
 
 ## 更新摘要
 **变更内容**
+- 修复PTW预取功能中的关键bug，包括pending_tasks计数器修正、Burst响应处理增强和Monitor线程协调机制改进
 - 移除了串行延迟，采用PEQ（可取等待队列）实现非阻塞流水线
 - 新增详细的统计收集机制，包括任务完成统计、DDR读取计数、执行时间统计
 - 实现VA去重恢复功能，在PTW完成后自动恢复挂起的同页任务
@@ -48,6 +50,7 @@
 - VA去重与流水线控制策略
 - **新增**：PEQ流水线、统计收集机制和性能监控功能
 - **新增**：峰值outstanding跟踪、详细DDR访问统计和稳态IOPS分析
+- **新增**：预取功能的Bug修复与性能优化
 
 ## 项目结构
 PTW模块位于性能模型子系统中，与缓存子系统（DC/PC/PT/MSIPT/Walker）紧密协作，通过FIFO与PEQ（可取等待队列）实现非阻塞流水线处理。
@@ -103,6 +106,7 @@ RSP_PROC --> DDR_FIFO
 - **新增**：统计收集器：提供详细的性能统计和监控功能
 - **新增**：峰值outstanding跟踪：监控各模块的并发峰值
 - **新增**：详细DDR访问统计：记录单次访问延迟和访问次数
+- **新增**：预取功能：支持Burst模式的页表预取，提升遍历效率
 - 参数配置：包括FIFO深度、outstanding限制、流水线延迟等
 
 **章节来源**
@@ -307,6 +311,59 @@ class PTCache {
 - [iommu_second_stage_trans.cc:7-424](file://iommu/iommu_fun_model/iommu_second_stage_trans.cc#L7-L424)
 - [iommu_translate.hh:23-92](file://iommu/include/iommu_translate.hh#L23-L92)
 
+### 预取功能与Bug修复
+
+**新增** PTW模块实现了增强的预取功能，经过关键bug修复后显著提升了性能：
+
+#### 预取功能架构
+- **Burst模式**：支持批量预取多个PTE，减少内存访问次数
+- **分组管理**：使用prefetch_groups管理预取任务组，支持多任务并发
+- **Monitor线程**：专门负责预取组的协调和批量处理
+- **pending_tasks计数器**：精确跟踪每个预取组的完成状态
+
+#### 关键Bug修复
+
+**问题1：pending_tasks计数器未减少**
+- **现象**：Burst响应后只通知Monitor，但未减少`group.pending_tasks`计数器
+- **影响**：Monitor检查条件`pending_tasks==0`永远不满足，批量更新和Buffer刷新永远不会执行
+- **修复**：在PTW_PREFETCH_WAIT处理中添加`group.pending_tasks--`操作
+
+**问题2：Monitor线程协调机制缺陷**
+- **现象**：Monitor线程无法正确识别预取组的完成状态
+- **修复**：改进Monitor线程的触发条件，确保只有当`pending_tasks==0 && completed==true`时才触发
+
+**问题3：Burst响应处理增强**
+- **现象**：Burst模式下的响应处理逻辑不够完善
+- **修复**：增强了Burst响应的处理逻辑，确保所有预取任务都能正确完成
+
+```mermaid
+flowchart TD
+P_START([预取开始]) --> BURST_MODE["进入Burst模式"]
+BURST_MODE --> CREATE_GROUP["创建预取组"]
+CREATE_GROUP --> ADD_TASKS["添加多个预取任务"]
+ADD_TASKS --> WAIT_RESPONSE["等待Burst响应"]
+WAIT_RESPONSE --> RESPONSE_RECEIVED["响应到达"]
+RESPONSE_RECEIVED --> UPDATE_COUNTER["更新pending_tasks计数器"]
+UPDATE_COUNTER --> CHECK_CONDITION["检查完成条件"]
+CHECK_CONDITION --> |pending_tasks==0| NOTIFY_MONITOR["通知Monitor线程"]
+CHECK_CONDITION --> |还有任务| WAIT_MORE["等待更多响应"]
+NOTIFY_MONITOR --> BATCH_UPDATE["批量更新PT Cache"]
+BATCH_UPDATE --> FLUSH_BUFFER["刷新Buffer链表"]
+FLUSH_BUFFER --> RELEASE_MAIN["释放主任务"]
+RELEASE_MAIN --> DONE([完成])
+WAIT_MORE --> RESPONSE_RECEIVED
+```
+
+**图表来源**
+- [PTW_RESPONSE_ANALYSIS_20260609.md:81-125](file://PTW_RESPONSE_ANALYSIS_20260609.md#L81-L125)
+- [PTW_RESPONSE_ANALYSIS_20260609.md:235-253](file://PTW_RESPONSE_ANALYSIS_20260609.md#L235-L253)
+
+#### 预取组管理机制
+
+**章节来源**
+- [PTW_RESPONSE_ANALYSIS_20260609.md:81-125](file://PTW_RESPONSE_ANALYSIS_20260609.md#L81-L125)
+- [PTW_RESPONSE_ANALYSIS_20260609.md:235-253](file://PTW_RESPONSE_ANALYSIS_20260609.md#L235-L253)
+
 ### 性能监控与统计收集机制
 **新增** PTW模块实现了全面的性能监控和统计收集机制：
 
@@ -390,6 +447,7 @@ WALKER[walker_cache.cpp]
 PARAMS[iommu_perf_params.hh]
 STATS[stats_collector.h]
 VA_DEDUP[iommu_top.cc]
+PREFETCH[PTW_RESPONSE_ANALYSIS_20260609.md]
 PTW --> TYPES
 PTW --> TOP
 PTW --> PT_CACHE
@@ -397,6 +455,7 @@ PTW --> WALKER
 PTW --> PARAMS
 PTW --> STATS
 PTW --> VA_DEDUP
+PTW --> PREFETCH
 ```
 
 **图表来源**
@@ -408,6 +467,7 @@ PTW --> VA_DEDUP
 - [iommu_perf_params.hh:1-20](file://iommu/iommu_perf_model/iommu_perf_params.hh#L1-L20)
 - [stats_collector.h:1-20](file://iommu/cache_src/common/stats_collector.h#L1-L20)
 - [iommu_top.cc:1-30](file://iommu\iommu_top.cc#L1-L30)
+- [PTW_RESPONSE_ANALYSIS_20260609.md:1-50](file://PTW_RESPONSE_ANALYSIS_20260609.md#L1-L50)
 
 **章节来源**
 - [iommu_perf_ptw.cc:1-10](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L1-L10)
@@ -426,6 +486,7 @@ PTW --> VA_DEDUP
 - **峰值监控**：实时跟踪各模块并发峰值，帮助识别性能瓶颈
 - **详细DDR统计**：提供单次访问延迟和访问次数的详细分析
 - **稳态分析**：通过跳过10%预热和10%尾声的数据，提供准确的稳态IOPS测量
+- **预取优化**：经过Bug修复后的预取功能显著提升了Burst模式下的性能表现
 
 **章节来源**
 - [iommu_perf_params.hh:102-131](file://iommu/iommu_perf_model/iommu_perf_params.hh#L102-L131)
@@ -443,6 +504,8 @@ PTW --> VA_DEDUP
 - **新增**：并发峰值过高：检查peak_ptw_outstanding是否达到PTW_MAX_OUTSTANDING_TASKS限制
 - **新增**：DDR延迟异常：分析ptw_max_ddr_latency_ns和ptw_min_ddr_latency_ns的差异
 - **新增**：稳态IOPS异常：检查STEADY_STATE_START_PERCENT和STEADY_STATE_END_PERCENT配置
+- **新增**：预取功能故障：检查pending_tasks计数器是否正确递减，Monitor线程是否正常触发
+- **新增**：Burst响应处理问题：验证Burst模式下的响应处理逻辑是否完整
 
 **章节来源**
 - [iommu_perf_ptw.cc:129-148](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L129-L148)
@@ -458,5 +521,11 @@ PTW模块通过PEQ流水线、Walker Cache中间结果缓存与PT Cache最终结
 - **峰值跟踪**：实时监控各模块并发峰值，帮助识别性能瓶颈
 - **详细DDR分析**：提供单次访问延迟和访问次数的精确统计
 - **端到端分析**：支持从请求到响应的完整延迟分析
+- **预取功能优化**：经过关键Bug修复后，预取功能的性能和稳定性得到显著提升
+
+**特别重要的是**，本次更新修复了PTW预取功能中的关键bug，包括：
+- **pending_tasks计数器修正**：确保预取组的完成状态能够正确传递给Monitor线程
+- **Burst响应处理增强**：完善了Burst模式下的响应处理逻辑
+- **Monitor线程协调机制改进**：提高了预取组协调的可靠性和效率
 
 这些改进使得PTW模块在保持功能正确性的同时，显著提升了性能表现和可观测性。在实际部署中，应重点关注PEQ配置、统计收集机制和VA去重功能的启用，以及利用新增的性能监控工具进行系统级的性能分析和优化。通过充分利用这些统计指标，开发者可以更好地理解系统性能特征，识别瓶颈并制定针对性的优化策略。

@@ -21,15 +21,21 @@
 - [iommu_task.hh](file://iommu/include/iommu_task.hh)
 - [PT_CACHE_HIT_RATE_ANALYSIS.md](file://PT_CACHE_HIT_RATE_ANALYSIS.md)
 - [PT_CACHE_AD_BIT_MODIFICATION.md](file://PT_CACHE_AD_BIT_MODIFICATION.md)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
+- [PT_CACHE_DEDUP_PREFETCH_INTEGRATED_V2_20260608.md](file://PT_CACHE_DEDUP_PREFETCH_INTEGRATED_V2_20260608.md)
+- [PTW_RESPONSE_ANALYSIS_20260609.md](file://PTW_RESPONSE_ANALYSIS_20260609.md)
+- [PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md](file://PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md)
+- [VA_DEDUP_VS_NO_DEDUP_COMPARISON.md](file://VA_DEDUP_VS_NO_DEDUP_COMPARISON.md)
 </cite>
 
 ## 更新摘要
 **所做更改**
-- 新增A/D位支持功能章节，详细描述A/D位检查机制、动态A/D位传递和日志增强
-- 更新查找算法与命中/未命中处理，增加A/D位验证逻辑
-- 新增A/D位处理流程图和相关代码示例
-- 更新性能考量，包含A/D位对内存访问跟踪的影响分析
-- 新增A/D位配置参数和后续工作建议
+- 新增占位CL（Placeholder）支持功能章节，详细描述占位CL的插入、批量更新和替换保护机制
+- 新增去重缓冲区（Dedup Buffer）功能章节，说明Buffer链表管理和任务挂起机制
+- 更新查找算法与命中/未命中处理，增加占位CL和去重缓冲区的处理逻辑
+- 新增占位CL处理流程图和去重缓冲区工作流程图
+- 更新性能考量，包含占位CL对预取性能的影响分析
+- 新增占位CL配置参数和后续工作建议
 
 ## 目录
 1. [简介](#简介)
@@ -39,11 +45,12 @@
 5. [详细组件分析](#详细组件分析)
 6. [A/D位支持功能](#ad位支持功能)
 7. [VA去重功能](#va去重功能)
-8. [依赖关系分析](#依赖关系分析)
-9. [性能考量](#性能考量)
-10. [故障排查指南](#故障排查指南)
-11. [结论](#结论)
-12. [附录](#附录)
+8. [占位CL与去重缓冲区](#占位cl与去重缓冲区)
+9. [依赖关系分析](#依赖关系分析)
+10. [性能考量](#性能考量)
+11. [故障排查指南](#故障排查指南)
+12. [结论](#结论)
+13. [附录](#附录)
 
 ## 简介
 本文件针对 RISC-V IOMMU 的页表缓存(PT Cache)进行系统化技术文档化，重点阐述其作为 IOTLB(IOMMU Page Table Lookaside Buffer)的核心作用：缓存页表项并加速地址转换。文档覆盖以下方面：
@@ -52,6 +59,7 @@
 - 失效管理策略（VMA/GVMA/按上下文批量失效）
 - **新增A/D位支持功能**：通过A/D位检查机制实现内存访问跟踪，完善PT Cache的访问监控能力
 - **新增VA去重功能**：通过deduplication table实现同页VA访问的去重优化
+- **新增占位CL与去重缓冲区功能**：通过占位缓存行和去重缓冲区实现预取优化和任务挂起管理
 - 性能特征、命中率优化与内存占用评估
 - 配置参数、替换策略选择与调优建议
 - 通过代码路径引用展示关键操作的实现位置
@@ -86,6 +94,11 @@ subgraph "VA去重功能"
 VD["VA去重表<br/>iommu_top.hh/.cc"]
 VP["去重参数<br/>iommu_perf_params.hh"]
 end
+subgraph "占位CL与去重缓冲区"
+PH["占位CL接口<br/>insert_placeholder/batch_update_placeholders"]
+DB["去重缓冲区<br/>dedup_buffer.h"]
+PF["预取管理<br/>flush_dedup_buffer_chain"]
+end
 PT --> CB
 PT --> CL
 PT --> TY
@@ -98,14 +111,17 @@ PM --> VD
 VP --> VD
 AD --> PM
 AD2 --> PM
+PH --> PT
+DB --> PF
+PF --> PT
 ```
 
 **图表来源**
-- [pt_cache.h:1-59](file://iommu/cache_src/cache/pt_cache.h#L1-L59)
-- [pt_cache.cpp:1-146](file://iommu/cache_src/cache/pt_cache.cpp#L1-L146)
+- [pt_cache.h:1-72](file://iommu/cache_src/cache/pt_cache.h#L1-L72)
+- [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [cache_base.h:1-676](file://iommu/cache_src/cache/cache_base.h#L1-L676)
 - [cache_line.h:1-103](file://iommu/cache_src/cache/cache_line.h#L1-L103)
-- [types.h:1-618](file://iommu/cache_src/common/types.h#L1-L618)
+- [types.h:1-629](file://iommu/cache_src/common/types.h#L1-L629)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
 - [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
@@ -114,13 +130,14 @@ AD2 --> PM
 - [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-300)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
+- [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
 
 **章节来源**
-- [pt_cache.h:1-59](file://iommu/cache_src/cache/pt_cache.h#L1-L59)
-- [pt_cache.cpp:1-146](file://iommu/cache_src/cache/pt_cache.cpp#L1-L146)
+- [pt_cache.h:1-72](file://iommu/cache_src/cache/pt_cache.h#L1-L72)
+- [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [cache_base.h:1-676](file://iommu/cache_src/cache/cache_base.h#L1-L676)
 - [cache_line.h:1-103](file://iommu/cache_src/cache/cache_line.h#L1-L103)
-- [types.h:1-618](file://iommu/cache_src/common/types.h#L1-L618)
+- [types.h:1-629](file://iommu/cache_src/common/types.h#L1-L629)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
 - [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
@@ -129,9 +146,10 @@ AD2 --> PM
 - [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-300)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
+- [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
 
 ## 核心组件
-- PTCache：PT Cache 的具体实现，继承自 CacheBase，提供页表项查找、填充与多种失效策略。
+- PTCache：PT Cache 的具体实现，继承自 CacheBase，提供页表项查找、填充与多种失效策略，**新增占位CL插入和批量更新接口**。
 - CacheBase：通用缓存模板基类，封装哈希定位、set 内 way 比较、替换算法、仲裁与延迟建模等。
 - CacheLine：缓存行模板，包含 valid 标志、tag、data、预取标记与访问计数。
 - PTTag/PTData：PT Cache 的标签与数据结构，承载 gscid、pscid、IOVA、翻译阶段、SV48/X4 模式等关键信息。
@@ -139,9 +157,11 @@ AD2 --> PM
 - StatsCollector：统计收集器，记录访问、命中、缺失、替换、失效、队列延迟等指标。
 - **A/D位支持组件**：A/D位检查机制、动态A/D位传递、日志增强功能。
 - **VA去重组件**：deduplication table、去重键值结构、同步机制和统计计数器。
+- **占位CL组件**：insert_placeholder接口、batch_update_placeholders接口、占位CL数据结构。
+- **去重缓冲区组件**：DedupBuffer类、Buffer链表管理、任务挂起与恢复机制。
 
 **章节来源**
-- [pt_cache.h:8-54](file://iommu/cache_src/cache/pt_cache.h#L8-L54)
+- [pt_cache.h:8-72](file://iommu/cache_src/cache/pt_cache.h#L8-L72)
 - [pt_cache.cpp:5-39](file://iommu/cache_src/cache/pt_cache.cpp#L5-L39)
 - [cache_base.h:26-256](file://iommu/cache_src/cache/cache_base.h#L26-L256)
 - [cache_line.h:70-91](file://iommu/cache_src/cache/cache_line.h#L70-L91)
@@ -151,12 +171,14 @@ AD2 --> PM
 - [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-291)
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
+- [dedup_buffer.h:13-122](file://iommu/cache_src/common/dedup_buffer.h#L13-L122)
 
 ## 架构总览
 PT Cache 在 IOMMU 地址转换路径中扮演 IOTLB 角色，通过缓存页表项减少对主存页表的访问次数，提升整体吞吐。其核心流程：
 - 查找：根据 gscid/pscid/iova/阶段/模式构造 PTTag，经哈希定位 set，遍历 way 完成 tag 比较，命中则返回 PTData 并更新替换策略。
 - **A/D位检查**：在PT Cache命中时，检查A/D位状态，如果需要更新且SADE=1，则触发PTW进行硬件更新。
 - **VA去重**：在PT Cache未命中时，检查VA去重表，如果同页VA访问已存在，则挂起当前任务等待去重完成。
+- **占位CL处理**：在PT Cache未命中时，检查去重缓冲区，如果存在占位CL则直接返回占位CL，避免重复PTW。
 - 填充：将 Walker 或页表遍历结果写入缓存，同时记录翻译阶段、输入/输出页大小、SV48/X4 等元信息。
 - 失效：支持 VMA(G-stage)、GVMA(S-stage)、按 gscid/pscid 批量失效以及全局失效，按模式精确或扫描执行。
 
@@ -165,6 +187,7 @@ sequenceDiagram
 participant Req as "请求方"
 participant PT as "PTCache"
 participant Dedup as "VA去重表"
+participant PH as "占位CL/缓冲区"
 participant Base as "CacheBase"
 participant Set as "Set(多way)"
 participant RP as "替换策略"
@@ -191,8 +214,14 @@ alt "去重命中"
 Dedup-->>PT : "挂起任务，等待去重完成"
 PT-->>Req : "未命中(等待去重)"
 else "去重未命中"
-Dedup-->>PT : "创建去重表项"
+PT->>PH : "检查占位CL/缓冲区"
+alt "占位CL存在"
+PH-->>PT : "返回占位CL"
+PT-->>Req : "占位CL命中"
+else "无占位CL"
+PH-->>PT : "无占位CL"
 PT-->>Req : "触发页表遍历"
+end
 end
 end
 ```
@@ -221,6 +250,9 @@ end
   - GVMA 失效：影响第二阶段翻译。
   - 按上下文失效：按 gscid/pscid 批量失效。
   - 全局失效：清空所有有效行。
+- **新增占位CL接口**：
+  - insert_placeholder：插入占位缓存行，支持主任务占位（is_req=1）和预取占位（is_req=0）。
+  - batch_update_placeholders：批量更新占位CL为常规CL，支持预取结果的快速填充。
 - 哈希函数：基于 gscid/iova/psecid 组合进行混合哈希，掩码取 set 索引。
 - 页对齐：按 4K 对齐 IOVA，确保同一页内的访问共享缓存行。
 
@@ -234,6 +266,8 @@ class PTCache {
 +invalidate_by_gscid(gscid, latency) uint32_t
 +invalidate_by_gscid_pscid(gscid, pscid, latency) uint32_t
 +invalidate_global(latency) uint32_t
++insert_placeholder(gscid, pscid, iova, stage, sv48, gstage_x4, head_index, tail_index, is_req, latency) bool
++batch_update_placeholders(gscid, pscid, updates, stage, sv48, gstage_x4) void
 -hash_function(tag) uint32_t
 -align_iova(iova, ps) iova_t
 }
@@ -266,14 +300,14 @@ PTCache --> PTData : "使用"
 ```
 
 **图表来源**
-- [pt_cache.h:8-54](file://iommu/cache_src/cache/pt_cache.h#L8-L54)
+- [pt_cache.h:8-72](file://iommu/cache_src/cache/pt_cache.h#L8-L72)
 - [pt_cache.cpp:5-143](file://iommu/cache_src/cache/pt_cache.cpp#L5-L143)
 - [cache_base.h:26-256](file://iommu/cache_src/cache/cache_base.h#L26-L256)
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
 - [types.h:214-235](file://iommu/cache_src/common/types.h#L214-L235)
 
 **章节来源**
-- [pt_cache.h:8-54](file://iommu/cache_src/cache/pt_cache.h#L8-L54)
+- [pt_cache.h:8-72](file://iommu/cache_src/cache/pt_cache.h#L8-L72)
 - [pt_cache.cpp:5-143](file://iommu/cache_src/cache/pt_cache.cpp#L5-L143)
 - [cache_base.h:26-256](file://iommu/cache_src/cache/cache_base.h#L26-L256)
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
@@ -283,6 +317,7 @@ PTCache --> PTData : "使用"
 - 命中：基类 lookup 流程中，先计算 set，再在该 set 内顺序比较 tag，命中后更新替换策略计数并记录命中统计与延迟。
 - **A/D位检查**：命中后检查A/D位状态，如果A/D未设置且SADE=1，则触发PTW进行硬件更新；如果A/D已设置或SADE=0，则直接转发。
 - 未命中：记录缺失统计与延迟，返回 false，通常由上层触发页表遍历或 Walker Cache 查询。
+- **占位CL处理**：在未命中时，检查去重缓冲区是否存在占位CL，如果存在则直接返回占位CL，避免重复PTW。
 - 预取命中：若命中行来自预取，会额外统计预取命中并清除标记。
 
 ```mermaid
@@ -302,7 +337,10 @@ RecordMiss --> DedupCheck["VA去重表检查"]
 DedupCheck --> DedupHit{"去重命中 ?"}
 DedupHit --> |是| HangWait["挂起任务，等待去重完成"]
 HangWait --> ReturnWait["返回等待状态"]
-DedupHit --> |否| StartWalk["启动页表遍历"]
+DedupHit --> |否| PHCheck["占位CL/缓冲区检查"]
+PHCheck --> PHHit{"占位CL存在 ?"}
+PHHit --> |是| ReturnPH["返回占位CL"]
+PHHit --> |否| StartWalk["启动页表遍历"]
 StartWalk --> ReturnWalk["返回触发PTW"]
 ```
 
@@ -322,6 +360,8 @@ StartWalk --> ReturnWalk["返回触发PTW"]
 - 替换填充：若无空闲 way，则调用替换策略选择受害者 way，写入新数据并记录淘汰统计。
 - 预取标记：fill 支持 from_prefetch 标记，便于统计预取命中率。
 - **A/D位传递**：在更新PT Cache时，传递实际的A/D位状态，确保缓存数据与硬件状态一致。
+- **占位CL插入**：insert_placeholder支持插入占位缓存行，标记为占位CL（is_ph=1），区分主任务占位（is_req=1）和预取占位（is_req=0）。
+- **批量更新**：batch_update_placeholders将占位CL批量更新为常规CL，支持预取结果的快速填充。
 
 ```mermaid
 sequenceDiagram
@@ -388,6 +428,7 @@ NextWay --> Done["返回受影响条目数"]
 ### 数据结构与缓存行组织
 - PTTag：包含 gscid、pscid、对齐后的 iova、翻译阶段(stage)、SV48 标志、G-stage X4 标志，用于唯一标识一次页表查询上下文。
 - PTData：包含 VS 与 G 两阶段 PTE 的位域结构，以及 reserved 元信息，用于记录翻译类型、输入/输出页大小、IOVA 是否为 VA、SV48/X4 等。
+- **新增PTReserved结构**：包含占位CL标志（is_ph）、主任务占位标志（is_req）、Buffer链表索引（head_index/tail_index）等。
 - CacheLine：每个 set 内的多 way 缓存行，包含 valid、tag、data、from_prefetch、access_count 等字段。
 
 ```mermaid
@@ -403,7 +444,20 @@ bool gstage_x4
 PT_DATA {
 spte_t vs_pte
 gpte_t g_pte
-pt_reserved_t reserved
+PT_RESERVED reserved
+}
+PT_RESERVED {
+bool valid
+uint32 trans_type
+uint32 input_page_size
+uint32 result_page_size
+bool iova_is_va
+bool sv48
+bool gstage_x4
+bool is_ph
+uint8 head_index
+uint8 tail_index
+bool is_req
 }
 CACHE_LINE {
 bool valid
@@ -420,17 +474,20 @@ PT_TAG ||--o{ CACHE_LINE : "关联于"
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
 - [cache_line.h:70-91](file://iommu/cache_src/cache/cache_line.h#L70-L91)
 - [types.h:214-235](file://iommu/cache_src/common/types.h#L214-L235)
+- [types.h:375-414](file://iommu/cache_src/common/types.h#L375-L414)
 
 **章节来源**
 - [cache_line.h:33-45](file://iommu/cache_src/cache/cache_line.h#L33-L45)
 - [cache_line.h:70-91](file://iommu/cache_src/cache/cache_line.h#L70-L91)
 - [types.h:214-235](file://iommu/cache_src/common/types.h#L214-L235)
+- [types.h:375-414](file://iommu/cache_src/common/types.h#L375-L414)
 
 ### 性能特征与延迟建模
 - 延迟来源：仲裁延迟 + 哈希/读 set/比较/写入等流水线延迟，分别对应查找命中/未命中、更新命中/空闲/替换三种路径。
 - 统计指标：总访问、命中、缺失、替换、失效、预取命中/发出、平均执行/排队/请求延迟、IOPS 等。
 - 命中率分析：仓库提供专门的命中率分析文档，可用于评估不同工作负载下的性能表现。
 - **A/D位影响**：A/D位检查增加了额外的判断逻辑，但避免了不必要的PTW请求，整体性能影响可控。
+- **占位CL影响**：占位CL机制减少了重复PTW，但需要额外的缓冲区管理和替换保护逻辑。
 
 **章节来源**
 - [cache_base.h:146-216](file://iommu/cache_src/cache/cache_base.h#L146-L216)
@@ -605,12 +662,120 @@ VA去重功能提供详细的统计信息：
 - [iommu_top.cc:477-529](file://iommu/iommu_top.cc#L477-L529)
 - [iommu_top.cc:547-556](file://iommu/iommu_top.cc#L547-L556)
 
+## 占位CL与去重缓冲区
+
+### 占位CL插入机制
+占位CL（Placeholder Cache Line）机制通过以下接口实现：
+
+- **insert_placeholder接口**：插入占位缓存行，支持主任务占位（is_req=1）和预取占位（is_req=0）
+- **占位CL数据结构**：PTData.reserved字段包含is_ph=1、head_index、tail_index、is_req等标志
+- **替换保护机制**：当所有way都被is_req=1的占位CL保护时，阻止新占位CL插入，触发回退逻辑
+
+```mermaid
+flowchart TD
+Start(["insert_placeholder调用"]) --> BuildTag["构造PTTag(4KB页对齐)"]
+BuildTag --> CheckFull["检查Cache是否全保护"]
+CheckFull --> AllProtected{"所有way被is_req=1保护 ?"}
+AllProtected --> |是| Fallback["触发回退: 直接PTW或丢弃"]
+AllProtected --> |否| CreatePH["创建占位CL数据"]
+CreatePH --> FillCache["调用基类fill插入"]
+FillCache --> Success["插入成功"]
+Fallback --> ReturnFalse["返回false"]
+Success --> ReturnTrue["返回true"]
+```
+
+**图表来源**
+- [pt_cache.cpp:149-235](file://iommu/cache_src/cache/pt_cache.cpp#L149-L235)
+
+### 批量更新机制
+批量更新功能通过batch_update_placeholders实现：
+
+- **批量更新流程**：遍历更新列表，将占位CL更新为常规CL或新建常规CL
+- **占位CL识别**：检查existing_data.reserved.is_ph标志判断是否为占位CL
+- **更新策略**：
+  - 占位CL→常规CL：设置is_ph=0，保留Buffer链信息
+  - 未命中→新建：直接fill_pt创建常规CL
+  - 常规CL→更新：直接fill覆盖
+
+```mermaid
+sequenceDiagram
+participant PT as "PTCache"
+participant Base as "CacheBase"
+PT->>PT : "batch_update_placeholders"
+loop "遍历updates"
+PT->>PT : "lookup_pt检查占位CL"
+alt "命中占位CL"
+PT->>PT : "更新is_ph=0, 设置Buffer链"
+PT->>Base : "fill覆盖占位CL为常规CL"
+else "未命中"
+PT->>Base : "fill_pt新建常规CL"
+else "命中常规CL"
+PT->>Base : "fill直接更新"
+end
+end
+```
+
+**图表来源**
+- [pt_cache.cpp:237-295](file://iommu/cache_src/cache/pt_cache.cpp#L237-L295)
+
+### 去重缓冲区管理
+去重缓冲区（Dedup Buffer）通过以下组件实现：
+
+- **DedupBuffer类**：管理256个Buffer Entry，支持顺序分配和链表挂接
+- **BufferEntry结构**：包含gscid、pscid、iova、stage、sv48、gstage_x4、next_index、task_ptr等字段
+- **链表管理**：通过next_index形成Buffer链表，支持任务挂起和批量恢复
+
+```mermaid
+classDiagram
+class DedupBufferEntry {
++uint8_t valid
++uint8_t reserved1[3]
++gscid_t gscid
++pscid_t pscid
++iova_t iova
++TransStage stage
++bool sv48
++bool gstage_x4
++uint8_t next_index
++iommu_task_t* task_ptr
++bool is_valid()
++void clear()
+}
+class DedupBuffer {
++DedupBufferEntry entries[256]
++uint8_t valid_count
++uint8_t allocate_entry()
++void free_entry(uint8_t idx)
++bool is_full()
++uint8_t get_valid_count()
++void reset()
+}
+DedupBuffer --> DedupBufferEntry : "管理256个条目"
+```
+
+**图表来源**
+- [dedup_buffer.h:13-122](file://iommu/cache_src/common/dedup_buffer.h#L13-L122)
+
+### flush_dedup_buffer_chain机制
+flush_dedup_buffer_chain负责去重缓冲区的批量处理：
+
+- **链表遍历**：从head_index开始，沿next_index遍历整个Buffer链
+- **批量恢复**：将链表中的所有任务批量转发给forwarder
+- **Buffer释放**：释放链表中所有Buffer Entry，重置状态
+
+**章节来源**
+- [pt_cache.h:48-59](file://iommu/cache_src/cache/pt_cache.h#L48-L59)
+- [pt_cache.cpp:149-295](file://iommu/cache_src/cache/pt_cache.cpp#L149-L295)
+- [dedup_buffer.h:13-122](file://iommu/cache_src/common/dedup_buffer.h#L13-L122)
+- [iommu_top.hh:146-167](file://iommu/iommu_top.hh#L146-L167)
+
 ## 依赖关系分析
 - PTCache 依赖 CacheBase 提供的通用缓存能力；CacheBase 再依赖替换策略、统计收集器与配置。
 - PTTag/PTData 依赖公共类型定义，如 TransStage、PageSize、spte_t/gpte_t 等。
 - 配置通过 JSON 解析注入到缓存子系统，最终传入 PTCache 构造函数。
 - **A/D位支持**：依赖iommu_task.hh中的SADE字段和iommu_perf_params.hh中的配置。
 - **VA去重功能**：依赖iommu_perf_params.hh中的PT_CACHE_VA_DEDUP_ENABLED配置，通过iommu_top.hh中的数据结构实现。
+- **占位CL与去重缓冲区**：依赖dedup_buffer.h中的DedupBuffer类，通过iommu_top.hh中的flush_dedup_buffer_chain实现。
 
 ```mermaid
 graph LR
@@ -626,6 +791,9 @@ Dedup --> Top["iommu_top.hh/.cc"]
 ADSupport["A/D位支持"] --> Task["iommu_task.hh"]
 ADSupport --> Convert["task_cache_convert.cc"]
 ADSupport --> Response["pt_cache_response.cc"]
+PHSupport["占位CL支持"] --> PHInterface["pt_cache.h/.cpp"]
+PHSupport --> DB["dedup_buffer.h"]
+PHSupport --> PF["flush_dedup_buffer_chain"]
 ```
 
 **图表来源**
@@ -636,6 +804,7 @@ ADSupport --> Response["pt_cache_response.cc"]
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [iommu_task.hh:160-162](file://iommu/include/iommu_task.hh#L160-L162)
+- [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
 
 **章节来源**
 - [pt_cache.cpp:5-8](file://iommu/cache_src/cache/pt_cache.cpp#L5-L8)
@@ -645,6 +814,7 @@ ADSupport --> Response["pt_cache_response.cc"]
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [iommu_task.hh:160-162](file://iommu/include/iommu_task.hh#L160-L162)
+- [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
 
 ## 性能考量
 - 命中率优化
@@ -652,19 +822,23 @@ ADSupport --> Response["pt_cache_response.cc"]
   - 选择替换策略：SRRIP 在高并发场景表现稳定；PLRU 更简单且适合低开销需求。
   - 预取策略：利用 from_prefetch 标记，结合命中统计评估预取收益。
   - **VA去重优化**：对于具有高空间局部性的工作负载，VA去重可显著减少PTW任务数量。
+  - **占位CL优化**：合理配置预取深度D，平衡预取收益与Cache占用。
 - 内存占用
   - 每个缓存行包含 tag + data + 控制位，内存占用约为 (tag_size + data_size + 1字节控制位) × sets × ways。
   - PTData 包含 VS/G 两阶段 PTE 与 reserved 字段，占用相对较大，需权衡精度与容量。
   - **VA去重表内存**：每个去重表项约占用24字节（1+4+8+8+4），实际占用取决于活跃页面数量。
+  - **去重缓冲区内存**：256个Buffer Entry，每个Entry约占用20字节，总占用约5KB。
   - **A/D位存储**：每个PTData额外存储A/D位状态，增加约2位存储开销。
 - 延迟优化
   - 减少仲裁等待：合理设置 arbiter_latency_cycles 与流水线延迟参数。
   - 降低替换开销：在替换路径较长时，考虑增大 sets 或采用更高效的替换策略。
   - **VA去重延迟**：去重命中可避免PTW延迟，但需要额外的去重表查找和同步开销。
   - **A/D位检查延迟**：增加的A/D位检查逻辑带来微小延迟，但避免了不必要的PTW请求。
+  - **占位CL延迟**：占位CL机制可减少重复PTW，但需要额外的缓冲区管理和替换保护逻辑。
 - 命中率分析
   - 参考仓库提供的命中率分析文档，结合工作负载特征调整缓存规模与替换策略。
   - **VA去重效果评估**：通过统计信息分析去重命中率和PTW任务节省率。
+  - **占位CL效果评估**：通过PT_CACHE_ACCESS_ANALYSIS文档评估占位CL的命中模式和预取效果。
   - **A/D位影响分析**：评估A/D位检查对整体性能的影响，通常为正向优化。
 
 **章节来源**
@@ -672,6 +846,7 @@ ADSupport --> Response["pt_cache_response.cc"]
 - [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
 - [PT_CACHE_HIT_RATE_ANALYSIS.md](file://PT_CACHE_HIT_RATE_ANALYSIS.md)
 - [iommu_top.cc:547-556](file://iommu/iommu_top.cc#L547-L556)
+- [PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md](file://PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md)
 
 ## 故障排查指南
 - 命中率异常偏低
@@ -679,6 +854,7 @@ ADSupport --> Response["pt_cache_response.cc"]
   - 关注预取命中统计，评估预取策略有效性。
   - **VA去重问题**：检查va_dedup_table大小是否过大导致内存压力。
   - **A/D位问题**：检查A/D位状态是否正确传递，确认SADE配置。
+  - **占位CL问题**：检查insert_placeholder返回值，确认占位CL插入是否成功。
 - 失效不生效
   - 确认失效模式（PRECISE/SCAN/GLOBAL）与谓词条件是否匹配预期。
   - 检查 stage 标志（STAGE1_ONLY/STAGE2_ONLY/STAGE1_AND_2）是否与失效目标一致。
@@ -693,15 +869,20 @@ ADSupport --> Response["pt_cache_response.cc"]
     - A/D更新频繁：检查SADE配置和访问模式
     - A/D位不正确：验证make_pt_data函数的A/D位传递逻辑
     - 性能下降：确认A/D位检查逻辑的优化效果
+  - **占位CL相关问题**：
+    - 占位CL插入失败：检查Cache是否被is_req=1的占位CL完全保护
+    - 预取未生效：检查batch_update_placeholders是否正确执行
+    - Buffer满：检查DedupBuffer的有效计数，确认是否达到256上限
 
 **章节来源**
 - [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
 - [pt_cache.cpp:41-95](file://iommu/cache_src/cache/pt_cache.cpp#L41-L95)
 - [cache_base.h:442-538](file://iommu/cache_src/cache/cache_base.h#L442-L538)
 - [iommu_top.cc:547-556](file://iommu/iommu_top.cc#L547-L556)
+- [PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md](file://PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md)
 
 ## 结论
-PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架，PTCache 在其中承担 IOTLB 的核心职责。其设计兼顾了查找效率、替换策略灵活性与性能统计可观测性。**新增的A/D位支持功能进一步完善了PT Cache的内存访问跟踪能力，通过A/D位检查机制实现了更精确的访问监控和硬件更新控制。** **新增的VA去重功能进一步提升了性能，通过deduplication table实现了同页VA访问的去重优化，显著减少了重复的PTW任务。**通过合理的配置与替换策略选择，可在不同工作负载下获得稳定的命中率与较低的地址转换延迟。
+PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架，PTCache 在其中承担 IOTLB 的核心职责。其设计兼顾了查找效率、替换策略灵活性与性能统计可观测性。**新增的A/D位支持功能进一步完善了PT Cache的内存访问跟踪能力，通过A/D位检查机制实现了更精确的访问监控和硬件更新控制。** **新增的VA去重功能进一步提升了性能，通过deduplication table实现了同页VA访问的去重优化，显著减少了重复的PTW任务。** **新增的占位CL与去重缓冲区功能实现了预取优化和任务挂起管理，通过占位缓存行和Buffer链表机制，有效减少了重复的页表遍历操作。**通过合理的配置与替换策略选择，可在不同工作负载下获得稳定的命中率与较低的地址转换延迟。
 
 ## 附录
 
@@ -729,12 +910,16 @@ PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架
 - **A/D位配置**
   - SADE：硬件A/D更新允许标志（在iommu_task.hh中定义）
   - GADE：G-stage硬件A/D更新允许标志（在iommu_task.hh中定义）
+- **占位CL配置**
+  - PT_DEDUP_BUFFER_SIZE：去重缓冲区大小（默认256）
+  - prefetch_depth：预取深度D值
 
 **章节来源**
 - [types.h:573-612](file://iommu/cache_src/common/types.h#L573-L612)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [iommu_task.hh:160-162](file://iommu/include/iommu_task.hh#L160-L162)
+- [dedup_buffer.h:60-61](file://iommu/cache_src/common/dedup_buffer.h#L60-L61)
 
 ### 代码示例路径（不含具体代码内容）
 - 查找页表项
@@ -770,5 +955,12 @@ PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架
   - [去重检查实现:78-108](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L78-L108)
   - [去重恢复实现:477-529](file://iommu/iommu_top.cc#L477-L529)
   - [统计输出:547-556](file://iommu/iommu_top.cc#L547-L556)
+- **占位CL与去重缓冲区功能**
+  - [insert_placeholder接口:48-54](file://iommu/cache_src/cache/pt_cache.h#L48-L54)
+  - [batch_update_placeholders接口:56-59](file://iommu/cache_src/cache/pt_cache.h#L56-L59)
+  - [占位CL插入实现:149-235](file://iommu/cache_src/cache/pt_cache.cpp#L149-L235)
+  - [批量更新实现:237-295](file://iommu/cache_src/cache/pt_cache.cpp#L237-L295)
+  - [DedupBuffer类:60-118](file://iommu/cache_src/common/dedup_buffer.h#L60-L118)
+  - [flush_dedup_buffer_chain:150-157](file://iommu/iommu_top.hh#L150-L157)
 - 性能模型集成
   - [PT Cache 响应线程:26-26](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L26-L26)

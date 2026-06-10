@@ -241,8 +241,11 @@ void pt_miss_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
     // PT miss: need to walk page table
     task->state = TASK_PTW_REQ;
     
-    printf("[CONVERT] task_id=%u <- PT_LOOKUP response (MISS)\n",
-           task->task_id);
+    // [FIX] 复制Buffer链头索引到task,供Monitor flush时使用
+    task->dedup_head_index = resp.dedup_head_index;
+    
+    printf("[CONVERT] task_id=%u <- PT_LOOKUP response (MISS, dedup_head=%u)\n",
+           task->task_id, resp.dedup_head_index);
     fflush(stdout);
 }
 

@@ -77,6 +77,7 @@ public:
     
     // NEW: PT Cache去重功能接口
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
+    DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     void set_pt_dedup_enabled(bool enabled) { pt_dedup_enabled_ = enabled; }
 
     // 级联失效: DC/PC 失效后产生关联失效消息，推入 PT/Walker/MSIPT 的失效 FIFO

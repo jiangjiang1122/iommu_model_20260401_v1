@@ -557,12 +557,20 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                     entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
                     entry.next_index = DEDUP_BUFFER_INVALID_IDX;
                     
-                    // [NOTE] 更新PT Cache: head=new, tail=new, is_req=1
-                    // 这需要PT Cache支持update_placeholder接口
-                    // 简化方案: 不更新PT Cache,仅在Buffer中标记
-                    // flush时使用next_index遍历
+                    // [FIX] 更新PT Cache: head=new, tail=new, is_req=1
+                    bool update_success = pt_cache_->update_placeholder(
+                        req.gscid, req.pscid, req.iova,
+                        req.stage, req.pt_sv48, req.pt_gstage_x4,
+                        new_idx, new_idx, true  // is_req=1
+                    );
                     
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch placeholder HIT, allocated new entry (idx=%u), set as new head\n",
+                    if (!update_success) {
+                        printf("[PT_CACHE_EXECUTE] WARNING: task_id=%u -> Failed to update placeholder\n",
+                               req.task_id);
+                        fflush(stdout);
+                    }
+                    
+                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch placeholder HIT, allocated new entry (idx=%u), updated PT Cache (is_req=1)\n",
                            req.task_id, new_idx);
                     fflush(stdout);
                     
@@ -601,9 +609,12 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                     auto& tail_entry = dedup_buffer_->entries[tail_idx];
                     tail_entry.next_index = new_idx;
                     
-                    // 更新占位CL的tail_index
-                    // [NOTE] 这里需要更新PT Cache中的占位CL，但当前无法直接修改
-                    // 简化方案：不更新tail_index，flush时使用next_index遍历
+                    // [FIX] 更新PT Cache中的tail_index，使后续HIT能正确追加到链表尾部
+                    pt_cache_->update_placeholder(
+                        req.gscid, req.pscid, req.iova,
+                        req.stage, req.pt_sv48, req.pt_gstage_x4,
+                        head_idx, new_idx, true  // tail_index = new_idx, is_req保持1
+                    );
                     
                     printf("[PT_CACHE_EXECUTE] task_id=%u -> Placeholder HIT, allocated+linked (head=%u, tail=%u, new=%u)\n",
                            req.task_id, head_idx, tail_idx, new_idx);
@@ -650,12 +661,13 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
             );
             
             if (insert_success) {
-                // 步骤4: 返回HIT（占位CL已插入）
-                resp.hit = true;
+                // 步骤4: 返回MISS（占位CL已插入，后续HIT该占位CL的任务只挂Buffer）
+                // 设计文档: MISS的任务发PTW请求，HIT占位CL的任务挂起等待
+                resp.hit = false;
                 resp.dedup_head_index = head_idx;  // 传递Buffer索引给collector
                 resp.latency += insert_latency;
                 
-                // 填充resp.pt_data，标记为占位CL
+                // 填充resp.pt_data，标记为占位CL（供日志参考）
                 resp.pt_data.reserved.is_ph = 1;
                 resp.pt_data.reserved.head_index = head_idx;
                 resp.pt_data.reserved.tail_index = head_idx;
@@ -695,14 +707,19 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                        req.task_id, head_idx, page_iova);
                 fflush(stdout);
             } else {
-                // 插入失败（Cache满），释放Buffer Entry
+                // [FIX] 插入失败（Cache满），释放Buffer Entry,返回MISS
+                // 设计文档4.3: 主任务占位CL替换失败时,直接转发到PTW模块进行地址翻译
                 dedup_buffer_->free_entry(head_idx);
-                printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, placeholder insert FAILED (Cache full)\n",
+                resp.hit = false;
+                printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, placeholder insert FAILED (Cache full), fallback to direct PTW\n",
                        req.task_id);
                 fflush(stdout);
             }
         } else {
-            printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, Buffer full\n", req.task_id);
+            // [FIX] Buffer满,降级处理:返回MISS,让collector直接转发到PTW
+            // 设计文档4.3: 主任务占位CL替换失败时,直接转发到PTW模块进行地址翻译
+            resp.hit = false;
+            printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, Buffer full, fallback to direct PTW\n", req.task_id);
             fflush(stdout);
         }
     }

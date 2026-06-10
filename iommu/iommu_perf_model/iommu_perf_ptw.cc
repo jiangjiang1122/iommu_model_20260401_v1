@@ -5,6 +5,7 @@
 #include "iommu_top.hh"
 #include "iommu_task_cache_convert.hh"
 #include <cstdio>
+#include <vector>
 
 // ============================================================
 // 12.13 ptw_req_thread - PTW Request Dispatch (PEQ-based pipeline)
@@ -1128,6 +1129,28 @@ void iommu_top::prefetch_group_monitor_thread() {
                 // 注意: pt_updates已在PTW_PREFETCH_WAIT状态中填充
                 auto* main_task = group.main_task;
                 
+                // [FIX] 安全检查
+                if (main_task == nullptr) {
+                    printf("[PTW_PREFETCH_MONITOR] ERROR: main_task is nullptr for group %u!\n", group_id);
+                    fflush(stdout);
+                    it = prefetch_groups.erase(it);
+                    continue;
+                }
+                
+                // [FIX] 动态计算stage（与task_to_pt_request保持一致）
+                bool sv48 = (main_task->iosatp.MODE == IOSATP_Sv48);
+                bool gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4);
+                bool stage1_bare = (main_task->iosatp.MODE == RVI_IOMMU_IOSATP_Bare);
+                bool stage2_bare = (main_task->iohgatp.MODE == RVI_IOMMU_IOHGATP_Bare);
+                iommu::TransStage stage;
+                if (stage1_bare && !stage2_bare) {
+                    stage = iommu::TransStage::STAGE2_ONLY;
+                } else if (!stage1_bare && !stage2_bare) {
+                    stage = iommu::TransStage::STAGE1_AND_2;
+                } else {
+                    stage = iommu::TransStage::STAGE1_ONLY;
+                }
+                
                 std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
                 
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
@@ -1138,8 +1161,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                     pt_data.g_pte.raw = main_task->walk_ctx.pt_updates[i].g_pte.raw;
                     pt_data.reserved.raw = 0;
                     pt_data.reserved.valid = 1;
-                    pt_data.reserved.trans_type = static_cast<uint32_t>(
-                        iommu::TransStage::STAGE1_AND_2);
+                    pt_data.reserved.trans_type = static_cast<uint32_t>(stage);
                     pt_data.reserved.input_page_size = 0;  // 4KB
                     pt_data.reserved.result_page_size = 0;  // 4KB
                     pt_data.reserved.iova_is_va = 1;
@@ -1154,32 +1176,51 @@ void iommu_top::prefetch_group_monitor_thread() {
                     fflush(stdout);
                 }
                 
-                // 调用PT Cache批量更新
-                bool sv48 = (main_task->iosatp.MODE == IOSATP_Sv48);
-                bool gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4);
+                // ========== 收集所有Buffer链头（batch_update前，占位CL还保留head_index） ==========
+                std::vector<uint8_t> chain_heads;
+                for (uint32_t i = 0; i < group.total_tasks; i++) {
+                    if (group.group_iovas[i] == 0) continue;
+                    
+                    iommu::PTData existing_data;
+                    sc_time lat;
+                    bool hit = cache_sub.pt_cache().lookup_pt(
+                        main_task->GSCID, main_task->PSCID, group.group_iovas[i],
+                        stage, sv48, gstage_x4, existing_data, lat);
+                    
+                    if (hit && existing_data.reserved.is_ph == 1) {
+                        uint8_t h = existing_data.reserved.head_index;
+                        // 检查是否已收集（去重）
+                        bool dup = false;
+                        for (uint8_t ch : chain_heads) {
+                            if (ch == h) { dup = true; break; }
+                        }
+                        if (!dup && h != DEDUP_BUFFER_INVALID_IDX) {
+                            chain_heads.push_back(h);
+                        }
+                    }
+                }
+                
+                printf("[PTW_PREFETCH_MONITOR] Group %u: collected %zu buffer chain heads\n",
+                       group_id, chain_heads.size());
+                fflush(stdout);
+                
+                // ========== 批量更新PT Cache ==========
                 cache_sub.pt_cache().batch_update_placeholders(
                     main_task->GSCID, main_task->PSCID, batch_updates,
-                    iommu::TransStage::STAGE1_AND_2, sv48, gstage_x4);
+                    stage, sv48, gstage_x4);
                 
                 printf("[PTW_PREFETCH_MONITOR] Group %u PT Cache batch update completed (%zu entries)\n",
                        group_id, batch_updates.size());
                 fflush(stdout);
                 
-                // ========== Flush Dedup Buffer链表 ==========
-                uint8_t head_idx = main_task->dedup_head_index;
-                if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
-                    // 调用独立的flush函数
-                    flush_dedup_buffer_chain(head_idx, group_id, main_task,
-                                            &main_task->walk_ctx.pt_updates[0].vs_pte,
-                                            &main_task->walk_ctx.pt_updates[0].g_pte,
-                                            &main_task->walk_ctx.pt_updates[0].page_sz,
+                // ========== Flush所有Buffer链（包括主链和预取链） ==========
+                for (uint8_t h : chain_heads) {
+                    flush_dedup_buffer_chain(h, group_id, main_task,
                                             group.group_iovas,
                                             group.total_tasks);
                 }
                 
-                // 释放主任务
-                main_task->state = TASK_PTW_DONE;
-                pt_cache_to_fwd_fifo.write(main_task);
+                // 注意: 主任务已在flush_dedup_buffer_chain中转发,不再单独转发
                 
                 // 更新统计
                 ptw_outstanding_task_count--;
@@ -1202,8 +1243,8 @@ void iommu_top::prefetch_group_monitor_thread() {
                 
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
                 
-                printf("[PTW_PREFETCH_MONITOR] Group %u completed, released main task to forwarder.\n",
-                       group_id);
+                printf("[PTW_PREFETCH_MONITOR] Group %u completed, flushed %zu buffer chains.\n",
+                       group_id, chain_heads.size());
                 fflush(stdout);
                 
                 // 删除组记录

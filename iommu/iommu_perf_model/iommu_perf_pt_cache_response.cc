@@ -9,6 +9,13 @@
 // collector_pt_response_thread - Process PT cache hit/miss responses
 // Reads from cache_sub.pt_hit_response_fifo and pt_miss_response_fifo
 // Routes tasks to forwarder (hit) or PTW (miss)
+//
+// 设计文档流程:
+// - HIT常规CL (is_ph=0): 直接转发到Forwarder
+// - HIT占位CL (is_ph=1): 任务已在execute_pt_request中挂接到Buffer,
+//   这里只记录日志,不发PTW,等待Monitor处理
+// - MISS: 占位CL已在execute_pt_request中插入,
+//   这里发送PTW请求(prefetch_enabled=true, depth=D)
 // ============================================================
 void iommu_top::collector_pt_response_thread() {
     while (true) {
@@ -21,9 +28,6 @@ void iommu_top::collector_pt_response_thread() {
         // =====================================================================
         iommu::CacheMessage resp;
         while (cache_sub.pt_hit_response_fifo.nb_read(resp)) {
-            printf("[PT_CACHE] task_id=%u -> HIT response received\n", resp.task_id);
-            fflush(stdout);
-
             pt_cache_mtx.lock();
             if (pt_cache_pending_tasks.find(resp.task_id) != pt_cache_pending_tasks.end()) {
                 iommu_task_t* task = pt_cache_pending_tasks[resp.task_id];
@@ -33,27 +37,21 @@ void iommu_top::collector_pt_response_thread() {
                 // Convert CacheMessage response to task
                 pt_hit_response_to_task(resp, task);
 
-                // [SIMPLIFIED] 占位CL和常规CL统一处理：直接转发
-                // Buffer操作已在execute_pt_request中完成，collector不关心Buffer细节
+                bool is_placeholder = (resp.pt_data.reserved.is_ph == 1);
                 
-                // 检查 A/D 位是否需要更新
-                bool need_ad_update = (task->vs_pte.A == 0 || (task->is_write && task->vs_pte.D == 0));
-                
-                if (need_ad_update && task->SADE == 1) {
-                    // A/D 未设置且 SADE=1，需要送 PTW 进行硬件更新
-                    printf("[PT_CACHE] task_id=%u -> HIT but A/D update needed (A=%d, D=%d), routing to PTW\n",
-                           task->task_id, task->vs_pte.A, task->vs_pte.D);
-                    fflush(stdout);
-                    
-                    task->state = TASK_PTW_REQ;
-                    pt_cache_to_ptw_fifo.write(task);
-                } else {
-                    // A/D 已设置或 SADE=0，直接转发
-                    printf("[PT_CACHE] task_id=%u -> HIT, routing to fwd_fifo (pa=0x%lx, A=%d, D=%d, is_ph=%d)\n",
-                           task->task_id, task->pa, task->vs_pte.A, task->vs_pte.D,
-                           resp.pt_data.reserved.is_ph);
+                if (!is_placeholder) {
+                    // 常规CL HIT: 直接转发到Forwarder
+                    printf("[PT_CACHE] task_id=%u -> HIT regular CL, routing to fwd_fifo (pa=0x%lx)\n",
+                           task->task_id, task->pa);
                     fflush(stdout);
                     pt_cache_to_fwd_fifo.write(task);
+                } else {
+                    // 占位CL HIT: 任务已在execute_pt_request中挂接到Buffer
+                    // 不发PTW,等待Monitor处理
+                    printf("[PT_CACHE] task_id=%u -> HIT placeholder CL (is_ph=1), task suspended in Buffer (no PTW)\n",
+                           task->task_id);
+                    fflush(stdout);
+                    // 注意：不能delete task，Monitor会flush Buffer并转发任务
                 }
             } else {
                 pt_cache_mtx.unlock();
@@ -64,13 +62,11 @@ void iommu_top::collector_pt_response_thread() {
 
         // =====================================================================
         // Process PT Miss Response
-        // [NOTE] 正常情况下不会到达这里，因为execute_pt_request会在MISS时插入占位CL并返回HIT
-        // 保留此分支作为兜底处理
+        // MISS时占位CL已在execute_pt_request中插入,任务已挂接到Buffer
+        // 这里发送PTW请求,触发PTW walk + Burst预取
         // =====================================================================
         while (cache_sub.pt_miss_response_fifo.nb_read(resp)) {
-            // DEBUG: 打印MISS的详细信息
-            printf("[PT_CACHE] task_id=%u -> MISS response received (UNEXPECTED, should be handled by execute_pt_request)\n",
-                   resp.task_id);
+            printf("[PT_CACHE] task_id=%u -> MISS response received\n", resp.task_id);
             fflush(stdout);
 
             pt_cache_mtx.lock();
@@ -82,15 +78,16 @@ void iommu_top::collector_pt_response_thread() {
                 // Convert CacheMessage response to task
                 pt_miss_response_to_task(resp, task);
 
-                // [FALLBACK] 直接发送PTW，不进行去重
-                printf("[PT_CACHE_FALLBACK] task_id=%u -> Direct PTW (dedup not available)\n",
-                       task->task_id);
+                // 发送PTW请求 (带预取参数)
+                // 任务已在Buffer中(execute_pt_request中分配),PTW完成后Monitor会flush
+                bool prefetch_en = task->walk_ctx.prefetch_enabled;
+                uint32_t prefetch_d = task->walk_ctx.prefetch_depth;
+                
+                printf("[PT_CACHE] task_id=%u -> MISS, sending PTW request (prefetch_enabled=%d, depth=%u)\n",
+                       task->task_id, prefetch_en, prefetch_d);
                 fflush(stdout);
                 
-                task->walk_ctx.prefetch_enabled = false;
-                task->walk_ctx.prefetch_depth = 0;
                 task->state = TASK_PTW_REQ;
-                
                 pt_cache_to_ptw_fifo.write(task);
             } else {
                 pt_cache_mtx.unlock();

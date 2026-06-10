@@ -148,11 +148,9 @@ public:
     sc_mutex pt_dedup_buffer_mtx;  // Mutex for Buffer concurrent access protection
     
     // NEW: Flush Dedup Buffer chain (唤醒挂起任务、计算PA、释放Entry)
+    // [FIX] 使用main_task->walk_ctx.pt_updates访问PTE数据,避免指针算术错误
     void flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
                                   iommu_task_t* main_task,
-                                  const spte_t* vs_ptes,
-                                  const gpte_t* g_ptes,
-                                  const uint64_t* page_szs,
                                   const uint64_t* group_iovas,
                                   uint32_t total_tasks);
     
@@ -166,8 +164,12 @@ public:
                                bool sv48,
                                bool gstage_x4);
     
-    // ===================== NEW: Prefetch Group Tracking =====================
-    // 预取组状态追踪(完整9笔独立walk方案)
+    // ===================== NEW: PTW Response FIFO (顺序处理) =====================
+    // [重构] 使用FIFO替代prefetch_groups map,保证响应顺序处理
+    sc_fifo<iommu_task_t*> ptw_response_fifo;  // PTW完成响应FIFO
+    sc_event ptw_response_event;               // PTW响应事件
+    
+    // [保留] 预取组状态追踪 (兼容现有PTW逻辑,后续可移除)
     struct PrefetchGroupState {
         iommu_task_t* main_task = nullptr;    // 主任务指针
         uint32_t pending_tasks = 0;           // 待完成walk数
@@ -184,7 +186,7 @@ public:
     
     std::map<uint32_t, PrefetchGroupState> prefetch_groups;  // key=group_id
     sc_mutex prefetch_group_mtx;
-    sc_event prefetch_group_completed_event;
+    sc_event prefetch_group_completed_event;  // [保留] 用于触发Monitor
 
     // ===================== IOMMU/PTW IOPS Counters =====================
     uint64_t iommu_total_completed;  // IOMMU 出口完成翻译总数
