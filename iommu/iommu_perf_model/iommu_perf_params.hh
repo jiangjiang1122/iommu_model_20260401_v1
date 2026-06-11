@@ -33,7 +33,7 @@ static const uint32_t FIFO_DEPTH_DC_CACHE_TO_COLLECTOR = 4;
 static const uint32_t FIFO_DEPTH_PC_CACHE_TO_COLLECTOR = 4;
 
 // 最终输出路径
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 4;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 32;
 static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_FWD = 4;
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_FAULT = 4;
 
@@ -115,9 +115,9 @@ static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能�
 
 // ===================== PT Cache去重+预取模块参数 =====================
 static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
-static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
+static const uint32_t PT_DEDUP_BUFFER_SIZE = 512;            // Buffer大小（entries）- 扩大到512验证性能瓶颈
 static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 8;           // 预取深度（页数量，默认=8）
-static const uint8_t DEDUP_BUFFER_INVALID_IDX = 0xFF;        // 无效索引标记
+static const uint16_t DEDUP_BUFFER_INVALID_IDX = 0xFFFF;     // 无效索引标记（支持512 entries）
 
 // ===================== Collector Outstanding 限制 =====================
 static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限

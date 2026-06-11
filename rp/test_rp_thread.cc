@@ -62,14 +62,14 @@ void RP_Module::send_translation_request_1_thread()
         pte6.X = 0;
         pte6.U = 1;
         pte6.G = 0;
-        pte6.A = 0;
-        pte6.D = 0;
+        pte6.A = 1;
+        pte6.D = 1;
         pte6.PBMT = PMA;
 
-        // Map 13 pages for 100 requests (8 requests per 4KB page, stride=512B)
-        // IOVA range: 0x10000 to 0x10000+99*512=0x17E80
-        // PA range: 0x20000 to 0x20000+99*512=0x27E80 (PA = IOVA + 0x10000)
-        for (int p = 0; p < 13; p++) {
+        // Map 38 pages for 300 requests (8 requests per 4KB page, stride=512B)
+        // IOVA range: 0x10000 to 0x10000+299*512=0x25580
+        // PA range: 0x20000 to 0x20000+299*512=0x35580 (PA = IOVA + 0x10000)
+        for (int p = 0; p < 38; p++) {
             uint64_t iova_page = 0x10000 + p * 0x1000;
             uint64_t pa_page = 0x20000 + p * 0x1000;
             pte6.PPN = pa_page / PAGESIZE;
@@ -81,7 +81,7 @@ void RP_Module::send_translation_request_1_thread()
         response_count = 0;
 
         // Prepare and send 20 translation requests (D=3 test)
-        const int NUM_REQUESTS = 20;
+        const int NUM_REQUESTS = 300;
 
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for %d-request test...\n", NUM_REQUESTS);
@@ -196,7 +196,18 @@ void RP_Module::send_translation_request_1_thread()
             delete trans_array[i];
         }
 
-        printf("\n[TEST] 1000-request concurrent test completed!\n");
+        printf("\n[TEST] %d-request concurrent test completed!\n", NUM_REQUESTS);
+
+        // [STAT] Print Buffer peak statistics
+        auto* dedup_buf = iommu_ptr->cache_sub.get_pt_dedup_buffer();
+        if (dedup_buf) {
+            printf("\n========== PT Dedup Buffer Statistics ==========\n");
+            printf("  Buffer Size:        %u entries\n", PT_DEDUP_BUFFER_SIZE);
+            printf("  Peak Valid Count:   %u entries\n", dedup_buf->get_peak_valid_count());
+            printf("  Current Valid:      %u entries\n", dedup_buf->get_valid_count());
+            printf("  Peak Usage:         %.1f%%\n", 100.0 * dedup_buf->get_peak_valid_count() / PT_DEDUP_BUFFER_SIZE);
+            printf("==================================================\n");
+        }
 
         // 鎵撳嵃Cache鍛戒腑鐜囩粺璁′俊鎭?
         iommu_ptr->print_cache_statistics();

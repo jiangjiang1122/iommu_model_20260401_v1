@@ -918,6 +918,23 @@ void iommu_top::ptw_rsp_process_thread() {
                        task->task_id, task->walk_ctx.prefetch_depth);
                 fflush(stdout);
                 
+                // [FIX] 主任务Walker Cache更新（Burst预取路径）
+                // 主任务VS walk已完成，中间节点结果保存在walker_cache_entries中
+                // 预取任务不查询/不更新Walker Cache
+                if (PTW_WALKER_CACHE_ENABLED) {
+                    iommu::CacheMessage walker_req = task_to_walker_update(task);
+                    cache_sub.walker_update_fifo.write(walker_req);
+                    
+                    printf("[t=%llu ns][PTW_RSP] task_id=%u -> Walker Cache UPDATE (Burst path, kind=%d, L2=%d, L1=%d, L0=%d)\n",
+                           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                           task->task_id,
+                           static_cast<int>(walker_req.walker_update_kind),
+                           task->walk_ctx.walker_cache_entries.valid_level2,
+                           task->walk_ctx.walker_cache_entries.valid_level1,
+                           task->walk_ctx.walker_cache_entries.valid_level0);
+                    fflush(stdout);
+                }
+                
                 // 保存主任务信息到pt_updates[0]
                 task->walk_ctx.pt_updates[0].vs_pte = task->vs_pte;
                 task->walk_ctx.pt_updates[0].g_pte = task->g_pte;
@@ -1177,7 +1194,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                 }
                 
                 // ========== 收集所有Buffer链头（batch_update前，占位CL还保留head_index） ==========
-                std::vector<uint8_t> chain_heads;
+                std::vector<uint16_t> chain_heads;
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     if (group.group_iovas[i] == 0) continue;
                     
@@ -1188,10 +1205,10 @@ void iommu_top::prefetch_group_monitor_thread() {
                         stage, sv48, gstage_x4, existing_data, lat);
                     
                     if (hit && existing_data.reserved.is_ph == 1) {
-                        uint8_t h = existing_data.reserved.head_index;
+                        uint16_t h = existing_data.reserved.head_index;
                         // 检查是否已收集（去重）
                         bool dup = false;
-                        for (uint8_t ch : chain_heads) {
+                        for (uint16_t ch : chain_heads) {
                             if (ch == h) { dup = true; break; }
                         }
                         if (!dup && h != DEDUP_BUFFER_INVALID_IDX) {
@@ -1214,7 +1231,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                 fflush(stdout);
                 
                 // ========== Flush所有Buffer链（包括主链和预取链） ==========
-                for (uint8_t h : chain_heads) {
+                for (uint16_t h : chain_heads) {
                     flush_dedup_buffer_chain(h, group_id, main_task,
                                             group.group_iovas,
                                             group.total_tasks);

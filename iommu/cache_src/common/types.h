@@ -222,10 +222,10 @@ union pt_reserved_t {
         uint32_t sv48:1;
         uint32_t gstage_x4:1;
         uint32_t is_ph:1;              // 占位标志（1=占位，0=常规）
-        uint32_t head_index:8;         // 链表头Buffer编号（创建后永久不变）
+        uint32_t head_index:16;        // 链表头Buffer编号（创建后永久不变，支持512 entries）
         uint32_t is_req:1;             // 1=主任务(有实际请求), 0=预取占位
         uint32_t replacement_info:2;
-        uint32_t reserved:10;          // [V3.0] 原tail_index已移至Buffer entry
+        uint32_t reserved:2;           // [V3.0] 原tail_index已移至Buffer entry
     };
     uint32_t raw = 0;
 };
@@ -541,9 +541,9 @@ struct CacheMessage {
     } batch_updates[17];                            // 1+16个更新条目
     
     // NEW: Dedup Buffer索引（用于传递占位CL的Buffer entry索引）
-    uint8_t         dedup_head_index = 0xFF;
+    uint16_t        dedup_head_index = 0xFFFF;
     // [V3.0] dedup_tail_index已移除: tail_index仅在Buffer entry中
-    uint8_t         dedup_new_index = 0xFF;   // 新分配的Entry索引
+    uint16_t        dedup_new_index = 0xFFFF;   // 新分配的Entry索引
     
     // Task指针（用于在execute_pt_request中传递task，避免在collector中操作Buffer）
     void*           task_ptr = nullptr;  // iommu_task_t* 类型

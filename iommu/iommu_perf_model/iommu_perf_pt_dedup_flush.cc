@@ -62,7 +62,7 @@ void iommu_top::flush_single_pt_cache(uint64_t iova,
     }
     
     // [HIT 占位CL]: 复杂处理
-    uint8_t head_index = existing_data.reserved.head_index;
+    uint16_t head_index = existing_data.reserved.head_index;
     uint8_t is_req = existing_data.reserved.is_req;
     
     printf("[PT_FLUSH] iova=0x%lx -> HIT placeholder CL (head=%u, is_req=%u)\n",
@@ -74,7 +74,7 @@ void iommu_top::flush_single_pt_cache(uint64_t iova,
         // 4KB页: 占位CL → 常规CL
         iommu::PTData regular_data = pt_data;
         regular_data.reserved.is_ph = 0;
-        regular_data.reserved.head_index = 0xFF;
+        regular_data.reserved.head_index = 0xFFFF;
         regular_data.reserved.is_req = 0;
         
         cache_sub.pt_cache().fill_pt(gscid, pscid, iova_aligned, stage, regular_data, false);
@@ -120,7 +120,7 @@ void iommu_top::flush_single_pt_cache(uint64_t iova,
 // - group_iovas: 预取组IOVA列表
 // - total_tasks: 预取组总任务数(1+D)
 // ============================================================
-void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
+void iommu_top::flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
                                          iommu_task_t* main_task,
                                          const uint64_t* group_iovas,
                                          uint32_t total_tasks) {
@@ -144,17 +144,19 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
         return;
     }
     
-    uint8_t cur = head_index;
+    uint16_t cur = head_index;
     uint32_t flushed_count = 0;
     
     // 遍历Buffer链表
+    // [FIX] 核心优化: 先释放Buffer Entry, 再写FIFO
+    // 这样即使FIFO阻塞(depth=4), buffer entry已经释放,
+    // 其他等待分配entry的任务(pt_worker_thread)可以立即使用
     while (cur != DEDUP_BUFFER_INVALID_IDX) {
         auto& entry = dedup_buf->entries[cur];
-        uint8_t next_idx = entry.next_index;
+        uint16_t next_idx = entry.next_index;
+        iommu_task_t* pending_task = entry.task_ptr;  // 保存task_ptr(free后会清空)
         
-        if (entry.task_ptr != nullptr) {
-            iommu_task_t* pending_task = entry.task_ptr;
-            
+        if (pending_task != nullptr) {
             // 计算PA：使用对应IOVA的PTE.PPN + task的offset
             uint64_t page_iova = pending_task->iova & ~0xFFFULL;  // 4KB页对齐
             uint64_t offset = pending_task->iova & 0xFFFL;         // 页内偏移
@@ -194,18 +196,21 @@ void iommu_top::flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
             
             // 设置任务状态为PTW完成
             pending_task->state = TASK_PTW_DONE;
-            
-            // 发送到forwarder
-            pt_cache_to_fwd_fifo.write(pending_task);
-            flushed_count++;
-            
-            printf("[DEDUP_FLUSH] task_id=%u -> Forwarded to FIFO (chain position: cur=%u, next=%u)\n",
-                   pending_task->task_id, cur, next_idx);
-            fflush(stdout);
         }
         
-        // 释放Buffer Entry
+        // [FIX] 先释放Buffer Entry（在FIFO write之前!）
+        // 确保即使FIFO阻塞, entry也已释放, pt_worker_thread可以立即分配
         dedup_buf->free_entry(cur);
+        flushed_count++;
+        
+        printf("[DEDUP_FLUSH] entry[%u] freed first (task_ptr=%p, next=%u) -> forwarding\n",
+               cur, (void*)pending_task, next_idx);
+        fflush(stdout);
+        
+        // 发送到forwarder（可能阻塞, 但entry已释放）
+        if (pending_task != nullptr) {
+            pt_cache_to_fwd_fifo.write(pending_task);
+        }
         
         // 移动到下一个
         cur = next_idx;

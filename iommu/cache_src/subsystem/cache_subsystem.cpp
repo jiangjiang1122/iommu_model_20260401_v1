@@ -544,7 +544,7 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                 fflush(stdout);
                 
                 // [P3] 分配新Buffer Entry（Buffer满时阻塞等待）
-                uint8_t new_idx = dedup_buffer_->allocate_entry();
+                uint16_t new_idx = dedup_buffer_->allocate_entry();
                 if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                     printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (prefetch HIT), blocking...\n",
                            req.task_id);
@@ -592,13 +592,13 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
             // V3.0核心优化: 仅写Buffer, 零PT Cache写入!
             else {
                 // 占位CL HIT：需要分配新Buffer Entry、填充task_ptr、挂接到链表
-                uint8_t head_idx = data.reserved.head_index;
+                uint16_t head_idx = data.reserved.head_index;
                 
                 // [V3.0] 从Buffer链头entry读取tail_index (不从PT Cache)
-                uint8_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
+                uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
                 
                 // [P3] 分配新Entry（Buffer满时阻塞等待）
-                uint8_t new_idx = dedup_buffer_->allocate_entry();
+                uint16_t new_idx = dedup_buffer_->allocate_entry();
                 if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                     printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (placeholder HIT), blocking...\n",
                            req.task_id);
@@ -643,7 +643,7 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
         
         // [P3] 步骤1: 分配Buffer Entry（Buffer满时阻塞等待反压释放）
         // 设计文档Section 3/8.4: Buffer满时阻塞等待，不降级
-        uint8_t head_idx = dedup_buffer_->allocate_entry();
+        uint16_t head_idx = dedup_buffer_->allocate_entry();
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
             // Buffer满，阻塞等待free_event（由flush_dedup_buffer_chain中的free_entry触发）
             printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (%u/%u), blocking...\n",
@@ -709,7 +709,7 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                         bool prefetch_success = pt_cache_->insert_placeholder(
                             req.gscid, req.pscid, prefetch_iova,
                             req.stage, req.pt_sv48, req.pt_gstage_x4,
-                            0xFF,       // head_index = 0xFF (预取占位CL无关联Buffer)
+                            0xFFFF,     // head_index = 0xFFFF (预取占位CL无关联Buffer)
                             false,      // is_req = 0 (预取占位CL)
                             &prefetch_latency
                         );

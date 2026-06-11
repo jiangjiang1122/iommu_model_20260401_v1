@@ -50,7 +50,7 @@ public:
     // 返回值: true=插入成功, false=替换失败(Cache full且所有CL都是is_req=1)
     bool insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                            TransStage stage, bool sv48, bool gstage_x4,
-                           uint8_t head_index, bool is_req = true,
+                           uint16_t head_index, bool is_req = true,
                            sc_time* latency = nullptr);
     
     // 批量更新占位CL为常规CL
@@ -62,7 +62,7 @@ public:
     // 用于分支3: 预取占位CL首次HIT时,将is_req=0更新为is_req=1
     bool update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                            TransStage stage, bool sv48, bool gstage_x4,
-                           uint8_t head_index, bool is_req);
+                           uint16_t head_index, bool is_req);
 
 protected:
     uint32_t hash_function(const PTTag& tag) const override;

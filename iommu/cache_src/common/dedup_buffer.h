@@ -30,9 +30,9 @@ struct DedupBufferEntry {
     bool      gstage_x4 = false;
     bool      reserved2 = false;           // 对齐
     
-    // 链表指针
-    uint8_t   next_index = 0xFF;           // 后继Buffer下标，无后继=0xFF
-    uint8_t   tail_index = 0xFF;           // [V3.0] 任务链尾编号（仅链头有效，非链头=0xFF）
+    // 链表指针（扩大为uint16_t支持512 entries）
+    uint16_t  next_index = 0xFFFF;         // 后继Buffer下标，无后继=0xFFFF
+    uint16_t  tail_index = 0xFFFF;         // [V3.0] 任务链尾编号（仅链头有效，非链头=0xFFFF）
     
     // 任务指针
     iommu_task_t* task_ptr = nullptr;
@@ -44,8 +44,8 @@ struct DedupBufferEntry {
         gscid = 0;
         pscid = 0;
         iova = 0;
-        next_index = 0xFF;
-        tail_index = 0xFF;
+        next_index = 0xFFFF;
+        tail_index = 0xFFFF;
         task_ptr = nullptr;
     }
 };
@@ -60,26 +60,28 @@ struct DedupBufferEntry {
  */
 struct DedupBuffer {
     DedupBufferEntry entries[PT_DEDUP_BUFFER_SIZE];
-    uint8_t          valid_count = 0;       // 当前有效Entry数量
+    uint16_t         valid_count = 0;       // 当前有效Entry数量
+    uint16_t         peak_valid_count = 0;  // [STAT] 峰值有效Entry数量
     sc_event         free_event;            // [P3/P5] Buffer释放事件（反压通知）
     
     /**
      * @brief 分配Entry（按顺序线性查找第一个空闲）
      * @return Entry索引（0~255），失败返回0xFF
      */
-    uint8_t allocate_entry() {
+    uint16_t allocate_entry() {
         if (valid_count >= PT_DEDUP_BUFFER_SIZE) {
             std::cout << "[DEDUP_BUFFER] Buffer full! Cannot allocate entry." << std::endl;
             return DEDUP_BUFFER_INVALID_IDX;
         }
         
         // 从0开始线性查找第一个空闲Entry
-        for (uint16_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
+        for (uint32_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
             if (!entries[i].is_valid()) {
                 entries[i].clear();
                 entries[i].valid = 1;
                 valid_count++;
-                return static_cast<uint8_t>(i);  // 返回索引（0, 1, 2, ...顺序）
+                if (valid_count > peak_valid_count) peak_valid_count = valid_count;
+                return static_cast<uint16_t>(i);  // 返回索引（0, 1, 2, ...顺序）
             }
         }
         
@@ -91,7 +93,7 @@ struct DedupBuffer {
      * @brief 释放Entry
      * @param idx Entry索引
      */
-    void free_entry(uint8_t idx) {
+    void free_entry(uint16_t idx) {
         if (idx == DEDUP_BUFFER_INVALID_IDX || idx >= PT_DEDUP_BUFFER_SIZE) return;
         if (entries[idx].is_valid()) {
             entries[idx].clear();
@@ -109,13 +111,14 @@ struct DedupBuffer {
     /**
      * @brief 获取当前有效Entry数量
      */
-    uint8_t get_valid_count() const { return valid_count; }
+    uint16_t get_valid_count() const { return valid_count; }
+    uint16_t get_peak_valid_count() const { return peak_valid_count; }
     
     /**
      * @brief 重置Buffer（清空所有Entry）
      */
     void reset() {
-        for (uint16_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
+        for (uint32_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
             entries[i].clear();
         }
         valid_count = 0;

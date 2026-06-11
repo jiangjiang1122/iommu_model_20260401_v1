@@ -77,8 +77,8 @@ void RP_Module::send_translation_request_1_thread()
         pte_leaf.X = 0;
         pte_leaf.U = 1;
         pte_leaf.G = 0;
-        pte_leaf.A = 0;
-        pte_leaf.D = 0;
+        pte_leaf.A = 1;
+        pte_leaf.D = 1;
         pte_leaf.PBMT = PMA;
 
         // Map 125 pages for 1000 requests (8 req per page, stride=512B)

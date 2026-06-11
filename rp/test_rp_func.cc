@@ -253,8 +253,8 @@ uint64_t RP_Module::add_device(iommu_top *iommu, uint32_t device_id, uint32_t gs
             gpte.X = 0;
             gpte.U = 1;
             gpte.G = 0;
-            gpte.A = 0;
-            gpte.D = 0;
+            gpte.A = 1;
+            gpte.D = 1;
             gpte.PBMT = PMA;
             gpte.PPN = get_free_ppn(1);
             write_memory_test_rp(zero, gpte.PPN * PAGESIZE, 4096);
@@ -277,8 +277,8 @@ uint64_t RP_Module::add_device(iommu_top *iommu, uint32_t device_id, uint32_t gs
             gpte.X = 0;
             gpte.U = 1;
             gpte.G = 0;
-            gpte.A = 0;
-            gpte.D = 0;
+            gpte.A = 1;
+            gpte.D = 1;
             gpte.PBMT = PMA;
             gpte.PPN = get_free_ppn(1);
             write_memory_test_rp( zero, gpte.PPN * PAGESIZE, 4096);
@@ -598,8 +598,8 @@ uint64_t RP_Module::add_vs_stage_pte (
             gpte.X = 0;
             gpte.U = 1;
             gpte.G = 0;
-            gpte.A = 0;
-            gpte.D = 0;
+            gpte.A = 1;
+            gpte.D = 1;
             gpte.PBMT = PMA;
             gpte.PPN = get_free_ppn(1);
 

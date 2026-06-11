@@ -149,7 +149,7 @@ public:
     
     // NEW: Flush Dedup Buffer chain (唤醒挂起任务、计算PA、释放Entry)
     // [FIX] 使用main_task->walk_ctx.pt_updates访问PTE数据,避免指针算术错误
-    void flush_dedup_buffer_chain(uint8_t head_index, uint32_t group_id,
+    void flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
                                   iommu_task_t* main_task,
                                   const uint64_t* group_iovas,
                                   uint32_t total_tasks);

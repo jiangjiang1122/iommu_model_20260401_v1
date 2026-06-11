@@ -19,15 +19,18 @@
 - [test_dedup_prefetch.sh](file://test_dedup_prefetch.sh)
 - [test_integration_dedup_prefetch.sh](file://test_integration_dedup_prefetch.sh)
 - [test_dedup_prefetch_unit.cpp](file://test_dedup_prefetch_unit.cpp)
+- [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
+- [iommu_perf_params_t2.hh](file://iommu/iommu_perf_model/iommu_perf_params_t2.hh)
 </cite>
 
 ## 更新摘要
 **所做更改**
-- 新增update_placeholder方法用于动态更新占位符元数据的详细说明
-- 修正placeholder插入和任务路由逻辑的关键架构缺陷
-- 改进dedup flush机制的内存访问安全性
-- 更新batch_update_placeholders接口的stage自动推导机制
-- 增强占位符缓存行处理的健壮性和一致性保障
+- 新增V3.0架构变更：将tail_index从PT Cache条目移动到Dedup Buffer条目
+- 实现零PT Cache写入的分支2操作，显著降低缓存写入开销
+- 新增反压通知机制，通过sc_event实现Buffer满时的阻塞等待
+- 更新接口参数，支持新的去重缓冲区管理和链表管理机制
+- 增强Buffer链表管理的内存访问安全性
+- 优化批量更新机制的stage自动推导功能
 
 ## 目录
 1. [简介](#简介)
@@ -44,9 +47,9 @@
 
 本文档详细介绍了IOMMU PT Cache去重+预取集成系统的完整实现。该系统通过占位Cache Line机制和Buffer链表管理，实现了高效的地址转换缓存去重和预取优化，显著减少了DDR访问次数并提升了整体性能。
 
-系统采用先进的去重策略，当多个请求访问同一地址空间时，只进行一次实际的页表walk操作，其余请求通过Buffer链表共享翻译结果。同时，系统集成了预取机制，在主任务翻译的同时预取相邻页面的页表项，进一步减少延迟。
+**更新** 本次更新重点反映了V3.0架构的重大变更：将tail_index从PT Cache条目移动到Dedup Buffer条目，实现零PT Cache写入的分支2操作，并新增反压通知机制。这些改进通过减少缓存写入操作、优化内存访问路径和增强系统稳定性，进一步提升了去重系统的性能和可靠性。
 
-**更新** 本次更新重点反映了PT Cache占位符缓存行处理机制的关键架构缺陷修复，包括新增的update_placeholder方法、修正的placeholder插入逻辑、改进的批处理更新机制以及增强的内存访问安全性。
+系统采用先进的去重策略，当多个请求访问同一地址空间时，只进行一次实际的页表walk操作，其余请求通过Buffer链表共享翻译结果。同时，系统集成了预取机制，在主任务翻译的同时预取相邻页面的页表项，进一步减少延迟。
 
 ## 项目结构
 
@@ -104,6 +107,24 @@ IOMMU_TOP --> TEST
 
 ## 核心组件
 
+### V3.0架构变更：去重缓冲区管理优化
+
+**更新** V3.0版本引入了重大的架构变更，将tail_index从PT Cache条目移动到Dedup Buffer条目：
+
+- **tail_index迁移**：原PT Cache条目的tail_index现在存储在Dedup Buffer条目中
+- **零写入分支2**：分支2操作（主任务占位CL已存在）实现零PT Cache写入
+- **内存访问优化**：从PT Cache读取tail_index改为从Buffer链头entry读取
+- **链表管理简化**：Buffer链表管理更加直观和高效
+
+### 反压通知机制
+
+**新增** V3.0版本新增了完整的反压通知机制：
+
+- **sc_event反压**：通过sc_event实现Buffer满时的阻塞等待
+- **自动唤醒**：Buffer Entry释放时自动通知等待的任务
+- **零降级策略**：Buffer满时不降级，而是阻塞等待
+- **线程安全**：使用SystemC事件机制确保并发安全
+
 ### PT Cache去重机制
 
 PT Cache通过占位Cache Line实现去重功能，当多个请求访问同一地址空间时，系统只进行一次实际的页表walk操作：
@@ -111,7 +132,7 @@ PT Cache通过占位Cache Line实现去重功能，当多个请求访问同一�
 - **占位CL插入**：当PT Cache未命中时，系统插入占位CL并分配Buffer Entry
 - **链表管理**：多个请求通过Buffer链表共享同一个翻译结果
 - **批量更新**：PTW完成后，系统批量更新所有占位CL为常规CL
-- **动态更新**：新增update_placeholder方法支持运行时动态更新占位符元数据
+- **动态更新**：支持运行时动态更新占位符元数据
 
 ### 占位符动态更新机制
 
@@ -142,11 +163,13 @@ PT Cache通过占位Cache Line实现去重功能，当多个请求访问同一�
 
 ### Buffer链表管理系统
 
-Buffer链表负责管理等待翻译的请求：
+**更新** Buffer链表管理经过V3.0架构优化：
 
 - **顺序分配**：按0、1、2、3...顺序线性查找空闲Entry
 - **链表挂接**：新请求通过next_index链接到链表中
-- **尾指针管理**：仅链表首节点保存真实尾指针，其他节点固定为0xFF
+- **尾指针管理**：仅链表首节点保存真实tail_index，其他节点固定为0xFF
+- **反压机制**：Buffer满时阻塞等待，不降级处理
+- **事件通知**：Entry释放时通过sc_event通知等待的任务
 
 ### 预取组监控机制
 
@@ -171,6 +194,7 @@ Buffer链表负责管理等待翻译的请求：
 - [pt_cache.cpp:281-314](file://iommu/cache_src/cache/pt_cache.cpp#L281-L314)
 - [dedup_buffer.h:20-123](file://iommu/cache_src/common/dedup_buffer.h#L20-L123)
 - [BATCH_UPDATE_MISS_ROOT_CAUSE_20260609.md:276-325](file://BATCH_UPDATE_MISS_ROOT_CAUSE_20260609.md#L276-L325)
+- [cache_subsystem.cpp:591-638](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L591-L638)
 
 ## 架构概览
 
@@ -222,7 +246,7 @@ end
 
 ### PT Cache核心实现
 
-PT Cache是整个去重系统的核心组件，提供了完整的缓存管理功能：
+**更新** PT Cache核心实现经过V3.0架构优化：
 
 ```mermaid
 classDiagram
@@ -270,6 +294,7 @@ PT Cache的主要特性包括：
 - **预取参数计算**：新增预取参数计算功能，支持动态预取深度调整
 - **预取组监控**：新增预取组生命周期管理功能
 - **动态更新**：新增update_placeholder方法支持运行时动态更新占位符元数据
+- **V3.0优化**：零写入分支2操作，显著降低缓存写入开销
 
 **章节来源**
 - [pt_cache.h:17-73](file://iommu/cache_src/cache/pt_cache.h#L17-L73)
@@ -277,13 +302,14 @@ PT Cache的主要特性包括：
 
 ### Dedup Buffer管理
 
-Dedup Buffer是去重系统的重要组成部分，负责管理Buffer Entry：
+**更新** Dedup Buffer管理经过V3.0架构重大优化：
 
 ```mermaid
 classDiagram
 class DedupBuffer {
 +entries[DedupBufferEntry]
 +valid_count : uint8_t
++free_event : sc_event
 +allocate_entry()
 +free_entry(idx)
 +is_full()
@@ -301,6 +327,7 @@ class DedupBufferEntry {
 +sv48 : bool
 +gstage_x4 : bool
 +next_index : uint8_t
++tail_index : uint8_t
 +task_ptr : iommu_task_t*
 +is_valid()
 +clear()
@@ -312,7 +339,7 @@ DedupBuffer --> DedupBufferEntry : 管理
 - [dedup_buffer.h:59-123](file://iommu/cache_src/common/dedup_buffer.h#L59-L123)
 - [dedup_buffer.h:20-49](file://iommu/cache_src/common/dedup_buffer.h#L20-L49)
 
-Buffer管理的关键特性：
+**更新** Buffer管理的关键特性：
 
 - **顺序分配**：按0、1、2、3...顺序线性查找空闲Entry
 - **链表挂接**：通过next_index维护Buffer链表
@@ -320,6 +347,8 @@ Buffer管理的关键特性：
 - **容量限制**：支持256个Buffer Entry的容量限制
 - **使用率监控**：新增Buffer使用率监控功能
 - **分配策略优化**：支持动态分配策略优化
+- **反压通知**：新增sc_event实现Buffer满时的阻塞等待
+- **事件驱动**：Entry释放时自动通知等待的任务
 
 **章节来源**
 - [dedup_buffer.h:67-97](file://iommu/cache_src/common/dedup_buffer.h#L67-L97)
@@ -327,7 +356,7 @@ Buffer管理的关键特性：
 
 ### 预取组管理
 
-预取组管理负责协调多个预取请求：
+**新增** 预取组管理负责协调多个预取请求：
 
 ```mermaid
 flowchart TD
@@ -373,7 +402,7 @@ FLUSH_CHAIN --> END[预取组结束]
 
 ### 缓冲区刷新机制
 
-缓冲区刷新机制负责将占位CL转换为常规CL并转发请求：
+**更新** 缓冲区刷新机制经过V3.0架构优化：
 
 ```mermaid
 sequenceDiagram
@@ -405,6 +434,8 @@ end
 - [iommu_perf_pt_dedup_flush.cc:124-263](file://iommu/iommu_perf_model/iommu_perf_pt_dedup_flush.cc#L124-L263)
 
 ## 依赖关系分析
+
+**更新** 依赖关系经过V3.0架构优化：
 
 ```mermaid
 graph TB
@@ -465,7 +496,7 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - [test_dedup_prefetch.sh:1-100](file://test_dedup_prefetch.sh#L1-L100)
 - [test_integration_dedup_prefetch.sh:1-100](file://test_integration_dedup_prefetch.sh#L1-L100)
 
-系统的关键依赖关系：
+**更新** 系统的关键依赖关系：
 
 - **SystemC库**：提供硬件建模和仿真框架
 - **TLM-2.0**：提供事务级建模接口
@@ -473,6 +504,7 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - **测试框架**：支持预取功能的单元测试和集成测试
 - **替换策略**：支持多种替换算法（SRRIP、PLRU）
 - **预取组件**：新增预取管理器、组监控器、参数传递器、批量更新器和更新占位符组件
+- **事件机制**：新增sc_event实现反压通知和异步通信
 
 **章节来源**
 - [cache_base.h:26-708](file://iommu/cache_src/cache/cache_base.h#L26-L708)
@@ -482,7 +514,7 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 
 ### 缓存性能优化
 
-系统在多个层面进行了性能优化：
+**更新** 缓存性能经过V3.0架构显著优化：
 
 - **去重效率**：通过占位CL机制，相同地址空间的多次访问只进行一次实际翻译
 - **预取优化**：利用页表连续性特征，一次性预取多个PTE，减少DDR访问次数
@@ -490,34 +522,49 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - **参数传递优化**：通过高效的参数传递机制减少预取操作的开销
 - **监控开销最小化**：预取组监控采用低开销设计，不影响主要性能
 - **动态更新优化**：update_placeholder方法提供高效的元数据更新机制
+- **零写入优化**：分支2操作实现零PT Cache写入，显著降低缓存写入开销
+- **内存访问优化**：tail_index迁移减少不必要的缓存访问
 
 ### 内存使用优化
+
+**更新** 内存使用经过V3.0架构优化：
 
 - **Buffer容量**：256个Buffer Entry的容量设计，平衡内存使用和去重效果
 - **占位CL存储**：PT Cache中仅存储必要的去重信息，减少存储开销
 - **链表管理**：通过链表指针高效管理多个等待翻译的请求
 - **预取参数缓存**：缓存常用的预取参数减少重复计算
 - **stage自动推导**：减少stage参数传递的开销和错误
+- **反压机制优化**：通过事件驱动减少轮询开销
 
 ### 并发处理优化
+
+**更新** 并发处理经过V3.0架构优化：
 
 - **Mutex保护**：Buffer和Cache访问使用Mutex确保线程安全
 - **无阻塞设计**：大部分操作采用无阻塞模式，提高系统吞吐量
 - **队列管理**：合理的FIFO深度配置，避免系统拥塞
 - **预取组并发控制**：通过预取组管理器控制并发预取操作的数量
 - **动态更新并发**：update_placeholder方法支持并发安全的元数据更新
+- **事件驱动并发**：通过sc_event实现高效的异步通知和等待机制
+- **零降级策略**：Buffer满时不降级，而是通过事件机制优雅等待
 
 ### 测试和验证优化
+
+**更新** 测试和验证经过V3.0架构优化：
 
 - **单元测试覆盖**：预取功能具备完整的单元测试套件
 - **集成测试验证**：通过集成测试验证预取功能的整体效果
 - **性能基准测试**：定期运行性能基准测试评估预取效果
 - **压力测试**：通过压力测试验证预取功能在高负载下的稳定性
 - **架构缺陷验证**：专门测试batch_update_placeholders的stage自动推导功能
+- **反压机制测试**：专门测试Buffer满时的反压通知机制
+- **零写入验证**：验证分支2操作的零PT Cache写入效果
 
 ## 故障排除指南
 
 ### 常见问题及解决方案
+
+**更新** 常见问题经过V3.0架构优化：
 
 **问题1：PT Cache Full导致去重失败**
 
@@ -527,6 +574,7 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - 检查Buffer容量配置（默认256个Entry）
 - 分析系统负载，适当调整预取深度
 - 监控Cache命中率，优化工作负载分布
+- 检查反压机制是否正常工作
 
 **问题2：Buffer链表溢出**
 
@@ -536,6 +584,7 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - 检查Buffer使用情况统计
 - 分析请求模式，优化去重策略
 - 考虑增加Buffer容量或调整去重阈值
+- 检查反压事件是否正确触发
 
 **问题3：预取数据不准确**
 
@@ -577,13 +626,36 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - 分析占位符stage与预期stage的差异
 - 检查缓存标签构造和查找逻辑
 
+**问题7：反压机制失效**
+
+症状：Buffer满时系统降级或死锁
+
+解决方案：
+- 检查sc_event的创建和初始化
+- 验证Buffer满时的阻塞等待逻辑
+- 分析Entry释放时的事件通知机制
+- 检查事件处理的优先级和时序
+
+**问题8：零写入操作异常**
+
+症状：分支2操作仍然产生PT Cache写入
+
+解决方案：
+- 检查tail_index的读取路径
+- 验证Buffer链表的tail_index更新逻辑
+- 分析占位CL的插入和更新流程
+- 检查内存访问的原子性和一致性
+
 **章节来源**
 - [pt_cache.cpp:480-521](file://iommu/cache_src/cache/pt_cache.cpp#L480-L521)
 - [pt_cache.cpp:297-340](file://iommu/cache_src/cache/pt_cache.cpp#L297-L340)
 - [BATCH_UPDATE_MISS_ROOT_CAUSE_20260609.md:276-325](file://BATCH_UPDATE_MISS_ROOT_CAUSE_20260609.md#L276-L325)
 - [iommu_perf_pt_cache_response.cc:55-70](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L55-L70)
+- [cache_subsystem.cpp:591-638](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L591-L638)
 
 ### 调试和监控
+
+**更新** 调试和监控经过V3.0架构优化：
 
 系统提供了丰富的调试和监控功能：
 
@@ -593,6 +665,8 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - **预取效果分析**：通过专门的工具分析预取功能的性能影响
 - **测试报告生成**：自动生成预取功能的测试报告和性能分析
 - **架构缺陷追踪**：专门追踪和分析架构缺陷的修复效果
+- **反压机制监控**：监控Buffer满时的反压通知和等待状态
+- **零写入验证**：专门验证分支2操作的零PT Cache写入效果
 
 ### 预取功能专项调试
 
@@ -605,25 +679,30 @@ PREFETCH_MGR --> UPDATE_PLACEHOLDER
 - **异常情况处理**：测试预取过程中的异常处理机制
 - **占位符更新测试**：专门测试update_placeholder方法的功能
 - **stage自动推导测试**：验证batch_update_placeholders的stage推导逻辑
+- **反压机制测试**：验证Buffer满时的反压通知和等待机制
+- **零写入操作测试**：验证分支2操作的零PT Cache写入效果
 
 ## 结论
 
-PT Cache去重+预取集成系统通过创新的占位CL机制和智能预取策略，实现了显著的性能提升。系统不仅减少了98.8%的DDR访问次数，还通过高效的Buffer链表管理实现了多个请求的共享翻译结果。
+PT Cache去重+预取集成系统通过创新的占位CL机制和智能预取策略，实现了显著的性能提升。**更新** V3.0架构的重大变更进一步增强了系统的性能和可靠性。
 
-**更新** 本次更新重点反映了PT Cache占位符缓存行处理机制的关键架构缺陷修复，包括新增的update_placeholder方法、修正的placeholder插入逻辑、改进的批处理更新机制以及增强的内存访问安全性。这些改进进一步增强了系统的稳定性和可靠性。
+**关键架构改进包括**：
+- **tail_index迁移**：将tail_index从PT Cache条目移动到Dedup Buffer条目，实现零PT Cache写入的分支2操作
+- **反压通知机制**：通过sc_event实现Buffer满时的阻塞等待，避免系统降级
+- **内存访问优化**：减少不必要的缓存访问，提高系统整体效率
+- **事件驱动并发**：通过SystemC事件机制实现高效的异步通信和等待
+- **零写入优化**：分支2操作实现零PT Cache写入，显著降低缓存写入开销
 
 该系统的设计充分考虑了实际应用场景的需求，提供了灵活的配置选项和强大的扩展能力。通过合理的性能优化和故障排除机制，系统能够在各种工作负载下保持稳定的高性能表现。
 
-**新增** 关键架构改进包括：
-- update_placeholder方法提供运行时动态更新占位符元数据的能力
-- batch_update_placeholders接口的stage自动推导机制解决stage不匹配问题
-- 增强的内存访问安全性确保并发环境下的数据一致性
-- 改进的占位符缓存行处理机制提高系统整体稳定性
-
-未来的工作方向包括：
+**新增** V3.0架构的未来工作方向包括：
 - 进一步优化预取算法，适应更多类型的地址空间模式
 - 扩展支持大页场景的去重机制
 - 增强错误处理和恢复能力
 - 提供更精细的性能调优选项
 - 增强预取功能的自适应学习能力
 - 完善占位符更新和批量更新的监控机制
+- 优化反压机制的性能和可扩展性
+- 验证零写入操作在不同工作负载下的效果
+
+通过这些持续的改进和优化，PT Cache去重+预取集成系统将继续为IOMMU应用提供高效、可靠的地址转换服务。

@@ -119,12 +119,13 @@ uint32_t PTCache::invalidate_global(sc_time* latency) {
 
 uint32_t PTCache::hash_function(const PTTag& tag) const {
     uint32_t mask = num_sets_ - 1;
-    constexpr iova_t iova_mask = (static_cast<iova_t>(1) << 44) - 1;
+    constexpr iova_t iova_mask = (static_cast<iova_t>(1) << 32) - 1;  // 32-bit page number
     constexpr uint32_t pscid_mask = (1U << 20) - 1;
 
+    // [FIX] IOVA右移12位(去掉4KB页内偏移), 避免页对齐IOVA全部映射到Set 0
     __uint128_t array =
         (static_cast<__uint128_t>(tag.gscid) << 64) |
-        (static_cast<__uint128_t>(tag.iova & iova_mask) << 20) |
+        (static_cast<__uint128_t>((tag.iova >> 12) & iova_mask) << 20) |
         static_cast<__uint128_t>(tag.pscid & pscid_mask);
     __uint128_t temp1 = array ^ (array >> 40);
     __uint128_t temp2 = temp1 ^ (temp1 >> 20);
@@ -148,7 +149,7 @@ iova_t PTCache::align_iova(iova_t iova, PageSize ps) {
 
 bool PTCache::insert_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                                  TransStage stage, bool sv48, bool gstage_x4,
-                                 uint8_t head_index, bool is_req,
+                                 uint16_t head_index, bool is_req,
                                  sc_time* latency) {
     // 构造占位CL的tag
     PTTag tag;
@@ -295,7 +296,7 @@ void PTCache::batch_update_placeholders(gscid_t gscid, pscid_t pscid,
 
 bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
                                  TransStage stage, bool sv48, bool gstage_x4,
-                                 uint8_t head_index, bool is_req) {
+                                 uint16_t head_index, bool is_req) {
     // 构造tag
     PTTag tag;
     tag.gscid = gscid;
