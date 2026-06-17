@@ -25,7 +25,7 @@ static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 4;
 
 // Walker返回Collector/Cache
 static const uint32_t FIFO_DEPTH_XDTW_TO_COLLECTOR = 4;
-static const uint32_t FIFO_DEPTH_PTW_TO_PT_CACHE = 4;
+static const uint32_t FIFO_DEPTH_PTW_TO_PT_CACHE = 32;
 static const uint32_t FIFO_DEPTH_MSIPTW_TO_MSIPT_CACHE = 4;
 
 // Cache返回Collector
@@ -102,7 +102,7 @@ static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
 static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
-static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 256;        // PTW总outstanding任务数
+static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 4;          // PTW总outstanding任务数
 static const uint32_t PTW_REQ_PIPELINE_DELAY_NS = 30;         // PTW请求流水延时(ns, PEQ)
 static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 2;         // PTW响应流水延时(ns, PEQ)
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
@@ -115,8 +115,8 @@ static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能�
 
 // ===================== PT Cache去重+预取模块参数 =====================
 static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
-static const uint32_t PT_DEDUP_BUFFER_SIZE = 512;            // Buffer大小（entries）- 扩大到512验证性能瓶颈
-static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 8;           // 预取深度（页数量，默认=8）
+static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
+static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 3;           // 预取深度（页数量，D=0表示关闭预取）
 static const uint16_t DEDUP_BUFFER_INVALID_IDX = 0xFFFF;     // 无效索引标记（支持512 entries）
 
 // ===================== Collector Outstanding 限制 =====================
@@ -144,7 +144,7 @@ static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = 256;
 static const uint32_t REORDER_OUTPUT_DELAY = 1;
 
 // ===================== SLINK NoC延迟参数 =====================
-static const uint32_t SLINK_NOC_LATENCY_NS = 300;           // SLINK NoC单趟延时(ns)，300ns（性能分析场景）
+static const uint32_t SLINK_NOC_LATENCY_NS = 50;            // SLINK NoC单趟延时(ns)，50ns（低延时场景）
 
 // ===================== 稳态IOPS采样窗口 =====================
 // 跳过前10%和后10%，只统计中间80%稳定段的IOPS

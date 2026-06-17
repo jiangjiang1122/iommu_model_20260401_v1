@@ -27,6 +27,44 @@ struct CacheStats {
     double      total_request_latency_ns = 0.0;
     double      first_request_start_ns = -1.0;
     double      last_request_end_ns = 0.0;
+    // [STAT] 4种RAM访问路径计数
+    uint64_t    lookup_count        = 0;  // lookup (hit+miss)
+    uint64_t    fill_hit_count      = 0;  // fill: 命中更新
+    uint64_t    fill_invalid_count  = 0;  // fill: 新条目
+    uint64_t    fill_replace_count  = 0;  // fill: 替换
+    // [STAT] 按阶段分类: 申请阶段(REQUEST) vs 更新阶段(UPDATE)
+    uint64_t    req_lookup_count    = 0;  // 申请阶段 lookup
+    uint64_t    req_fill_hit_count  = 0;  // 申请阶段 fill_hit (update_placeholder)
+    uint64_t    req_fill_inv_count  = 0;  // 申请阶段 fill_invalid (insert_placeholder)
+    uint64_t    req_fill_repl_count = 0;  // 申请阶段 fill_replace
+    uint64_t    upd_lookup_count    = 0;  // 更新阶段 lookup
+    uint64_t    upd_fill_hit_count  = 0;  // 更新阶段 fill_hit (fill_pt)
+    uint64_t    upd_fill_inv_count  = 0;  // 更新阶段 fill_invalid
+    uint64_t    upd_fill_repl_count = 0;  // 更新阶段 fill_replace
+    // [STAT] PTW Monitor阶段 (phase=2)
+    uint64_t    mon_lookup_count    = 0;  // PTW Monitor lookup
+    uint64_t    mon_fill_hit_count  = 0;
+    uint64_t    mon_fill_inv_count  = 0;
+    uint64_t    mon_fill_repl_count = 0;
+    // [STAT] PT Cache时间戳统计 (用于计算任务放大系数)
+    double      first_access_time_ns = -1.0;  // 首次访问时间
+    double      last_access_time_ns  = 0.0;   // 最后访问时间
+    // [STAT] PT Cache REQUEST阶段入口/出口时间戳
+    double      req_first_start_ns = -1.0;    // REQUEST阶段首次进入时刻
+    double      req_last_end_ns    = 0.0;     // REQUEST阶段最后退出时刻
+    uint64_t    req_task_count     = 0;       // REQUEST任务数
+    double      req_total_latency_ns = 0.0;   // REQUEST任务墙钟时间累加
+    uint64_t    req_latency_samples = 0;      // REQUEST任务样本数
+    double      req_wait_ns          = 0.0;   // REQUEST阶段RAM端口等待时间累加
+    double      req_task_wait_ns     = 0.0;   // REQUEST阶段任务级互斥等待时间累加
+    // [STAT] PT Cache UPDATE阶段入口/出口时间戳
+    double      upd_first_start_ns = -1.0;    // UPDATE阶段首次进入时刻
+    double      upd_last_end_ns    = 0.0;     // UPDATE阶段最后退出时刻
+    uint64_t    upd_task_count     = 0;       // UPDATE任务数
+    double      upd_total_latency_ns = 0.0;   // UPDATE任务墙钟时间累加
+    uint64_t    upd_latency_samples = 0;      // UPDATE任务样本数
+    double      upd_wait_ns          = 0.0;   // UPDATE阶段RAM端口等待时间累加
+    double      upd_task_wait_ns     = 0.0;   // UPDATE阶段任务级互斥等待时间累加
 
     double hit_rate() const {
         return total_accesses > 0 ? static_cast<double>(hits) / total_accesses : 0.0;
@@ -51,12 +89,12 @@ struct CacheStats {
     }
     double iops() const {
         if (request_latency_samples == 0) return 0.0;
-        const double observed_window_ns = last_request_end_ns - first_request_start_ns;
-        if (first_request_start_ns >= 0.0 && observed_window_ns > 0.0) {
-            return static_cast<double>(request_latency_samples) / (observed_window_ns * 1e-9);
-        }
-        if (total_request_latency_ns > 0.0) {
-            return static_cast<double>(request_latency_samples) / (total_request_latency_ns * 1e-9);
+        // [FIX] 使用RAM执行时间（不含排队）计算IOPS
+        // total_execution_latency_ns = 各RAM操作的纯执行延时之和 = 端口实际忙碌时间
+        // total_request_latency_ns 包含排队等待时间，会高估分母、低估IOPS
+        // observed_window_ns 包含空闲间隔，也会高估分母、高估IOPS
+        if (total_execution_latency_ns > 0.0) {
+            return static_cast<double>(request_latency_samples) / (total_execution_latency_ns * 1e-9);
         }
         return 0.0;
     }
@@ -78,12 +116,33 @@ public:
     void record_prefetch_issued(const std::string& cache_name);
     void record_prefetch_hit(const std::string& cache_name);
 
+    // 记录4种RAM访问路径
+    void record_lookup(const std::string& cache_name);
+    void record_fill_hit(const std::string& cache_name);
+    void record_fill_invalid(const std::string& cache_name);
+    void record_fill_replace(const std::string& cache_name);
+
+    // 记录按阶段分类的RAM访问路径 (phase: 0=REQUEST, 1=UPDATE)
+    void record_phase_lookup(const std::string& cache_name, int phase);
+    void record_phase_fill_hit(const std::string& cache_name, int phase);
+    void record_phase_fill_invalid(const std::string& cache_name, int phase);
+    void record_phase_fill_replace(const std::string& cache_name, int phase);
+
     // 记录延迟
     void record_latency(const std::string& cache_name, double latency_ns);
     void record_execution_latency(const std::string& cache_name, double latency_ns);
     void record_queue_latency(const std::string& cache_name, double latency_ns);
     void record_request_latency(const std::string& cache_name, double latency_ns,
                                 double start_time_ns, double end_time_ns);
+    // [STAT] 记录访问时间戳 (用于PT Cache任务放大系数计算)
+    void record_access_timestamp(const std::string& cache_name, double current_time_ns);
+    // [STAT] 记录PT Cache阶段入口/出口时间戳
+    void record_pt_phase_timestamp(const std::string& cache_name, int phase,
+                                   double start_time_ns, double end_time_ns);
+    // [STAT] 按阶段累加RAM端口等待时间
+    void accumulate_phase_wait(const std::string& cache_name, int phase, double wait_ns);
+    // [STAT] 按阶段累加任务级互斥等待时间
+    void accumulate_phase_task_wait(const std::string& cache_name, int phase, double wait_ns);
 
     // 获取统计
     const CacheStats& get_stats(const std::string& cache_name) const;

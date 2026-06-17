@@ -64,6 +64,13 @@ public:
                            TransStage stage, bool sv48, bool gstage_x4,
                            uint16_t head_index, bool is_req);
 
+    // [OPT] 直接更新占位CL，跳过内部冗余lookup
+    // 调用方已通过lookup_pt获取data，无需在update_placeholder内再次lookup
+    // data: 调用方lookup_pt返回的占位CL数据（已验证is_ph=1, is_req=0）
+    void update_placeholder_with_data(gscid_t gscid, pscid_t pscid, iova_t iova,
+                                      TransStage stage, bool sv48, bool gstage_x4,
+                                      PTData data, uint16_t head_index, bool is_req);
+
 protected:
     uint32_t hash_function(const PTTag& tag) const override;
 

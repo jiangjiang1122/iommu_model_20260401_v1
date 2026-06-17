@@ -57,6 +57,10 @@ public:
     sc_time clock_period() const { return clock_period_; }
     void set_clock_period(const sc_time& clk) { clock_period_ = clk; }
 
+    // 设置阶段追踪器 (0=REQUEST, 1=UPDATE)
+    void set_current_phase(int phase) { phase_tracker_ = phase; }
+    int current_phase() const { return phase_tracker_; }
+
 protected:
     enum class CacheOpType : uint8_t {
         LOOKUP = 0,
@@ -92,6 +96,10 @@ protected:
     std::array<uint32_t, 3> wrr_remaining_ = kWrrWeights;
     bool ram_port_busy_ = false;
     sc_event arbiter_event_;
+
+    // [STAT] 阶段追踪器: 0=REQUEST(申请阶段), 1=UPDATE(更新阶段)
+    // 由PT Cache在调用lookup/fill前设置，lookup/fill内部读取并记录到阶段分类统计
+    int phase_tracker_ = 0;
 
     // ---- 内部方法 ----
 
@@ -277,6 +285,8 @@ bool CacheBase<TagT, DataT>::lookup(const TagT& tag, DataT& out_data, sc_time& l
             cache_array_[set][way].access_count++;
 
             stats_.record_hit(cache_name_);
+            stats_.record_lookup(cache_name_);
+            stats_.record_phase_lookup(cache_name_, phase_tracker_);
             const sc_time access_latency = lookup_hit_access_latency();
             latency = execution_latency_with_arbiter(access_latency);
             stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
@@ -286,6 +296,8 @@ bool CacheBase<TagT, DataT>::lookup(const TagT& tag, DataT& out_data, sc_time& l
 
         // Miss
         stats_.record_miss(cache_name_);
+        stats_.record_lookup(cache_name_);
+        stats_.record_phase_lookup(cache_name_, phase_tracker_);
         const sc_time access_latency = lookup_miss_access_latency();
         latency = execution_latency_with_arbiter(access_latency);
         stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
@@ -352,6 +364,8 @@ void CacheBase<TagT, DataT>::fill_with_hash_tag(const TagT& hash_tag,
         if (existing_way >= 0) {
             const sc_time access_latency = fill_hit_access_latency();
             const sc_time latency = execution_latency_with_arbiter(access_latency);
+            stats_.record_fill_hit(cache_name_);
+            stats_.record_phase_fill_hit(cache_name_, phase_tracker_);
             cache_array_[set][existing_way].data = data;
             cache_array_[set][existing_way].valid = true;
             cache_array_[set][existing_way].from_prefetch = from_prefetch;
@@ -368,6 +382,8 @@ void CacheBase<TagT, DataT>::fill_with_hash_tag(const TagT& hash_tag,
         if (empty_way >= 0) {
             const sc_time access_latency = fill_invalid_way_access_latency();
             const sc_time latency = execution_latency_with_arbiter(access_latency);
+            stats_.record_fill_invalid(cache_name_);
+            stats_.record_phase_fill_invalid(cache_name_, phase_tracker_);
             cache_array_[set][empty_way].fill(stored_tag, data, from_prefetch);
             if (replacement_) replacement_->access(set, empty_way);
             if (from_prefetch) stats_.record_prefetch_issued(cache_name_);
@@ -379,40 +395,58 @@ void CacheBase<TagT, DataT>::fill_with_hash_tag(const TagT& hash_tag,
         // 需要替换
         const sc_time access_latency = fill_replacement_access_latency();
         const sc_time latency = execution_latency_with_arbiter(access_latency);
+        stats_.record_fill_replace(cache_name_);
+        stats_.record_phase_fill_replace(cache_name_, phase_tracker_);
         uint32_t victim_way = 0;
         if (replacement_) {
             // [PT Cache去重+预取] 特殊处理: 保护is_req=1的占位CL不被替换
-            // 先尝试找到可替换的victim (跳过is_req=1的占位CL)
-            bool found_safe_victim = false;
-            for (uint32_t try_way = 0; try_way < num_ways_; try_way++) {
-                uint32_t candidate_way = replacement_->find_victim(set);
-                
-                // 检查该way是否为PT Cache的占位CL且is_req=1
-                bool is_protected = false;
-                if constexpr (std::is_same_v<DataT, PTData>) {
-                    if (cache_array_[set][candidate_way].valid && 
-                        cache_array_[set][candidate_way].data.reserved.is_ph == 1 &&
-                        cache_array_[set][candidate_way].data.reserved.is_req == 1) {
-                        is_protected = true;
-                        // 这个占位CL有实际任务在等待,不能替换
-                        std::cout << "[PT_CACHE_PROTECT] Set " << set << " Way " << candidate_way 
-                                  << " is protected (is_req=1 placeholder), trying next..." << std::endl;
-                    }
-                }
-                
-                if (!is_protected) {
-                    victim_way = candidate_way;
-                    found_safe_victim = true;
-                    break;
+            // 策略: 先用替换算法建议victim，若受保护则扫描所有way找可替换的
+            uint32_t suggested_way = replacement_->find_victim(set);
+            
+            // 检查建议的victim是否受保护
+            bool suggested_protected = false;
+            if constexpr (std::is_same_v<DataT, PTData>) {
+                if (cache_array_[set][suggested_way].valid && 
+                    cache_array_[set][suggested_way].data.reserved.is_ph == 1 &&
+                    cache_array_[set][suggested_way].data.reserved.is_req == 1) {
+                    suggested_protected = true;
                 }
             }
             
-            if (!found_safe_victim) {
-                // 所有way都是受保护的占位CL或常规CL,无法安全替换
-                std::cout << "[PT_CACHE_WARN] Set " << set << " full, no safe victim found! Insertion skipped." << std::endl;
-                stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
-                consume_delay(access_latency);
-                return;  // 放弃插入,避免数据丢失
+            if (!suggested_protected) {
+                // 替换算法建议的victim不受保护，直接使用
+                victim_way = suggested_way;
+            } else {
+                // 建议的victim受保护(is_req=1占位CL)，扫描所有way找可替换的
+                std::cout << "[PT_CACHE_PROTECT] Set " << set << " Way " << suggested_way 
+                          << " is protected (is_req=1 placeholder), scanning all ways..." << std::endl;
+                bool found_safe_victim = false;
+                for (uint32_t w = 0; w < num_ways_; w++) {
+                    if (w == suggested_way) continue;  // 已检查过，跳过
+                    
+                    bool is_protected = false;
+                    if constexpr (std::is_same_v<DataT, PTData>) {
+                        if (cache_array_[set][w].valid && 
+                            cache_array_[set][w].data.reserved.is_ph == 1 &&
+                            cache_array_[set][w].data.reserved.is_req == 1) {
+                            is_protected = true;
+                        }
+                    }
+                    
+                    if (!is_protected) {
+                        victim_way = w;
+                        found_safe_victim = true;
+                        break;
+                    }
+                }
+                
+                if (!found_safe_victim) {
+                    // 所有way都是受保护的is_req=1占位CL，无法替换
+                    std::cout << "[PT_CACHE_WARN] Set " << set << " full, all ways protected! Insertion skipped." << std::endl;
+                    stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
+                    consume_delay(access_latency);
+                    return;  // 放弃插入
+                }
             }
         }
 
@@ -686,6 +720,10 @@ auto CacheBase<TagT, DataT>::arbitrate_ram_access(CacheOpType op, Fn&& fn)
 
     const sc_time queue_latency = request_ram_port(op);
     stats_.record_queue_latency(cache_name_, queue_latency.to_seconds() * 1e9);
+    // [STAT] 按阶段累加RAM端口等待时间
+    stats_.accumulate_phase_wait(cache_name_, phase_tracker_, queue_latency.to_seconds() * 1e9);
+    // [STAT] 记录RAM访问时间戳 (用于PT Cache任务放大系数计算)
+    stats_.record_access_timestamp(cache_name_, sc_time_stamp().to_seconds() * 1e9);
     consume_delay(arbiter_stage_latency());
     try {
         if constexpr (std::is_void_v<ResultT>) {

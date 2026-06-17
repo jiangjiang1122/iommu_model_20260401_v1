@@ -115,11 +115,10 @@ private:
 
     void dc_worker_thread();
     void pc_worker_thread();
-    void pt_worker_thread();
+    void pt_scheduler_thread();  // [NEW] 合并pt_worker_thread和pt_update_worker_thread
     void msi_worker_thread();
     void dc_update_worker_thread();
     void pc_update_worker_thread();
-    void pt_update_worker_thread();
     void walker_update_worker_thread();
     void msi_update_worker_thread();
     void dc_invalidate_worker_thread();

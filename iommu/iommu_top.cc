@@ -181,8 +181,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         task->timestamp = sc_time_stamp();
         task->state = TASK_INIT;
 
-        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo\n",
-               task->task_id, task->device_id, task->iova, task->at);
+        double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo [t=%.1f ns]\n",
+               task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
 
         // 3. Push to inbound_fifo
@@ -417,8 +418,11 @@ void iommu_top::send_response_to_initiator(iommu_task_t* task) {
         return;
     }
 
-    printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d\n",
-           task->task_id, task->pa, task->state);
+    double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+    double entry_ns = task->timestamp.to_seconds() * 1e9;
+    double e2e_ns = ts_ns - entry_ns;
+    printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d [entry=%.1f ns, exit=%.1f ns, e2e=%.1f ns]\n",
+           task->task_id, task->pa, task->state, entry_ns, ts_ns, e2e_ns);
     fflush(stdout);
 
     // Send nb_transport_bw to notify initiator
@@ -446,12 +450,17 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
 
     task->state = TASK_ROUTE_DECISION;
     
-    // [NEW] Phase 1: 启用预取功能 (默认D=3,用于50包测试)
-    if (!task->walk_ctx.prefetch_enabled) {
+    // [NEW] Phase 1: 启用预取功能 (使用配置参数PT_DEDUP_PREFETCH_DEPTH)
+    // D=0表示关闭预取，D>0表示启用预取
+    if (!task->walk_ctx.prefetch_enabled && PT_DEDUP_PREFETCH_DEPTH > 0) {
         task->walk_ctx.prefetch_enabled = true;
-        task->walk_ctx.prefetch_depth = 3;  // [TEST] 预取深度D=3 (50包测试)
+        task->walk_ctx.prefetch_depth = PT_DEDUP_PREFETCH_DEPTH;
         printf("[CONFIGURE] task_id=%u -> Prefetch enabled (D=%u)\n",
                task->task_id, task->walk_ctx.prefetch_depth);
+    } else if (PT_DEDUP_PREFETCH_DEPTH == 0) {
+        task->walk_ctx.prefetch_enabled = false;
+        task->walk_ctx.prefetch_depth = 0;
+        printf("[CONFIGURE] task_id=%u -> Prefetch DISABLED (D=0)\n", task->task_id);
     }
 
     // Save original task to pending map for PT cache response correlation
@@ -461,6 +470,7 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
 
     // Convert task to CacheMessage and write to cache_sub.pt_request_fifo
     iommu::CacheMessage pt_req = task_to_pt_request(task);
+    pt_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
     cache_sub.pt_request_fifo.write(pt_req);
 }
 

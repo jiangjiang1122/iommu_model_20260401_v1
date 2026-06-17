@@ -155,12 +155,11 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
 
     SC_THREAD(dc_worker_thread);
     SC_THREAD(pc_worker_thread);
-    SC_THREAD(pt_worker_thread);
+    SC_THREAD(pt_scheduler_thread);  // [NEW] 统一的PT Cache轮询调度线程
     SC_THREAD(walker_scheduler_thread);  // 统一的walker cache轮询调度线程
     SC_THREAD(msi_worker_thread);
     SC_THREAD(dc_update_worker_thread);
     SC_THREAD(pc_update_worker_thread);
-    SC_THREAD(pt_update_worker_thread);
     SC_THREAD(msi_update_worker_thread);
     SC_THREAD(dc_invalidate_worker_thread);
     SC_THREAD(pc_invalidate_worker_thread);
@@ -309,18 +308,63 @@ void CacheSubsystem::pc_worker_thread() {
     }
 }
 
-void CacheSubsystem::pt_worker_thread() {
+// PT Cache 统一轮询调度线程
+// 合并 pt_worker_thread 和 pt_update_worker_thread，实现任务级串行
+// REQUEST 优先处理，UPDATE 次之
+void CacheSubsystem::pt_scheduler_thread() {
     while (true) {
-        CacheMessage req = pt_request_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pt_cache", "lookup", req, start);
-        CacheMessage resp = execute_pt_request(req);
-        record_task_completion("pt_cache", start, sc_time_stamp());
-        trace_task_event("end", "pt_cache", "lookup", req, start, &resp);
-        if (resp.hit) {
-            push_fifo(pt_hit_response_fifo, resp);
-        } else {
-            push_fifo(pt_miss_response_fifo, resp);
+        bool processed = false;
+        CacheMessage req;
+        
+        // 1. 优先处理 REQUEST 请求
+        if (pt_request_fifo.num_available() > 0) {
+            req = pt_request_fifo.read();
+            const sc_time dequeue_time = sc_time_stamp();
+            
+            // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
+            double fifo_wait_ns = (dequeue_time - req.timestamp).to_seconds() * 1e9;
+            stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
+            
+            trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
+            CacheMessage resp = execute_pt_request(req);
+            const sc_time end = sc_time_stamp();
+            
+            record_task_completion("pt_cache", dequeue_time, end);
+            stats_.record_pt_phase_timestamp("pt_cache", 0,
+                dequeue_time.to_seconds() * 1e9, end.to_seconds() * 1e9);
+            trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
+            
+            if (resp.hit) {
+                push_fifo(pt_hit_response_fifo, resp);
+            } else {
+                push_fifo(pt_miss_response_fifo, resp);
+            }
+            processed = true;
+        }
+        // 2. 处理 UPDATE 请求
+        else if (pt_update_fifo.num_available() > 0) {
+            req = pt_update_fifo.read();
+            const sc_time dequeue_time = sc_time_stamp();
+            
+            // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
+            double fifo_wait_ns = (dequeue_time - req.timestamp).to_seconds() * 1e9;
+            stats_.accumulate_phase_task_wait("pt_cache", 1, fifo_wait_ns);
+            
+            trace_task_event("begin", "pt_cache", "update", req, dequeue_time);
+            CacheMessage resp = execute_pt_update_request(req);
+            const sc_time end = sc_time_stamp();
+            
+            record_task_completion("pt_cache", dequeue_time, end);
+            stats_.record_pt_phase_timestamp("pt_cache", 1,
+                dequeue_time.to_seconds() * 1e9, end.to_seconds() * 1e9);
+            trace_task_event("end", "pt_cache", "update", req, dequeue_time, &resp);
+            processed = true;
+        }
+        
+        // 如果没有处理任何请求，等待任意一个FIFO有数据
+        if (!processed) {
+            wait(pt_request_fifo.data_written_event() | 
+                 pt_update_fifo.data_written_event());
         }
     }
 }
@@ -406,17 +450,6 @@ void CacheSubsystem::pc_update_worker_thread() {
         CacheMessage resp = execute_pc_update_request(req);
         record_task_completion("pc_cache", start, sc_time_stamp());
         trace_task_event("end", "pc_cache", "update", req, start, &resp);
-    }
-}
-
-void CacheSubsystem::pt_update_worker_thread() {
-    while (true) {
-        CacheMessage req = pt_update_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pt_cache", "update", req, start);
-        CacheMessage resp = execute_pt_update_request(req);
-        record_task_completion("pt_cache", start, sc_time_stamp());
-        trace_task_event("end", "pt_cache", "update", req, start, &resp);
     }
 }
 
@@ -516,6 +549,9 @@ CacheMessage CacheSubsystem::execute_pc_request(const CacheMessage& req) {
 }
 
 CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
+    // [STAT] 设置阶段追踪器: 申请阶段(REQUEST=0)
+    pt_cache_->set_current_phase(0);
+
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_RESPONSE;
     resp.task_id = req.task_id;
@@ -567,17 +603,13 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                     entry.tail_index = new_idx;  // [V3.0][FIX] 链头自引用,后续branch2才能正确读取tail并追加
                     
                     // [V3.0] 更新PT Cache: head=new_idx, is_req=1 (不写tail_index)
-                    bool update_success = pt_cache_->update_placeholder(
+                    // [OPT] 使用update_placeholder_with_data，跳过内部冗余lookup
+                    // data已通过上方lookup_pt获取，包含完整占位CL信息
+                    pt_cache_->update_placeholder_with_data(
                         req.gscid, req.pscid, req.iova,
                         req.stage, req.pt_sv48, req.pt_gstage_x4,
-                        new_idx, true  // is_req=1
+                        data, new_idx, true  // is_req=1
                     );
-                    
-                    if (!update_success) {
-                        printf("[PT_CACHE_EXECUTE] WARNING: task_id=%u -> Failed to update placeholder\n",
-                               req.task_id);
-                        fflush(stdout);
-                    }
                     
                     printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch placeholder HIT, allocated new entry (idx=%u), updated PT Cache (is_req=1)\n",
                            req.task_id, new_idx);
@@ -801,6 +833,9 @@ CacheMessage CacheSubsystem::execute_pc_update_request(const CacheMessage& req) 
 }
 
 CacheMessage CacheSubsystem::execute_pt_update_request(const CacheMessage& req) {
+    // [STAT] 设置阶段追踪器: 更新阶段(UPDATE=1)
+    pt_cache_->set_current_phase(1);
+
     pt_cache_->fill_pt(req.gscid, req.pscid, req.iova, req.stage, req.pt_data, req.from_prefetch);
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_UPDATE_RESPONSE;

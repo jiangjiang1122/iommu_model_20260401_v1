@@ -66,10 +66,10 @@ void RP_Module::send_translation_request_1_thread()
         pte6.D = 1;
         pte6.PBMT = PMA;
 
-        // Map 38 pages for 300 requests (8 requests per 4KB page, stride=512B)
-        // IOVA range: 0x10000 to 0x10000+299*512=0x25580
-        // PA range: 0x20000 to 0x20000+299*512=0x35580 (PA = IOVA + 0x10000)
-        for (int p = 0; p < 38; p++) {
+        // Map 250 pages for 2000 requests (8 requests per 4KB page, stride=512B)
+        // IOVA range: 0x10000 to 0x10000+1999*512=0x9D380
+        // PA range: 0x20000 to 0x20000+1999*512=0xAD380 (PA = IOVA + 0x10000)
+        for (int p = 0; p < 250; p++) {
             uint64_t iova_page = 0x10000 + p * 0x1000;
             uint64_t pa_page = 0x20000 + p * 0x1000;
             pte6.PPN = pa_page / PAGESIZE;
@@ -81,7 +81,7 @@ void RP_Module::send_translation_request_1_thread()
         response_count = 0;
 
         // Prepare and send 20 translation requests (D=3 test)
-        const int NUM_REQUESTS = 300;
+        const int NUM_REQUESTS = 2000;
 
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for %d-request test...\n", NUM_REQUESTS);

@@ -10,6 +10,7 @@
 #include "iommu_translate.hh"
 #include "iommu_req_rsp.hh"
 #include "iommu_perf_params.hh"
+#include "iommu_dedup_params.hh"
 
 // Forward declaration for iommu namespace types
 namespace iommu {
@@ -88,7 +89,7 @@ struct walk_context_t {
     uint16_t indexes[5] = {0};
     uint64_t read_addr = 0;
     uint32_t read_size = 0;
-    uint8_t read_buf[64] = {0};
+    uint8_t read_buf[(1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8] = {0};  // 支持combined burst: (1+D)*ptesize
     uint8_t ptesize = 0;
 
     // VS-stage walk context (for PTW)
@@ -167,6 +168,15 @@ struct walk_context_t {
     uint64_t  burst_start_addr = 0;         // Burst DDR读起始地址
     uint32_t  burst_size = 0;               // Burst DDR读大小(字节)
     bool      prefetch_burst_pending = false;  // Burst DDR请求是否未完成
+    bool      combined_burst_ready = false;     // 合并Burst已完成DDR读(leaf+prefetch在同一次读中)
+
+    // [STAT] DDR访问日志 - 记录每次DDR访问的类型和信息
+    // type: 0=VS_non_leaf, 1=VS_leaf, 2=VS_leaf+burst, 3=GS_implicit, 4=GS_explicit, 5=AD_update, 6=Bare_explicit, 7=Burst_wait
+    uint8_t  ddr_log_type[8] = {0};
+    uint8_t  ddr_log_level[8] = {0};      // Page table level (0,1,2)
+    uint64_t ddr_log_addr[8] = {0};       // DDR访问地址
+    uint32_t ddr_log_size[8] = {0};       // DDR访问大小(字节)
+    uint8_t  ddr_log_count = 0;           // 当前日志条目数
 
     walk_context_t() = default;
 };
@@ -298,7 +308,7 @@ struct ddr_req_entry_t {
 // ===================== DDR Response Entry =====================
 struct ddr_rsp_entry_t {
     uint32_t task_id;
-    uint8_t data[64];
+    uint8_t data[(1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8];  // 支持combined burst: (1+D)*ptesize
     uint32_t data_length;
     bool error;
     double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)，从req传递到rsp

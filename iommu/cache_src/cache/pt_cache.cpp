@@ -337,4 +337,34 @@ bool PTCache::update_placeholder(gscid_t gscid, pscid_t pscid, iova_t iova,
     return true;
 }
 
+// =============================================================
+// [OPT] 直接更新占位CL，跳过内部冗余lookup
+// 调用方已通过lookup_pt获取data，无需再次lookup
+// =============================================================
+void PTCache::update_placeholder_with_data(gscid_t gscid, pscid_t pscid, iova_t iova,
+                                           TransStage stage, bool sv48, bool gstage_x4,
+                                           PTData data, uint16_t head_index, bool is_req) {
+    // 构造tag
+    PTTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    tag.iova = align_iova(iova, PageSize::PAGE_4K);
+    tag.stage = stage;
+    tag.sv48 = sv48;
+    tag.gstage_x4 = gstage_x4;
+
+    // [OPT] 直接使用调用方提供的data，跳过lookup
+    // 调用方已验证 is_ph=1, is_req=0
+    data.reserved.head_index = head_index;
+    data.reserved.is_req = is_req ? 1U : 0U;
+
+    // fill更新cache line（FillHit路径，因为entry已存在）
+    fill(tag, data, false);
+
+    std::cout << "[PT_CACHE] update_placeholder_with_data: iova=0x" << std::hex << tag.iova
+              << ", head=" << std::dec << static_cast<int>(head_index)
+              << ", is_req=" << (is_req ? 1 : 0)
+              << " [OPT: skip redundant lookup]" << std::endl;
+}
+
 } // namespace iommu
