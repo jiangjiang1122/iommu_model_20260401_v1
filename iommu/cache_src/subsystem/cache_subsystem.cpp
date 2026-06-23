@@ -312,6 +312,7 @@ void CacheSubsystem::pc_worker_thread() {
 // 合并 pt_worker_thread 和 pt_update_worker_thread，实现任务级串行
 // REQUEST 优先处理，UPDATE 次之
 void CacheSubsystem::pt_scheduler_thread() {
+    uint64_t pt_req_counter = 0;  // [STAT] REQUEST区间统计计数器
     while (true) {
         bool processed = false;
         CacheMessage req;
@@ -320,19 +321,45 @@ void CacheSubsystem::pt_scheduler_thread() {
         if (pt_request_fifo.num_available() > 0) {
             req = pt_request_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
+            const double start_ns = dequeue_time.to_seconds() * 1e9;
             
             // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
-            double fifo_wait_ns = (dequeue_time - req.timestamp).to_seconds() * 1e9;
+            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
             stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
             
             trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
             CacheMessage resp = execute_pt_request(req);
             const sc_time end = sc_time_stamp();
+            const double end_ns = end.to_seconds() * 1e9;
+            
+            // [STAT] 任务间隔分析: 计算gap = 当前start - 上一end
+            if (pt_sched_last_task_end_ >= 0.0) {
+                double gap_ns = start_ns - pt_sched_last_task_end_;
+                if (gap_ns > 0.0) {
+                    pt_sched_total_gap_ns_ += gap_ns;
+                    pt_sched_gap_count_++;
+                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
+                }
+            }
+            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
+            pt_sched_last_end_ns_ = end_ns;
+            pt_sched_total_exec_ns_ += (end_ns - start_ns);
+            pt_sched_task_count_++;
+            pt_sched_req_count_++;
+            pt_sched_last_task_end_ = end_ns;
             
             record_task_completion("pt_cache", dequeue_time, end);
-            stats_.record_pt_phase_timestamp("pt_cache", 0,
-                dequeue_time.to_seconds() * 1e9, end.to_seconds() * 1e9);
+            stats_.record_pt_phase_timestamp("pt_cache", 0, start_ns, end_ns);
             trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
+            
+            // [STAT] 区间命中率统计 (每1000笔REQUEST)
+            int interval_idx = static_cast<int>(pt_req_counter / 1000);
+            if (resp.hit) {
+                stats_.record_interval_hit("pt_cache", interval_idx);
+            } else {
+                stats_.record_interval_miss("pt_cache", interval_idx);
+            }
+            pt_req_counter++;
             
             if (resp.hit) {
                 push_fifo(pt_hit_response_fifo, resp);
@@ -345,18 +372,35 @@ void CacheSubsystem::pt_scheduler_thread() {
         else if (pt_update_fifo.num_available() > 0) {
             req = pt_update_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
+            const double start_ns = dequeue_time.to_seconds() * 1e9;
             
             // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
-            double fifo_wait_ns = (dequeue_time - req.timestamp).to_seconds() * 1e9;
+            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
             stats_.accumulate_phase_task_wait("pt_cache", 1, fifo_wait_ns);
             
             trace_task_event("begin", "pt_cache", "update", req, dequeue_time);
             CacheMessage resp = execute_pt_update_request(req);
             const sc_time end = sc_time_stamp();
+            const double end_ns = end.to_seconds() * 1e9;
+            
+            // [STAT] 任务间隔分析: 计算gap = 当前start - 上一end
+            if (pt_sched_last_task_end_ >= 0.0) {
+                double gap_ns = start_ns - pt_sched_last_task_end_;
+                if (gap_ns > 0.0) {
+                    pt_sched_total_gap_ns_ += gap_ns;
+                    pt_sched_gap_count_++;
+                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
+                }
+            }
+            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
+            pt_sched_last_end_ns_ = end_ns;
+            pt_sched_total_exec_ns_ += (end_ns - start_ns);
+            pt_sched_task_count_++;
+            pt_sched_upd_count_++;
+            pt_sched_last_task_end_ = end_ns;
             
             record_task_completion("pt_cache", dequeue_time, end);
-            stats_.record_pt_phase_timestamp("pt_cache", 1,
-                dequeue_time.to_seconds() * 1e9, end.to_seconds() * 1e9);
+            stats_.record_pt_phase_timestamp("pt_cache", 1, start_ns, end_ns);
             trace_task_event("end", "pt_cache", "update", req, dequeue_time, &resp);
             processed = true;
         }
@@ -367,6 +411,49 @@ void CacheSubsystem::pt_scheduler_thread() {
                  pt_update_fifo.data_written_event());
         }
     }
+}
+
+// [STAT] PT Scheduler任务间隔分析报告
+void CacheSubsystem::print_pt_scheduler_gap_report() const {
+    printf("\n========== PT Scheduler Gap Analysis ==========\n");
+    if (pt_sched_task_count_ == 0) {
+        printf("  No tasks processed.\n");
+        printf("=================================================\n\n");
+        return;
+    }
+    
+    double window_ns = pt_sched_last_end_ns_ - pt_sched_first_start_ns_;
+    printf("  First task start:     %.1f ns\n", pt_sched_first_start_ns_);
+    printf("  Last task end:        %.1f ns\n", pt_sched_last_end_ns_);
+    printf("  Window (first~last):  %.1f ns  (%.3f us)\n", window_ns, window_ns / 1000.0);
+    printf("  ---\n");
+    printf("  Total tasks:          %lu  (REQUEST=%lu, UPDATE=%lu)\n",
+           (unsigned long)pt_sched_task_count_,
+           (unsigned long)pt_sched_req_count_,
+           (unsigned long)pt_sched_upd_count_);
+    printf("  Total exec time:      %.1f ns  (%.3f us)\n",
+           pt_sched_total_exec_ns_, pt_sched_total_exec_ns_ / 1000.0);
+    printf("  Avg exec per task:    %.3f ns\n",
+           pt_sched_task_count_ > 0 ? pt_sched_total_exec_ns_ / pt_sched_task_count_ : 0.0);
+    printf("  ---\n");
+    printf("  Total gap (idle):     %.1f ns  (%.3f us)\n",
+           pt_sched_total_gap_ns_, pt_sched_total_gap_ns_ / 1000.0);
+    printf("  Gap count:            %lu  (times both FIFOs empty)\n",
+           (unsigned long)pt_sched_gap_count_);
+    printf("  Avg gap:              %.3f ns\n",
+           pt_sched_gap_count_ > 0 ? pt_sched_total_gap_ns_ / pt_sched_gap_count_ : 0.0);
+    printf("  Max gap:              %.1f ns\n", pt_sched_max_gap_ns_);
+    printf("  ---\n");
+    printf("  Idle ratio:           %.2f%%  (gap / window)\n",
+           window_ns > 0 ? pt_sched_total_gap_ns_ / window_ns * 100.0 : 0.0);
+    printf("  Exec ratio:           %.2f%%  (exec / window)\n",
+           window_ns > 0 ? pt_sched_total_exec_ns_ / window_ns * 100.0 : 0.0);
+    printf("  ---\n");
+    printf("  [Idle Source Analysis]\n");
+    printf("    Gap = both pt_request_fifo AND pt_update_fifo are empty.\n");
+    printf("    This means PTW has not yet produced UPDATE, and Collector has not\n");
+    printf("    yet produced next REQUEST. The scheduler is waiting for data.\n");
+    printf("=================================================\n\n");
 }
 
 // Walker Cache 统一轮询调度线程
@@ -620,13 +707,13 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                     resp.dedup_new_index = new_idx;
                 }
             }
-            // [V3.0] 分支2 - 主任务占位CL (is_req=1),已有任务
-            // V3.0核心优化: 仅写Buffer, 零PT Cache写入!
+            // 分支2 - 主任务占位CL (is_req=1),已有任务
+            // 新任务链式追加到已有Buffer链尾部,Monitor通过head_index刷新整条链
             else {
                 // 占位CL HIT：需要分配新Buffer Entry、填充task_ptr、挂接到链表
                 uint16_t head_idx = data.reserved.head_index;
                 
-                // [V3.0] 从Buffer链头entry读取tail_index (不从PT Cache)
+                // 从Buffer链头entry读取tail_index
                 uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
                 
                 // [P3] 分配新Entry（Buffer满时阻塞等待）
@@ -640,7 +727,7 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                 }
                 
                 if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
-                    // 填充新Entry (V3.0: next=0xFF, tail=0xFF, 非链头)
+                    // 填充新Entry (next=0xFFFF, tail=0xFFFF, 非链头)
                     auto& new_entry = dedup_buffer_->entries[new_idx];
                     new_entry.gscid = req.gscid;
                     new_entry.pscid = req.pscid;
@@ -656,10 +743,10 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                     auto& tail_entry = dedup_buffer_->entries[tail_idx];
                     tail_entry.next_index = new_idx;
                     
-                    // [V3.0] 更新Buffer链头的tail_index (仅写Buffer, 不写PT Cache!)
+                    // 更新Buffer链头的tail_index (仅写Buffer, 不写PT Cache)
                     dedup_buffer_->entries[head_idx].tail_index = new_idx;
                     
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Placeholder HIT, allocated+linked (head=%u, old_tail=%u, new_tail=%u) [V3.0: zero PT Cache write]\n",
+                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Placeholder HIT, allocated+linked (head=%u, old_tail=%u, new_tail=%u)\n",
                            req.task_id, head_idx, tail_idx, new_idx);
                     fflush(stdout);
                     
@@ -730,12 +817,41 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
                 // 步骤5: 检查预取参数,插入D个预取占位CL
                 if (req.prefetch_enabled && req.prefetch_depth > 0) {
                     uint32_t D = req.prefetch_depth;
+                    
+                    // [FIX] 页表页边界检查: 预取占位CL的IOVA范围必须与PTW实际处理的范围一致
+                    // PTW的L0叶子PTE在页表页中的位置由VPN[0]决定
+                    // 预取不能跨越4KB页表页边界(512个PTE条目)
+                    // 这与iommu_perf_ptw.cc中PTW的边界检查逻辑保持一致
+                    uint32_t vpn0_in_page = (page_iova >> 12) & 0x1FF;  // VPN[0]在页表页内的位置(0~511)
+                    uint32_t max_D = 511 - vpn0_in_page;  // 页表页内剩余PTE数
+                    if (D > max_D) {
+                        printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch D truncated: %u -> %u (page table boundary, vpn0_in_page=%u)\n",
+                               req.task_id, D, max_D, vpn0_in_page);
+                        fflush(stdout);
+                        D = max_D;
+                    }
+                    
                     printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch ENABLED (D=%u), inserting %u prefetch placeholders\n",
-                           req.task_id, D, D);
+                           req.task_id, req.prefetch_depth, D);
                     fflush(stdout);
                     
                     for (uint32_t d = 1; d <= D; d++) {
                         uint64_t prefetch_iova = page_iova + (d * 0x1000);
+                        
+                        // [V4.1] 先检查该IOVA是否已存在占位CL，避免覆盖主任务占位CL
+                        PTData existing_data;
+                        sc_time check_latency;
+                        bool already_exists = pt_cache_->lookup_pt(
+                            req.gscid, req.pscid, prefetch_iova,
+                            req.stage, req.pt_sv48, req.pt_gstage_x4,
+                            existing_data, check_latency);
+                        
+                        if (already_exists) {
+                            // 已存在占位CL或常规CL，跳过预取插入
+                            printf("[PT_CACHE_EXECUTE]   -> Skip prefetch at iova=0x%lx (already exists, is_ph=%d)\n",
+                                   prefetch_iova, existing_data.reserved.is_ph);
+                            continue;
+                        }
                         
                         sc_time prefetch_latency;
                         bool prefetch_success = pt_cache_->insert_placeholder(

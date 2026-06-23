@@ -9,6 +9,9 @@
 - [cache_line.h](file://iommu/cache_src/cache/cache_line.h)
 - [types.h](file://iommu/cache_src/common/types.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
+- [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
+- [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
+- [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [iommu_data_structures.hh](file://iommu/include/iommu_data_structures.hh)
 - [json_config.cpp](file://iommu/cache_src/common/json_config.cpp)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
@@ -26,16 +29,20 @@
 - [PTW_RESPONSE_ANALYSIS_20260609.md](file://PTW_RESPONSE_ANALYSIS_20260609.md)
 - [PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md](file://PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md)
 - [VA_DEDUP_VS_NO_DEDUP_COMPARISON.md](file://VA_DEDUP_VS_NO_DEDUP_COMPARISON.md)
+- [TEST_50_PACKETS_D3_ANALYSIS_20260609.md](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md)
+- [PT_DEDUP_PREFETCH_FINAL_SCHEME.md](file://PT_DEDUP_PREFETCH_FINAL_SCHEME.md)
+- [PERF_MODEL_IMPLEMENTATION.md](file://PERF_MODEL_IMPLEMENTATION.md)
+- [PTW_PREFETCH_BURST_OPTIMIZATION_20260608.md](file://PTW_PREFETCH_BURST_OPTIMIZATION_20260608.md)
+- [PT_CACHE_PREFETCH_IMPLEMENTATION_ANALYSIS_20260609.md](file://PT_CACHE_PREFETCH_IMPLEMENTATION_ANALYSIS_20260609.md)
 </cite>
 
 ## 更新摘要
 **所做更改**
-- 新增占位CL（Placeholder）支持功能章节，详细描述占位CL的插入、批量更新和替换保护机制
-- 新增去重缓冲区（Dedup Buffer）功能章节，说明Buffer链表管理和任务挂起机制
-- 更新查找算法与命中/未命中处理，增加占位CL和去重缓冲区的处理逻辑
-- 新增占位CL处理流程图和去重缓冲区工作流程图
-- 更新性能考量，包含占位CL对预取性能的影响分析
-- 新增占位CL配置参数和后续工作建议
+- 新增单线程调度器架构章节，详细描述统一轮询调度机制和任务级串行处理
+- 增强统计收集系统，新增相位时间戳记录和任务等待时间统计
+- 修复PT Cache替换保护机制bug，完善占位CL保护策略
+- 增强性能报告系统，新增PT Cache性能摘要和任务放大系数分析
+- 更新PT Cache优化改进，包含预取功能实现和Buffer链表管理
 
 ## 目录
 1. [简介](#简介)
@@ -43,20 +50,30 @@
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [A/D位支持功能](#ad位支持功能)
-7. [VA去重功能](#va去重功能)
-8. [占位CL与去重缓冲区](#占位cl与去重缓冲区)
-9. [依赖关系分析](#依赖关系分析)
-10. [性能考量](#性能考量)
-11. [故障排查指南](#故障排查指南)
-12. [结论](#结论)
-13. [附录](#附录)
+6. [单线程调度器架构](#单线程调度器架构)
+7. [增强统计收集系统](#增强统计收集系统)
+8. [PT Cache替换保护机制](#pt-cache替换保护机制)
+9. [性能报告系统增强](#性能报告系统增强)
+10. [PT Cache优化改进](#pt-cache优化改进)
+11. [A/D位支持功能](#ad位支持功能)
+12. [VA去重功能](#va去重功能)
+13. [占位CL与去重缓冲区](#占位cl与去重缓冲区)
+14. [依赖关系分析](#依赖关系分析)
+15. [性能考量](#性能考量)
+16. [故障排查指南](#故障排查指南)
+17. [结论](#结论)
+18. [附录](#附录)
 
 ## 简介
 本文件针对 RISC-V IOMMU 的页表缓存(PT Cache)进行系统化技术文档化，重点阐述其作为 IOTLB(IOMMU Page Table Lookaside Buffer)的核心作用：缓存页表项并加速地址转换。文档覆盖以下方面：
 - PT Cache 的数据结构设计与缓存行组织方式
 - 查找、插入与更新的处理流程与命中/未命中机制
 - 失效管理策略（VMA/GVMA/按上下文批量失效）
+- **新增单线程调度器架构**：通过统一轮询调度机制实现任务级串行处理，避免互锁死锁问题
+- **增强统计收集系统**：新增相位时间戳记录和任务等待时间统计，提供更精确的性能分析
+- **PT Cache替换保护机制修复**：完善占位CL保护策略，解决Cache满时的替换问题
+- **性能报告系统增强**：新增PT Cache性能摘要和任务放大系数分析
+- **PT Cache优化改进**：实现预取功能、Buffer链表管理和批量更新机制
 - **新增A/D位支持功能**：通过A/D位检查机制实现内存访问跟踪，完善PT Cache的访问监控能力
 - **新增VA去重功能**：通过deduplication table实现同页VA访问的去重优化
 - **新增占位CL与去重缓冲区功能**：通过占位缓存行和去重缓冲区实现预取优化和任务挂起管理
@@ -65,7 +82,7 @@
 - 通过代码路径引用展示关键操作的实现位置
 
 ## 项目结构
-PT Cache 位于 iommu/cache_src/cache 子目录，采用模板化基类 CacheBase 提供统一的缓存接口与性能建模，PTCache 作为特化实现，结合公共类型定义与统计收集器完成端到端的功能。
+PT Cache 位于 iommu/cache_src/cache 子目录，采用模板化基类 CacheBase 提供统一的缓存接口与性能建模，PTCache 作为特化实现，结合公共类型定义与统计收集器完成端到端的功能。**新增的单线程调度器架构通过统一轮询调度机制实现任务级串行处理，避免传统多线程架构中的互锁死锁问题。**
 
 ```mermaid
 graph TB
@@ -74,13 +91,22 @@ PT["PTCache<br/>pt_cache.cpp/.h"]
 CB["CacheBase<Tag,Data><br/>cache_base.h/.cpp"]
 CL["CacheLine<br/>cache_line.h"]
 end
+subgraph "单线程调度器"
+SC["CacheSubsystem<br/>cache_subsystem.cpp/.h"]
+PS["PT调度线程<br/>pt_scheduler_thread"]
+WS["Walker调度线程<br/>walker_scheduler_thread"]
+end
+subgraph "增强统计系统"
+ST["StatsCollector<br/>stats_collector.h/.cpp"]
+TS["时间戳记录<br/>record_pt_phase_timestamp"]
+TW["任务等待统计<br/>accumulate_phase_task_wait"]
+end
 subgraph "公共类型与配置"
 TY["类型与数据结构<br/>types.h"]
 JC["JSON配置解析<br/>json_config.cpp"]
 SS["缓存子系统集成<br/>cache_subsystem.cpp"]
 end
 subgraph "性能与统计"
-ST["统计收集器<br/>stats_collector.h"]
 PM["性能模型响应<br/>iommu_perf_pt_cache_response.cc"]
 end
 subgraph "IOMMU规范类型"
@@ -103,6 +129,10 @@ PT --> CB
 PT --> CL
 PT --> TY
 CB --> ST
+SC --> PS
+SC --> WS
+PS --> ST
+WS --> ST
 SS --> PT
 JC --> SS
 PM --> PT
@@ -121,13 +151,15 @@ PF --> PT
 - [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [cache_base.h:1-676](file://iommu/cache_src/cache/cache_base.h#L1-L676)
 - [cache_line.h:1-103](file://iommu/cache_src/cache/cache_line.h#L1-L103)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
+- [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
+- [stats_collector.cpp:147-195](file://iommu/cache_src/common/stats_collector.cpp#L147-L195)
 - [types.h:1-629](file://iommu/cache_src/common/types.h#L1-L629)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
-- [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
-- [iommu_data_structures.hh:1-200](file://iommu/include/iommu_data_structures.hh#L1-L200)
 - [iommu_perf_pt_cache_response.cc:26-26](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L26-L26)
-- [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-300)
+- [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-L300)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
@@ -137,13 +169,15 @@ PF --> PT
 - [pt_cache.cpp:1-298](file://iommu/cache_src/cache/pt_cache.cpp#L1-L298)
 - [cache_base.h:1-676](file://iommu/cache_src/cache/cache_base.h#L1-L676)
 - [cache_line.h:1-103](file://iommu/cache_src/cache/cache_line.h#L1-L103)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
+- [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
+- [stats_collector.cpp:147-195](file://iommu/cache_src/common/stats_collector.cpp#L147-L195)
 - [types.h:1-629](file://iommu/cache_src/common/types.h#L1-L629)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
-- [stats_collector.h:1-130](file://iommu/cache_src/common/stats_collector.h#L1-L130)
-- [iommu_data_structures.hh:1-200](file://iommu/include/iommu_data_structures.hh#L1-L200)
 - [iommu_perf_pt_cache_response.cc:26-26](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L26-L26)
-- [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-300)
+- [iommu_task_cache_convert.cc:240-300](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L240-L300)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [dedup_buffer.h:1-122](file://iommu/cache_src/common/dedup_buffer.h#L1-L122)
@@ -154,7 +188,8 @@ PF --> PT
 - CacheLine：缓存行模板，包含 valid 标志、tag、data、预取标记与访问计数。
 - PTTag/PTData：PT Cache 的标签与数据结构，承载 gscid、pscid、IOVA、翻译阶段、SV48/X4 模式等关键信息。
 - CacheConfig：缓存配置，包含 set 数、way 数、替换策略、仲裁与流水线延迟等。
-- StatsCollector：统计收集器，记录访问、命中、缺失、替换、失效、队列延迟等指标。
+- **新增StatsCollector**：增强统计收集器，记录访问、命中、缺失、替换、失效、队列延迟等指标，**新增相位时间戳记录和任务等待时间统计**。
+- **新增CacheSubsystem**：单线程调度器架构，通过统一轮询调度机制实现任务级串行处理，**pt_scheduler_thread合并pt_worker_thread和pt_update_worker_thread**。
 - **A/D位支持组件**：A/D位检查机制、动态A/D位传递、日志增强功能。
 - **VA去重组件**：deduplication table、去重键值结构、同步机制和统计计数器。
 - **占位CL组件**：insert_placeholder接口、batch_update_placeholders接口、占位CL数据结构。
@@ -168,13 +203,14 @@ PF --> PT
 - [types.h:33-45](file://iommu/cache_src/common/types.h#L33-L45)
 - [types.h:573-589](file://iommu/cache_src/common/types.h#L573-L589)
 - [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
 - [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-291)
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 - [iommu_top.hh:123-142](file://iommu/iommu_top.hh#L123-L142)
 - [dedup_buffer.h:13-122](file://iommu/cache_src/common/dedup_buffer.h#L13-L122)
 
 ## 架构总览
-PT Cache 在 IOMMU 地址转换路径中扮演 IOTLB 角色，通过缓存页表项减少对主存页表的访问次数，提升整体吞吐。其核心流程：
+PT Cache 在 IOMMU 地址转换路径中扮演 IOTLB 角色，通过缓存页表项减少对主存页表的访问次数，提升整体吞吐。**新增的单线程调度器架构通过统一轮询调度机制实现任务级串行处理，避免传统多线程架构中的互锁死锁问题。**其核心流程：
 - 查找：根据 gscid/pscid/iova/阶段/模式构造 PTTag，经哈希定位 set，遍历 way 完成 tag 比较，命中则返回 PTData 并更新替换策略。
 - **A/D位检查**：在PT Cache命中时，检查A/D位状态，如果需要更新且SADE=1，则触发PTW进行硬件更新。
 - **VA去重**：在PT Cache未命中时，检查VA去重表，如果同页VA访问已存在，则挂起当前任务等待去重完成。
@@ -186,12 +222,15 @@ PT Cache 在 IOMMU 地址转换路径中扮演 IOTLB 角色，通过缓存页表
 sequenceDiagram
 participant Req as "请求方"
 participant PT as "PTCache"
+participant SC as "CacheSubsystem"
 participant Dedup as "VA去重表"
 participant PH as "占位CL/缓冲区"
 participant Base as "CacheBase"
 participant Set as "Set(多way)"
 participant RP as "替换策略"
-Req->>PT : "lookup_pt(gscid, pscid, iova, stage, sv48, gstage_x4)"
+Req->>SC : "pt_request_fifo.write(request)"
+SC->>SC : "pt_scheduler_thread轮询处理"
+SC->>PT : "execute_pt_request(req)"
 PT->>PT : "构造PTTag并页对齐"
 PT->>Base : "lookup(tag, out_data, latency)"
 Base->>Base : "hash(tag)->set"
@@ -202,9 +241,9 @@ Base->>RP : "access(set, way)"
 Base-->>PT : "true, out_data"
 PT->>PT : "检查A/D位状态"
 alt "A/D需要更新且SADE=1"
-PT-->>Req : "触发PTW进行A/D更新"
+PT-->>SC : "触发PTW进行A/D更新"
 else "A/D已设置或SADE=0"
-PT-->>Req : "直接转发到forwarder"
+PT-->>SC : "直接转发到forwarder"
 end
 else "未命中"
 Set-->>Base : "未找到"
@@ -212,24 +251,26 @@ Base-->>PT : "false"
 PT->>Dedup : "检查VA去重表"
 alt "去重命中"
 Dedup-->>PT : "挂起任务，等待去重完成"
-PT-->>Req : "未命中(等待去重)"
+PT-->>SC : "未命中(等待去重)"
 else "去重未命中"
 PT->>PH : "检查占位CL/缓冲区"
 alt "占位CL存在"
 PH-->>PT : "返回占位CL"
-PT-->>Req : "占位CL命中"
+PT-->>SC : "占位CL命中"
 else "无占位CL"
 PH-->>PT : "无占位CL"
-PT-->>Req : "触发页表遍历"
+PT-->>SC : "触发页表遍历"
 end
 end
 end
+SC-->>Req : "响应返回"
 ```
 
 **图表来源**
 - [pt_cache.cpp:11-23](file://iommu/cache_src/cache/pt_cache.cpp#L11-L23)
 - [cache_base.h:258-295](file://iommu/cache_src/cache/cache_base.h#L258-L295)
 - [cache_base.h:541-548](file://iommu/cache_src/cache/cache_base.h#L541-L548)
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 - [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-291)
 
@@ -237,6 +278,7 @@ end
 - [pt_cache.cpp:11-23](file://iommu/cache_src/cache/pt_cache.cpp#L11-L23)
 - [cache_base.h:258-295](file://iommu/cache_src/cache/cache_base.h#L258-L295)
 - [cache_base.h:541-548](file://iommu/cache_src/cache/cache_base.h#L541-L548)
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 - [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-291)
 
@@ -494,9 +536,221 @@ PT_TAG ||--o{ CACHE_LINE : "关联于"
 - [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
 - [PT_CACHE_HIT_RATE_ANALYSIS.md](file://PT_CACHE_HIT_RATE_ANALYSIS.md)
 
-## A/D位支持功能
+## 单线程调度器架构
 
-### A/D位检查机制
+### 统一轮询调度机制
+**新增** 单线程调度器架构通过统一轮询调度机制实现任务级串行处理，避免传统多线程架构中的互锁死锁问题。该架构将原本分散在多个worker线程中的功能整合到单一调度器中：
+
+- **pt_scheduler_thread**：合并pt_worker_thread和pt_update_worker_thread，实现REQUEST优先处理，UPDATE次之的任务级串行处理
+- **walker_scheduler_thread**：按lookup → update → invalidate顺序轮询，避免互锁死锁问题
+- **任务级串行**：确保同一时间只有一个任务在执行，避免竞争条件和死锁
+
+```mermaid
+sequenceDiagram
+participant SC as "CacheSubsystem"
+participant PT as "PT Cache"
+participant FIFO as "请求FIFO"
+SC->>SC : "pt_scheduler_thread启动"
+loop "持续运行"
+SC->>FIFO : "检查pt_request_fifo"
+alt "有REQUEST请求"
+SC->>SC : "读取请求并计算FIFO等待时间"
+SC->>PT : "execute_pt_request(req)"
+PT-->>SC : "返回响应"
+SC->>SC : "记录相位时间戳"
+SC->>SC : "trace_task_event"
+SC->>SC : "push到pt_hit_response_fifo"
+else "有UPDATE请求"
+SC->>SC : "读取更新请求并计算等待时间"
+SC->>PT : "execute_pt_update(req)"
+PT-->>SC : "返回更新结果"
+SC->>SC : "记录相位时间戳"
+SC->>SC : "trace_task_event"
+end
+end
+```
+
+**图表来源**
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+
+### REQUEST与UPDATE优先级处理
+**新增** 统一轮询调度器实现了明确的优先级处理机制：
+
+- **REQUEST优先级**：优先处理PT Cache的查找请求，确保地址转换的实时性
+- **UPDATE次级优先级**：在没有REQUEST请求时处理UPDATE请求，保证缓存更新的及时性
+- **FIFO等待时间统计**：通过accumulate_phase_task_wait记录任务在FIFO中的等待时间
+- **相位时间戳记录**：通过record_pt_phase_timestamp记录REQUEST和UPDATE阶段的时间戳
+
+**章节来源**
+- [cache_subsystem.cpp:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [stats_collector.cpp:188-195](file://iommu/cache_src/common/stats_collector.cpp#L188-L195)
+- [stats_collector.cpp:147-153](file://iommu/cache_src/common/stats_collector.cpp#L147-L153)
+
+## 增强统计收集系统
+
+### 相位时间戳记录
+**新增** 增强的统计收集系统提供了更精确的性能分析能力：
+
+- **record_pt_phase_timestamp**：记录PT Cache REQUEST和UPDATE阶段的开始和结束时间戳
+- **accumulate_phase_task_wait**：统计任务在FIFO中的等待时间，区分REQUEST和UPDATE阶段
+- **相位分离统计**：将排队等待时间和执行时间分离，提供更准确的性能分析
+
+```mermaid
+flowchart TD
+Start(["任务开始"]) --> FIFOWait["FIFO等待时间统计"]
+FIFOWait --> RequestPhase["REQUEST阶段执行"]
+RequestPhase --> Timestamp1["记录REQUEST开始时间戳"]
+Timestamp1 --> ExecuteRequest["执行查找操作"]
+ExecuteRequest --> Timestamp2["记录REQUEST结束时间戳"]
+Timestamp2 --> UpdatePhase["UPDATE阶段执行"]
+UpdatePhase --> Timestamp3["记录UPDATE开始时间戳"]
+Timestamp3 --> ExecuteUpdate["执行更新操作"]
+ExecuteUpdate --> Timestamp4["记录UPDATE结束时间戳"]
+Timestamp4 --> Complete["任务完成"]
+```
+
+**图表来源**
+- [stats_collector.cpp:147-153](file://iommu/cache_src/common/stats_collector.cpp#L147-L153)
+- [stats_collector.cpp:188-195](file://iommu/cache_src/common/stats_collector.cpp#L188-L195)
+- [cache_subsystem.cpp:333-334](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L333-L334)
+- [cache_subsystem.cpp:356-357](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L356-L357)
+
+### 任务等待时间统计
+**新增** 任务等待时间统计功能提供了更深入的系统分析能力：
+
+- **FIFO等待时间**：统计任务在pt_request_fifo中的排队等待时间
+- **相位分离**：区分REQUEST和UPDATE阶段的等待时间
+- **精确测量**：通过sc_time_stamp()精确计算任务等待时间
+
+**章节来源**
+- [stats_collector.cpp:179-195](file://iommu/cache_src/common/stats_collector.cpp#L179-L195)
+- [cache_subsystem.cpp:324-326](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L324-L326)
+- [cache_subsystem.cpp:350-352](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L350-L352)
+
+## PT Cache替换保护机制
+
+### 占位CL保护策略修复
+**修复** PT Cache替换保护机制bug，完善占位CL保护策略：
+
+- **保护检测**：扫描所有way查找受保护的is_req=1占位CL
+- **安全替换**：跳过受保护的way，寻找非保护的victim way
+- **错误处理**：当所有way都受保护时，记录警告并跳过插入
+
+```mermaid
+flowchart TD
+Start(["替换候选确定"]) --> CheckSuggested["检查建议的victim way"]
+CheckSuggested --> Protected{"is_req=1占位CL ?"}
+Protected --> |是| ScanAll["扫描所有way寻找安全victim"]
+ScanAll --> FoundSafe{"找到非保护way ?"}
+FoundSafe --> |是| UseSafe["使用安全victim way"]
+FoundSafe --> |否| Warn["记录警告: Cache满, 无安全victim"]
+Protected --> |否| UseSuggested["使用建议victim way"]
+UseSafe --> Replace["执行替换"]
+UseSuggested --> Replace
+Warn --> Skip["跳过插入"]
+Replace --> Complete["替换完成"]
+Skip --> Complete
+```
+
+**图表来源**
+- [cache_base.h:420-444](file://iommu/cache_src/cache/cache_base.h#L420-L444)
+
+### 替换保护机制实现
+**新增** 替换保护机制通过以下步骤实现：
+
+- **受保护检查**：检查cache_array_[set][w].data.reserved.is_ph==1且is_req==1
+- **扫描策略**：跳过已检查的suggested_way，扫描剩余way
+- **安全选择**：选择第一个非保护的way作为victim
+- **降级处理**：如果无安全victim，记录警告并跳过插入
+
+**章节来源**
+- [cache_base.h:420-444](file://iommu/cache_src/cache/cache_base.h#L420-L444)
+- [TEST_50_PACKETS_D3_ANALYSIS_20260609.md](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md)
+
+## 性能报告系统增强
+
+### PT Cache性能摘要
+**新增** 性能报告系统增强了PT Cache的性能分析能力：
+
+- **性能摘要**：包含总任务数、REQUEST/UPDATE比例、PT Cache IOPS、RAM端口利用率等
+- **任务放大系数**：计算RAM访问次数与原始任务数的比值
+- **窗口分析**：基于first_access_time_ns和last_access_time_ns的窗口分析
+
+```mermaid
+flowchart TD
+Start(["性能报告生成"]) --> WindowCalc["计算观察窗口"]
+WindowCalc --> TaskCount["统计总任务数"]
+TaskCount --> IOPS["计算PT Cache IOPS"]
+IOPS --> Utilization["计算RAM端口利用率"]
+Utilization --> Amplification["计算任务放大系数"]
+Amplification --> Summary["生成性能摘要"]
+Summary --> Complete["报告完成"]
+```
+
+**图表来源**
+- [stats_collector.cpp:486-499](file://iommu/cache_src/common/stats_collector.cpp#L486-L499)
+- [stats_collector.cpp:338-344](file://iommu/cache_src/common/stats_collector.cpp#L338-L344)
+
+### 时间戳与任务放大分析
+**新增** 时间戳记录功能提供了精确的性能分析基础：
+
+- **相位时间戳**：记录REQUEST和UPDATE阶段的开始/结束时间
+- **任务放大系数**：total_ram_accesses/original_tasks
+- **执行时间分析**：基于total_execute的端口利用率计算
+
+**章节来源**
+- [stats_collector.cpp:337-344](file://iommu/cache_src/common/stats_collector.cpp#L337-L344)
+- [stats_collector.cpp:486-499](file://iommu/cache_src/common/stats_collector.cpp#L486-L499)
+
+## PT Cache优化改进
+
+### 预取功能实现
+**新增** PT Cache优化改进包含了完整的预取功能实现：
+
+- **预取参数传递**：通过CacheMessage结构体传递prefetch_enabled和prefetch_depth
+- **MISS时插入占位CL**：在未命中时插入D个预取占位CL，避免重复PTW
+- **HIT预取占位CL处理**：处理is_req=0的预取占位CL，实现预取任务挂接
+- **PTW Burst预取**：实现连续D个PTE的DDR读取和批量响应处理
+
+```mermaid
+sequenceDiagram
+participant PTW as "PTW"
+participant Cache as "PT Cache"
+participant Buffer as "去重缓冲区"
+PTW->>PTW : "检查预取参数"
+alt "启用预取"
+PTW->>Cache : "MISS时插入D个预取占位CL"
+Cache->>Buffer : "记录Buffer链表信息"
+PTW->>PTW : "发起Burst DDR读取"
+PTW->>PTW : "解析D+1个PTE响应"
+PTW->>Cache : "批量更新占位CL为常规CL"
+Cache->>Buffer : "刷新Buffer链表"
+Buffer-->>PTW : "批量转发任务"
+else "禁用预取"
+PTW->>PTW : "正常PTW流程"
+end
+```
+
+**图表来源**
+- [PT_DEDUP_PREFETCH_FINAL_SCHEME.md:757-813](file://PT_DEDUP_PREFETCH_FINAL_SCHEME.md#L757-L813)
+- [PT_CACHE_PREFETCH_IMPLEMENTATION_ANALYSIS_20260609.md:345-372](file://PT_CACHE_PREFETCH_IMPLEMENTATION_ANALYSIS_20260609.md#L345-L372)
+
+### Buffer链表管理
+**新增** Buffer链表管理实现了高效的预取任务挂接：
+
+- **Buffer Entry管理**：256个Buffer Entry的顺序分配和链表挂接
+- **链表遍历**：通过next_index形成Buffer链表，支持批量处理
+- **批量刷新**：flush_dedup_buffer_chain实现Buffer链表的批量处理和释放
+
+**章节来源**
+- [PT_DEDUP_PREFETCH_FINAL_SCHEME.md:604-664](file://PT_DEDUP_PREFETCH_FINAL_SCHEME.md#L604-L664)
+- [dedup_buffer.h:13-122](file://iommu/cache_src/common/dedup_buffer.h#L13-L122)
+
+### A/D位支持功能
+
+#### A/D位检查机制
 A/D位支持功能通过以下机制实现内存访问跟踪：
 
 - **A/D位状态检查**：在PT Cache命中时，检查任务的A/D位状态（A=Accessed, D=Dirty）
@@ -518,7 +772,7 @@ DirectForward --> ReturnForward["返回转发"]
 **图表来源**
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 
-### 动态A/D位传递
+#### 动态A/D位传递
 A/D位通过以下流程在系统中动态传递：
 
 1. **从任务提取**：在`task_to_pt_update`中从任务结构提取实际的A/D位值
@@ -543,7 +797,7 @@ Convert-->>Task : "提取A/D位到任务"
 - [iommu_task_cache_convert.cc:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-291)
 - [iommu_task_cache_convert.cc:208-222](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L208-222)
 
-### A/D位处理流程
+#### A/D位处理流程
 A/D位处理涉及多个组件的协作：
 
 - **make_pt_data函数**：新增`ad_bit_set`参数，支持动态传递A/D位状态
@@ -557,7 +811,7 @@ A/D位处理涉及多个组件的协作：
 - [iommu_task_cache_convert.cc:208-222](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L208-222)
 - [iommu_perf_pt_cache_response.cc:36-54](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc#L36-L54)
 
-### 日志增强功能
+#### 日志增强功能
 A/D位支持增强了系统的可观测性：
 
 - **PT_UPDATE日志**：显示A/D位的实际值（A=1, D=1）
@@ -771,6 +1025,8 @@ flush_dedup_buffer_chain负责去重缓冲区的批量处理：
 
 ## 依赖关系分析
 - PTCache 依赖 CacheBase 提供的通用缓存能力；CacheBase 再依赖替换策略、统计收集器与配置。
+- **新增CacheSubsystem**：单线程调度器架构，通过统一轮询调度机制实现任务级串行处理。
+- **新增StatsCollector**：增强统计收集器，提供相位时间戳记录和任务等待时间统计。
 - PTTag/PTData 依赖公共类型定义，如 TransStage、PageSize、spte_t/gpte_t 等。
 - 配置通过 JSON 解析注入到缓存子系统，最终传入 PTCache 构造函数。
 - **A/D位支持**：依赖iommu_task.hh中的SADE字段和iommu_perf_params.hh中的配置。
@@ -780,10 +1036,11 @@ flush_dedup_buffer_chain负责去重缓冲区的批量处理：
 ```mermaid
 graph LR
 PTCache["PTCache"] --> CacheBase["CacheBase<T,D>"]
+PTCache --> Stats["StatsCollector"]
 CacheBase --> Replacement["ReplacementPolicy"]
-CacheBase --> Stats["StatsCollector"]
-PTCache --> Types["types.h"]
-Types --> DS["iommu_data_structures.hh"]
+CacheBase --> Stats
+CacheSubsystem["CacheSubsystem"] --> PTCache
+CacheSubsystem --> Stats
 JSON["json_config.cpp"] --> Subsys["cache_subsystem.cpp"]
 Subsys --> PTCache
 Params["iommu_perf_params.hh"] --> Dedup["VA去重功能"]
@@ -799,6 +1056,8 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
 **图表来源**
 - [pt_cache.cpp:5-8](file://iommu/cache_src/cache/pt_cache.cpp#L5-L8)
 - [cache_base.h:235-252](file://iommu/cache_src/cache/cache_base.h#L235-L252)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
 - [types.h:65-69](file://iommu/cache_src/common/types.h#L65-L69)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
@@ -809,6 +1068,8 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
 **章节来源**
 - [pt_cache.cpp:5-8](file://iommu/cache_src/cache/pt_cache.cpp#L5-L8)
 - [cache_base.h:235-252](file://iommu/cache_src/cache/cache_base.h#L235-L252)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
 - [types.h:65-69](file://iommu/cache_src/common/types.h#L65-L69)
 - [json_config.cpp:63-74](file://iommu/cache_src/common/json_config.cpp#L63-L74)
 - [cache_subsystem.cpp:143-143](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L143-L143)
@@ -823,23 +1084,27 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
   - 预取策略：利用 from_prefetch 标记，结合命中统计评估预取收益。
   - **VA去重优化**：对于具有高空间局部性的工作负载，VA去重可显著减少PTW任务数量。
   - **占位CL优化**：合理配置预取深度D，平衡预取收益与Cache占用。
+  - **单线程调度优化**：统一轮询调度避免互锁死锁，提高系统稳定性。
 - 内存占用
   - 每个缓存行包含 tag + data + 控制位，内存占用约为 (tag_size + data_size + 1字节控制位) × sets × ways。
   - PTData 包含 VS/G 两阶段 PTE 与 reserved 字段，占用相对较大，需权衡精度与容量。
   - **VA去重表内存**：每个去重表项约占用24字节（1+4+8+8+4），实际占用取决于活跃页面数量。
   - **去重缓冲区内存**：256个Buffer Entry，每个Entry约占用20字节，总占用约5KB。
   - **A/D位存储**：每个PTData额外存储A/D位状态，增加约2位存储开销。
+  - **统计信息内存**：相位时间戳和任务等待时间统计增加少量内存开销。
 - 延迟优化
   - 减少仲裁等待：合理设置 arbiter_latency_cycles 与流水线延迟参数。
   - 降低替换开销：在替换路径较长时，考虑增大 sets 或采用更高效的替换策略。
   - **VA去重延迟**：去重命中可避免PTW延迟，但需要额外的去重表查找和同步开销。
   - **A/D位检查延迟**：增加的A/D位检查逻辑带来微小延迟，但避免了不必要的PTW请求。
   - **占位CL延迟**：占位CL机制可减少重复PTW，但需要额外的缓冲区管理和替换保护逻辑。
+  - **单线程调度延迟**：统一轮询调度引入轻微的调度开销，但避免了复杂的同步机制。
 - 命中率分析
   - 参考仓库提供的命中率分析文档，结合工作负载特征调整缓存规模与替换策略。
   - **VA去重效果评估**：通过统计信息分析去重命中率和PTW任务节省率。
   - **占位CL效果评估**：通过PT_CACHE_ACCESS_ANALYSIS文档评估占位CL的命中模式和预取效果。
   - **A/D位影响分析**：评估A/D位检查对整体性能的影响，通常为正向优化。
+  - **统计系统效果评估**：通过相位时间戳和任务等待时间统计分析系统性能瓶颈。
 
 **章节来源**
 - [types.h:573-589](file://iommu/cache_src/common/types.h#L573-L589)
@@ -855,6 +1120,7 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
   - **VA去重问题**：检查va_dedup_table大小是否过大导致内存压力。
   - **A/D位问题**：检查A/D位状态是否正确传递，确认SADE配置。
   - **占位CL问题**：检查insert_placeholder返回值，确认占位CL插入是否成功。
+  - **单线程调度问题**：检查pt_scheduler_thread是否正常运行，确认REQUEST优先级处理。
 - 失效不生效
   - 确认失效模式（PRECISE/SCAN/GLOBAL）与谓词条件是否匹配预期。
   - 检查 stage 标志（STAGE1_ONLY/STAGE2_ONLY/STAGE1_AND_2）是否与失效目标一致。
@@ -873,6 +1139,14 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
     - 占位CL插入失败：检查Cache是否被is_req=1的占位CL完全保护
     - 预取未生效：检查batch_update_placeholders是否正确执行
     - Buffer满：检查DedupBuffer的有效计数，确认是否达到256上限
+  - **单线程调度相关问题**：
+    - 调度器停止：检查pt_scheduler_thread的运行状态
+    - 优先级错误：确认REQUEST请求是否总是优先于UPDATE请求
+    - FIFO积压：检查pt_request_fifo和pt_update_fifo的队列长度
+  - **统计系统相关问题**：
+    - 时间戳丢失：检查record_pt_phase_timestamp的调用频率
+    - 等待时间统计异常：确认accumulate_phase_task_wait的计算逻辑
+    - 报告不完整：检查print_summary的输出格式和数据完整性
 
 **章节来源**
 - [stats_collector.h:13-63](file://iommu/cache_src/common/stats_collector.h#L13-L63)
@@ -882,7 +1156,7 @@ PHSupport --> PF["flush_dedup_buffer_chain"]
 - [PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md](file://PT_CACHE_ACCESS_ANALYSIS_50TASKS_20260609.md)
 
 ## 结论
-PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架，PTCache 在其中承担 IOTLB 的核心职责。其设计兼顾了查找效率、替换策略灵活性与性能统计可观测性。**新增的A/D位支持功能进一步完善了PT Cache的内存访问跟踪能力，通过A/D位检查机制实现了更精确的访问监控和硬件更新控制。** **新增的VA去重功能进一步提升了性能，通过deduplication table实现了同页VA访问的去重优化，显著减少了重复的PTW任务。** **新增的占位CL与去重缓冲区功能实现了预取优化和任务挂起管理，通过占位缓存行和Buffer链表机制，有效减少了重复的页表遍历操作。**通过合理的配置与替换策略选择，可在不同工作负载下获得稳定的命中率与较低的地址转换延迟。
+PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架，PTCache 在其中承担 IOTLB 的核心职责。**新增的单线程调度器架构通过统一轮询调度机制实现了任务级串行处理，避免了传统多线程架构中的互锁死锁问题，提高了系统的稳定性和可预测性。** **增强的统计收集系统提供了更精确的性能分析能力，通过相位时间戳记录和任务等待时间统计，为性能优化提供了数据支撑。** **修复的PT Cache替换保护机制完善了占位CL的保护策略，解决了Cache满时的替换问题，提高了系统的可靠性。** **性能报告系统的增强提供了更全面的性能摘要和任务放大系数分析，帮助用户更好地理解系统性能特征。** **新增的PT Cache优化改进包含了完整的预取功能实现，通过占位CL机制和Buffer链表管理，显著提升了预取效率和系统吞吐。** **新增的A/D位支持功能进一步完善了PT Cache的内存访问跟踪能力，通过A/D位检查机制实现了更精确的访问监控和硬件更新控制。** **新增的VA去重功能进一步提升了性能，通过deduplication table实现了同页VA访问的去重优化，显著减少了重复的PTW任务。** **新增的占位CL与去重缓冲区功能实现了预取优化和任务挂起管理，通过占位缓存行和Buffer链表机制，有效减少了重复的页表遍历操作。**通过合理的配置与替换策略选择，可在不同工作负载下获得稳定的命中率与较低的地址转换延迟。
 
 ## 附录
 
@@ -913,6 +1187,12 @@ PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架
 - **占位CL配置**
   - PT_DEDUP_BUFFER_SIZE：去重缓冲区大小（默认256）
   - prefetch_depth：预取深度D值
+- **单线程调度配置**
+  - pt_scheduler_thread：统一轮询调度线程
+  - walker_scheduler_thread：Walker Cache调度线程
+- **统计系统配置**
+  - record_pt_phase_timestamp：相位时间戳记录
+  - accumulate_phase_task_wait：任务等待时间统计
 
 **章节来源**
 - [types.h:573-612](file://iommu/cache_src/common/types.h#L573-L612)
@@ -920,6 +1200,8 @@ PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架
 - [iommu_perf_params.hh:113-114](file://iommu/iommu_perf_model/iommu_perf_params.hh#L113-L114)
 - [iommu_task.hh:160-162](file://iommu/include/iommu_task.hh#L160-L162)
 - [dedup_buffer.h:60-61](file://iommu/cache_src/common/dedup_buffer.h#L60-L61)
+- [cache_subsystem.h:105-131](file://iommu/cache_src/subsystem/cache_subsystem.h#L105-L131)
+- [stats_collector.cpp:147-195](file://iommu/cache_src/common/stats_collector.cpp#L147-L195)
 
 ### 代码示例路径（不含具体代码内容）
 - 查找页表项
@@ -944,6 +1226,11 @@ PT Cache 通过模板化的 CacheBase 提供了统一、可扩展的缓存框架
   - [统计收集器接口:65-109](file://iommu/cache_src/common/stats_collector.h#L65-L109)
   - [命中/缺失/替换/失效统计:73-78](file://iommu/cache_src/common/stats_collector.h#L73-L78)
   - [命中率与IOPS计算:31-62](file://iommu/cache_src/common/stats_collector.h#L31-L62)
+  - [相位时间戳记录:147-153](file://iommu/cache_src/common/stats_collector.cpp#L147-L153)
+  - [任务等待时间统计:188-195](file://iommu/cache_src/common/stats_collector.cpp#L188-L195)
+- **单线程调度器**
+  - [pt_scheduler_thread:314-370](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L314-L370)
+  - [walker_scheduler_thread:373-396](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L373-L396)
 - **A/D位支持功能**
   - [make_pt_data函数:370-423](file://iommu/cache_src/common/types.h#L370-L423)
   - [task_to_pt_update函数:276-291](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L276-L291)

@@ -20,6 +20,8 @@
 #include "dedup_buffer.h"  // NEW: Dedup Buffer for PT Cache deduplication
 #include <iostream>
 #include <cassert>
+// TODO: 暂时禁用set，待修复崩溃问题
+// #include <set>
 
 using namespace std;
 using namespace sc_core;
@@ -153,6 +155,16 @@ public:
                                   iommu_task_t* main_task,
                                   const uint64_t* group_iovas,
                                   uint32_t total_tasks);
+    
+    // [方案A] 扫描Buffer按IOVA匹配刷新所有entry（不依赖PT Cache状态）
+    void flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_id,
+                                    iommu_task_t* main_task,
+                                    const uint64_t* group_iovas,
+                                    uint32_t total_tasks);
+    
+    // [方案A] 已转发任务ID集合，防止PTW路径和Monitor flush路径重复转发
+    // TODO: 暂时禁用，待修复崩溃问题
+    // std::set<uint32_t> forwarded_task_ids;
     
     // [新增] Flush单个PT Cache条目 (占位CL → 常规CL)
     void flush_single_pt_cache(uint64_t iova,

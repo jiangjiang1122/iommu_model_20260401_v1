@@ -564,6 +564,9 @@ void iommu_top::print_cache_statistics() {
     
     printf("========================================================================\n\n");
 
+    // [STAT] PT Scheduler任务间隔分析
+    cache_sub.print_pt_scheduler_gap_report();
+
     // VA Dedup Statistics
     printf("========== VA Dedup Statistics ==========\n");
     printf("  VA Dedup Enabled:  %s\n", PT_CACHE_VA_DEDUP_ENABLED ? "YES" : "NO");

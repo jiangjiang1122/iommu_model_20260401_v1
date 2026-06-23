@@ -80,6 +80,9 @@ public:
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     void set_pt_dedup_enabled(bool enabled) { pt_dedup_enabled_ = enabled; }
 
+    // [STAT] PT Scheduler任务间隔分析报告
+    void print_pt_scheduler_gap_report() const;
+
     // 级联失效: DC/PC 失效后产生关联失效消息，推入 PT/Walker/MSIPT 的失效 FIFO
     void enqueue_cascade_invalidations(gscid_t gscid, pscid_t pscid,
                                        device_id_t device_id, bool has_gscid,
@@ -166,6 +169,18 @@ private:
     // NEW: PT Cache去重相关成员
     DedupBuffer* dedup_buffer_ = nullptr;
     bool pt_dedup_enabled_ = false;
+
+    // [STAT] PT Scheduler任务间隔分析 (gap = 当前任务start - 上一任务end)
+    double   pt_sched_first_start_ns_ = -1.0;   // 第一笔任务开始时刻
+    double   pt_sched_last_end_ns_    = 0.0;    // 最后一笔任务结束时刻
+    double   pt_sched_total_gap_ns_   = 0.0;    // 总空闲时间(gap之和)
+    double   pt_sched_total_exec_ns_  = 0.0;    // 总执行时间(每笔任务耗时之和)
+    uint64_t pt_sched_task_count_     = 0;      // 总处理任务数
+    uint64_t pt_sched_gap_count_      = 0;      // 间隔次数(=task_count-1)
+    double   pt_sched_max_gap_ns_     = 0.0;    // 最大单次空闲
+    double   pt_sched_last_task_end_  = -1.0;   // 上一笔任务结束时刻
+    uint64_t pt_sched_req_count_      = 0;      // REQUEST任务数
+    uint64_t pt_sched_upd_count_      = 0;      // UPDATE任务数
 };
 
 } // namespace iommu

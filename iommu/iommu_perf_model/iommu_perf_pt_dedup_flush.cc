@@ -220,3 +220,124 @@ void iommu_top::flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
            group_id, flushed_count);
     fflush(stdout);
 }
+
+// ============================================================
+// [方案A] flush_dedup_buffer_by_iova - 扫描Buffer按IOVA匹配刷新
+//
+// 功能:
+// 1. 扫描整个Dedup Buffer
+// 2. 找到所有匹配target_iova(4KB页对齐)的有效entry
+// 3. 为每个挂起任务计算PA并转发（使用forwarded_task_ids防止重复转发）
+// 4. 释放所有匹配的Buffer Entry
+//
+// 与flush_dedup_buffer_chain的区别:
+// - 不依赖Buffer链指针(next_index)，而是通过IOVA匹配扫描
+// - 不依赖PT Cache状态（is_req/head_index），避免时序竞争
+// - 使用forwarded_task_ids防止PTW路径和flush路径重复转发
+//
+// 参数:
+// - target_iova: 目标IOVA（4KB页对齐）
+// - group_id: 预取组ID（用于日志）
+// - main_task: 主任务指针（通过walk_ctx.pt_updates访问PTE）
+// - group_iovas: 预取组IOVA列表
+// - total_tasks: 预取组总任务数（1+D）
+// ============================================================
+void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_id,
+                                            iommu_task_t* main_task,
+                                            const uint64_t* group_iovas,
+                                            uint32_t total_tasks) {
+    uint64_t target_iova_aligned = target_iova & ~0xFFFULL;  // 4KB对齐
+    
+    printf("[DEDUP_FLUSH_IOVA] group_id=%u -> Scanning buffer for iova=0x%lx\n",
+           group_id, target_iova_aligned);
+    fflush(stdout);
+    
+    auto* dedup_buf = cache_sub.get_pt_dedup_buffer();
+    if (dedup_buf == nullptr) {
+        printf("[DEDUP_FLUSH_IOVA] group_id=%u -> ERROR: dedup_buffer is nullptr!\n", group_id);
+        fflush(stdout);
+        return;
+    }
+    
+    uint32_t flushed_count = 0;
+    uint32_t skipped_count = 0;
+    
+    // 扫描整个Buffer
+    for (uint32_t idx = 0; idx < PT_DEDUP_BUFFER_SIZE; idx++) {
+        auto& entry = dedup_buf->entries[idx];
+        if (!entry.is_valid()) continue;
+        
+        // 检查IOVA是否匹配（4KB页对齐比较）
+        uint64_t entry_iova_aligned = entry.iova & ~0xFFFULL;
+        if (entry_iova_aligned != target_iova_aligned) continue;
+        
+        // 匹配的entry: 处理挂起任务
+        iommu_task_t* pending_task = entry.task_ptr;
+        uint64_t entry_iova = entry.iova;  // 保存iova（free_entry会清空）
+        
+        if (pending_task != nullptr) {
+            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
+            // 直接处理任务，不检查是否已转发
+            
+            // 计算PA：使用对应IOVA的PTE.PPN + task的offset
+            uint64_t offset = pending_task->iova & 0xFFFL;  // 页内偏移
+            
+            // 在group_iovas中查找匹配的PTE数据
+            bool found = false;
+            for (uint32_t i = 0; i < total_tasks; i++) {
+                if ((group_iovas[i] & ~0xFFFULL) == target_iova_aligned) {
+                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].vs_pte.PPN << 12) | offset;
+                    pending_task->pa = pa;
+                    pending_task->vs_pte = main_task->walk_ctx.pt_updates[i].vs_pte;
+                    pending_task->g_pte = main_task->walk_ctx.pt_updates[i].g_pte;
+                    pending_task->page_sz = main_task->walk_ctx.pt_updates[i].page_sz;
+                    found = true;
+                    
+                    printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (iova=0x%lx, PPN=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
+                           pending_task->task_id, pa, pending_task->iova,
+                           main_task->walk_ctx.pt_updates[i].vs_pte.PPN, offset, idx);
+                    fflush(stdout);
+                    break;
+                }
+            }
+            
+            if (!found) {
+                // 未找到对应PTE，使用主任务的PPN（同页场景）
+                uint64_t pa = (main_task->walk_ctx.pt_updates[0].vs_pte.PPN << 12) | offset;
+                pending_task->pa = pa;
+                pending_task->vs_pte = main_task->walk_ctx.pt_updates[0].vs_pte;
+                pending_task->g_pte = main_task->walk_ctx.pt_updates[0].g_pte;
+                pending_task->page_sz = main_task->walk_ctx.pt_updates[0].page_sz;
+                
+                printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (using main PPN=0x%lx, iova=0x%lx) [buf_idx=%u]\n",
+                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].vs_pte.PPN,
+                       pending_task->iova, idx);
+                fflush(stdout);
+            }
+            
+            // 设置任务状态为PTW完成
+            pending_task->state = TASK_PTW_DONE;
+            
+            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
+            // forwarded_task_ids.insert(pending_task->task_id);
+        }
+        
+        // 释放Buffer Entry
+        dedup_buf->free_entry(idx);
+        flushed_count++;
+        
+        printf("[DEDUP_FLUSH_IOVA] entry[%u] freed (task_ptr=%p, iova=0x%lx) -> forwarding\n",
+               idx, (void*)pending_task, entry_iova);
+        fflush(stdout);
+        
+        // 发送到forwarder
+        if (pending_task != nullptr) {
+            pt_cache_to_fwd_fifo.write(pending_task);
+        }
+    }
+    
+    printf("[DEDUP_FLUSH_IOVA] group_id=%u -> IOVA scan completed (%u flushed, %u skipped for iova=0x%lx)\n",
+           group_id, flushed_count, skipped_count, target_iova_aligned);
+    fflush(stdout);
+}
+

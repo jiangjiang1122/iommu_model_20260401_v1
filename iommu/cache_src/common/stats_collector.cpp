@@ -176,6 +176,18 @@ void StatsCollector::record_pt_phase_timestamp(const std::string& cache_name, in
     }
 }
 
+void StatsCollector::record_interval_hit(const std::string& cache_name, int interval_idx) {
+    auto& s = stats_map_[cache_name];
+    if (interval_idx >= 0 && interval_idx < CacheStats::NUM_INTERVALS)
+        s.interval_hits[interval_idx]++;
+}
+
+void StatsCollector::record_interval_miss(const std::string& cache_name, int interval_idx) {
+    auto& s = stats_map_[cache_name];
+    if (interval_idx >= 0 && interval_idx < CacheStats::NUM_INTERVALS)
+        s.interval_misses[interval_idx]++;
+}
+
 void StatsCollector::accumulate_phase_wait(const std::string& cache_name, int phase, double wait_ns) {
     auto& stats = stats_map_[cache_name];
     if (phase == 0) {
@@ -495,6 +507,31 @@ void StatsCollector::print_summary(std::ostream& os) const {
                << "\n    Task amplification:   " << std::fixed << std::setprecision(3) 
                                                   << (static_cast<double>(pt.lookup_count + pt.fill_hit_count + pt.fill_invalid_count + pt.fill_replace_count) / (total_tasks > 0 ? total_tasks : 1)) << "x RAM accesses/task";
             
+            // [STAT] 区间命中率统计
+            os << "\n\n  [PT Cache Hit Rate by Request Interval]";
+            const char* interval_labels[] = {"Task   1~1000", "Task1001~2000", "Task2001~3000", "Task3001~4000"};
+            uint64_t total_interval_hits = 0, total_interval_misses = 0;
+            for (int i = 0; i < CacheStats::NUM_INTERVALS; i++) {
+                uint64_t h = pt.interval_hits[i];
+                uint64_t m = pt.interval_misses[i];
+                uint64_t total = h + m;
+                double rate = total > 0 ? (double)h / total * 100.0 : 0.0;
+                os << "\n    " << interval_labels[i]
+                   << "  Hit=" << std::setw(5) << h
+                   << "  Miss=" << std::setw(5) << m
+                   << "  Total=" << std::setw(5) << total
+                   << "  HitRate=" << std::fixed << std::setprecision(1) << rate << "%";
+                total_interval_hits += h;
+                total_interval_misses += m;
+            }
+            uint64_t grand_total = total_interval_hits + total_interval_misses;
+            double grand_rate = grand_total > 0 ? (double)total_interval_hits / grand_total * 100.0 : 0.0;
+            os << "\n    ---"
+               << "\n    Overall          Hit=" << std::setw(5) << total_interval_hits
+               << "  Miss=" << std::setw(5) << total_interval_misses
+               << "  Total=" << std::setw(5) << grand_total
+               << "  HitRate=" << std::fixed << std::setprecision(1) << grand_rate << "%";
+            
             os << "\n=================================================\n";
         }
     }
@@ -587,6 +624,9 @@ void StatsCollector::reset() {
         st.upd_fill_inv_count = 0; st.upd_fill_repl_count = 0;
         st.mon_lookup_count = 0; st.mon_fill_hit_count = 0;
         st.mon_fill_inv_count = 0; st.mon_fill_repl_count = 0;
+        for (int i = 0; i < CacheStats::NUM_INTERVALS; i++) {
+            st.interval_hits[i] = 0; st.interval_misses[i] = 0;
+        }
     }
     for (auto& [name, hist] : histograms_) {
         hist.clear();

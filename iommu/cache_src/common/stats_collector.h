@@ -57,6 +57,10 @@ struct CacheStats {
     uint64_t    req_latency_samples = 0;      // REQUEST任务样本数
     double      req_wait_ns          = 0.0;   // REQUEST阶段RAM端口等待时间累加
     double      req_task_wait_ns     = 0.0;   // REQUEST阶段任务级互斥等待时间累加
+    // [STAT] 区间命中率统计 (每1000笔REQUEST)
+    static constexpr int NUM_INTERVALS = 4;
+    uint64_t    interval_hits[NUM_INTERVALS]   = {0,0,0,0};
+    uint64_t    interval_misses[NUM_INTERVALS] = {0,0,0,0};
     // [STAT] PT Cache UPDATE阶段入口/出口时间戳
     double      upd_first_start_ns = -1.0;    // UPDATE阶段首次进入时刻
     double      upd_last_end_ns    = 0.0;     // UPDATE阶段最后退出时刻
@@ -139,6 +143,9 @@ public:
     // [STAT] 记录PT Cache阶段入口/出口时间戳
     void record_pt_phase_timestamp(const std::string& cache_name, int phase,
                                    double start_time_ns, double end_time_ns);
+    // [STAT] 区间命中率记录 (cache_name="pt_cache", req_index=0~3999)
+    void record_interval_hit(const std::string& cache_name, int interval_idx);
+    void record_interval_miss(const std::string& cache_name, int interval_idx);
     // [STAT] 按阶段累加RAM端口等待时间
     void accumulate_phase_wait(const std::string& cache_name, int phase, double wait_ns);
     // [STAT] 按阶段累加任务级互斥等待时间

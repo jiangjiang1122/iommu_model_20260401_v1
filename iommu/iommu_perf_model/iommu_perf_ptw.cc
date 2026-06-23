@@ -143,6 +143,7 @@ void iommu_top::ptw_req_process_thread() {
                 cache_sub.pt_update_fifo.write(pt_update_req);
                 
                 // Also route to forwarder
+                // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
                 pt_cache_to_fwd_fifo.write(task);
                 // VA Dedup: 恢复挂起的同页任务
                 va_dedup_recover(task, false);
@@ -976,6 +977,7 @@ void iommu_top::ptw_rsp_process_thread() {
             cache_sub.pt_update_fifo.write(pt_update_req);
             
             // Also route to forwarder after PT update
+            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
             pt_cache_to_fwd_fifo.write(task);
             // VA Dedup: 恢复挂起的同页任务(fault)
             va_dedup_recover(task, true);
@@ -1347,6 +1349,7 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // Also route to forwarder after PT update
+            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
             pt_cache_to_fwd_fifo.write(task);
             // VA Dedup: 恢复挂起的同页任务
             va_dedup_recover(task, false);
@@ -1447,40 +1450,26 @@ void iommu_top::prefetch_group_monitor_thread() {
                     fflush(stdout);
                 }
                 
-                // ========== 收集所有Buffer链头（batch_update前，占位CL还保留head_index） ==========
-                // [STAT] 保存phase_tracker_并设置为PTW_MONITOR阶段(2)
+                // ========== [方案A] 对1+D个IOVA直接扫描Buffer刷新 ==========
+                // Monitor不查询PT Cache，直接扫描Buffer中匹配IOVA的entry
+                // 避免Monitor与pt_scheduler_thread之间的PT Cache状态竞争
+                // 使用forwarded_task_ids防止PTW路径和flush路径重复转发
+                
+                // [STAT] 保存phase_tracker_并设置为PTW_MONITOR阶段(2)（仅用于统计）
                 int saved_phase = cache_sub.pt_cache().current_phase();
                 cache_sub.pt_cache().set_current_phase(2);
-
-                std::vector<uint16_t> chain_heads;
+                
+                // 日志：记录1+D个IOVA的处理
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
-                    if (group.group_iovas[i] == 0) continue;
-                    
-                    iommu::PTData existing_data;
-                    sc_time lat;
-                    bool hit = cache_sub.pt_cache().lookup_pt(
-                        main_task->GSCID, main_task->PSCID, group.group_iovas[i],
-                        stage, sv48, gstage_x4, existing_data, lat);
-                    
-                    if (hit && existing_data.reserved.is_ph == 1) {
-                        uint16_t h = existing_data.reserved.head_index;
-                        // 检查是否已收集（去重）
-                        bool dup = false;
-                        for (uint16_t ch : chain_heads) {
-                            if (ch == h) { dup = true; break; }
-                        }
-                        if (!dup && h != DEDUP_BUFFER_INVALID_IDX) {
-                            chain_heads.push_back(h);
-                        }
-                    }
+                    uint64_t iova = group.group_iovas[i];
+                    if (iova == 0) continue;
+                    printf("[PTW_PREFETCH_MONITOR] Group %u, iova=0x%lx: will scan buffer for matching entries\n",
+                           group_id, iova);
                 }
-
+                fflush(stdout);
+                
                 // [STAT] 恢复phase_tracker_
                 cache_sub.pt_cache().set_current_phase(saved_phase);
-                
-                printf("[PTW_PREFETCH_MONITOR] Group %u: collected %zu buffer chain heads\n",
-                       group_id, chain_heads.size());
-                fflush(stdout);
                 
                 // ========== PTW任务统计（在PT Cache update之前计算，避免包含PT Cache延时）==========
                 ptw_outstanding_task_count--;
@@ -1523,15 +1512,20 @@ void iommu_top::prefetch_group_monitor_thread() {
                        group_id, batch_updates.size());
                 fflush(stdout);
                 
-                // ========== Flush所有Buffer链（包括主链和预取链） ==========
-                for (uint16_t h : chain_heads) {
-                    flush_dedup_buffer_chain(h, group_id, main_task,
-                                            group.group_iovas,
-                                            group.total_tasks);
+                // ========== [方案A] 扫描Buffer刷新所有匹配IOVA的entry ==========
+                // 对每个IOVA扫描Buffer，找到匹配的entry并刷新
+                // 使用forwarded_task_ids防止重复转发
+                uint32_t flushed_iova_count = 0;
+                for (uint32_t i = 0; i < group.total_tasks; i++) {
+                    uint64_t iova = group.group_iovas[i];
+                    if (iova == 0) continue;
+                    flush_dedup_buffer_by_iova(iova, group_id, main_task,
+                                              group.group_iovas, group.total_tasks);
+                    flushed_iova_count++;
                 }
                 
-                printf("[PTW_PREFETCH_MONITOR] Group %u completed, flushed %zu buffer chains.\n",
-                       group_id, chain_heads.size());
+                printf("[PTW_PREFETCH_MONITOR] Group %u completed, scanned %u IOVAs for buffer flush.\n",
+                       group_id, flushed_iova_count);
                 fflush(stdout);
                 
                 // 删除组记录
