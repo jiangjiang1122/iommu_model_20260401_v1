@@ -8,9 +8,17 @@
 - [test_rp.hh](file://rp/test_rp.hh)
 - [iommu_struct.hh](file://iommu/include/iommu_struct.hh)
 - [iommu_registers.hh](file://iommu/include/iommu_registers.hh)
+- [iommu_perf_params.hh](file://iommu/iommu_perf_model/iommu_perf_params.hh)
 - [main.cpp](file://main.cpp)
 - [README.md](file://README.md)
 </cite>
+
+## 更新摘要
+**变更内容**
+- 更新了IOVA测试范围从1MB扩展到16MB的测试场景
+- 新增了4000请求随机4KB页面读取压力测试功能
+- 优化了稳态IOPS采样窗口配置，支持更长时间的测试运行
+- 增强了并发处理测试的灵活性和可扩展性
 
 ## 目录
 1. [简介](#简介)
@@ -28,9 +36,11 @@
 Root Port测试模块是RISC-V IOMMU项目中的关键测试框架，专门用于验证IOMMU在PCIe根端口场景下的地址转换功能。该模块通过模拟真实的设备请求生成、地址转换测试和并发处理验证，确保IOMMU能够正确处理各种复杂的内存管理场景。
 
 该测试模块主要包含三个核心测试文件：
-- `test_rp_thread.cc`：单设备1000请求测试和2000请求并发测试
+- `test_rp_thread.cc`：单设备4000请求随机4KB页面读取压力测试和1000请求顺序128KB读取测试
 - `test_rp_sv48_bare_thread.cc`：Sv48 Bare模式测试实现
 - `test_rp_func.cc`：功能测试方法和验证逻辑
+
+**更新** 测试范围从原来的1MB扩展到16MB，支持更广泛的地址空间验证和更严格的性能压力测试。
 
 ## 项目结构
 
@@ -42,26 +52,27 @@ subgraph "项目根目录"
 A[main.cpp<br/>主程序入口]
 subgraph "rp/ 根端口测试模块"
 B[test_rp.hh<br/>头文件定义]
-C[test_rp_thread.cc<br/>线程测试实现]
-D[test_rp_sv48_bare_thread.cc<br/>Sv48测试实现]
-E[test_rp_func.cc<br/>功能测试实现]
+C[test_rp_thread.cc<br/>线程测试实现<br/>支持16MB IOVA范围<br/>4000请求随机测试]
+D[test_rp_sv48_bare_thread.cc<br/>Sv48测试实现<br/>1000请求顺序测试]
+E[test_rp_func.cc<br/>功能测试实现<br/>增强的验证逻辑]
 end
 subgraph "iommu/ IOMMU核心模块"
 F[iommu_top.cc/hh<br/>顶层模块]
 G[iommu_struct.hh<br/>数据结构定义]
 H[iommu_registers.hh<br/>寄存器定义]
+I[iommu_perf_params.hh<br/>性能参数配置<br/>稳态采样窗口]
 end
 subgraph "其他模块"
-I[ddr/ DDR仿真模块]
-J[pcienoc/ PCIe NoC接口]
-K[slink/ NoC路径模型]
+J[ddr/ DDR仿真模块]
+K[pcienoc/ PCIe NoC接口]
+L[slink/ NoC路径模型]
 end
 end
 A --> B
 A --> F
-A --> I
 A --> J
 A --> K
+A --> L
 B --> C
 B --> D
 B --> E
@@ -70,6 +81,7 @@ B --> E
 **图表来源**
 - [main.cpp:39-94](file://main.cpp#L39-L94)
 - [test_rp.hh:54-184](file://rp/test_rp.hh#L54-L184)
+- [iommu_perf_params.hh:149-152](file://iommu/iommu_perf_model/iommu_perf_params.hh#L149-L152)
 
 **章节来源**
 - [main.cpp:39-94](file://main.cpp#L39-L94)
@@ -82,9 +94,10 @@ Root Port测试模块的核心组件是一个名为`RP_Module`的SystemC模块�
 ### 主要组件职责
 
 1. **设备上下文管理**：创建和配置不同类型的设备上下文
-2. **地址转换测试**：生成各种类型的内存访问请求
+2. **地址转换测试**：生成各种类型的内存访问请求，支持顺序和随机访问模式
 3. **并发处理验证**：测试多线程和高并发场景下的稳定性
 4. **故障检测**：验证IOMMU的错误处理机制
+5. **性能压力测试**：支持大规模请求的压力测试场景
 
 ### 关键数据结构
 
@@ -101,7 +114,6 @@ class RP_Module {
 +send_translation_request_1_thread()
 +send_translation_request_2_thread()
 +send_translation_request_3_thread()
-+send_translation_request_rp()
 +iommu_translate_iova_rp()
 +add_device()
 +add_s_stage_pte()
@@ -113,6 +125,8 @@ class iommu_top {
 +axi_slave_from_pcie_noc_0_socket
 +axi_master_1_to_cmn_rnd_socket
 +axi_master_2_ats_msg_to_pcie_noc_socket
++uint32_t steady_start_count
++uint32_t steady_end_count
 }
 class DDR_Module {
 +int8_t* memory
@@ -125,6 +139,7 @@ RP_Module --> DDR_Module : "内存访问"
 **图表来源**
 - [test_rp.hh:54-184](file://rp/test_rp.hh#L54-L184)
 - [iommu_struct.hh:42-102](file://iommu/include/iommu_struct.hh#L42-L102)
+- [iommu_perf_params.hh:149-152](file://iommu/iommu_perf_model/iommu_perf_params.hh#L149-L152)
 
 **章节来源**
 - [test_rp.hh:54-184](file://rp/test_rp.hh#L54-L184)
@@ -161,9 +176,9 @@ Test->>RP : 清理测试资源
 
 ## 详细组件分析
 
-### 单设备1000请求测试
+### 4000请求随机4KB页面读取压力测试
 
-该测试场景模拟单个设备（设备ID 0x0A）在1000次连续内存访问中的地址转换行为：
+**更新** 该测试场景模拟单个设备（设备ID 0x0A）在4000次随机内存访问中的地址转换行为，显著扩展了测试范围和压力：
 
 #### 测试流程设计
 
@@ -171,10 +186,12 @@ Test->>RP : 清理测试资源
 flowchart TD
 Start([测试开始]) --> InitIOMMU["初始化IOMMU<br/>启用DDT 1级模式"]
 InitIOMMU --> ConfigDevice["配置设备0x0A<br/>iohgatp=Bare, iosatp=Sv39"]
-ConfigDevice --> SetupPageTable["建立S阶段页表<br/>映射500个页面"]
+ConfigDevice --> SetupPageTable["建立S阶段页表<br/>映射4096个页面<br/>16MB IOVA范围"]
 SetupPageTable --> InvalidateCache["失效IOMMU缓存"]
 InvalidateCache --> ResetCounters["重置任务计数器"]
-ResetCounters --> SendRequests["发送2000个请求<br/>背靠背注入"]
+ResetCounters --> GenerateRandomPages["生成500个唯一随机页面<br/>8个请求/页面"]
+GenerateRandomPages --> ShuffleAccessOrder["打乱访问顺序<br/>模拟随机访问模式"]
+ShuffleAccessOrder --> SendRequests["发送4000个请求<br/>背靠背注入"]
 SendRequests --> WaitResponses["等待所有响应"]
 WaitResponses --> ValidateResults["验证转换结果"]
 ValidateResults --> Cleanup["清理资源"]
@@ -182,56 +199,51 @@ Cleanup --> End([测试结束])
 ```
 
 **图表来源**
-- [test_rp_thread.cc:44-190](file://rp/test_rp_thread.cc#L44-L190)
+- [test_rp_thread.cc:119-183](file://rp/test_rp_thread.cc#L119-L183)
 
 #### 请求生成策略
 
 测试采用背靠背（back-to-back）方式发送请求，不设置人工延迟，让FIFO的缓冲压力自然地控制注入速率。每个请求的IOVA地址以512字节步长递增，期望的物理地址（PA）等于IOVA加上0x10000偏移量。
 
+**更新** 测试范围从原来的1MB扩展到16MB，支持500个唯一随机页面的选择，每个页面8个请求，总共4000个请求。
+
 **章节来源**
-- [test_rp_thread.cc:92-134](file://rp/test_rp_thread.cc#L92-L134)
+- [test_rp_thread.cc:136-183](file://rp/test_rp_thread.cc#L136-L183)
 
-### 2000请求并发测试
+### 1000请求顺序128KB读取测试
 
-该测试场景验证IOMMU在高并发条件下的稳定性和性能表现：
+该测试场景验证IOMMU在顺序访问模式下的性能表现：
 
-#### 并发处理机制
+#### 顺序处理机制
 
 ```mermaid
 sequenceDiagram
 participant MainThread as 主线程
-participant Thread2 as 线程2
-participant Thread3 as 线程3
 participant IOMMU as IOMMU核心
-MainThread->>MainThread : 发送1000个请求
+MainThread->>MainThread : 发送1000个顺序请求
 MainThread->>IOMMU : 地址转换请求1
 IOMMU-->>MainThread : 转换结果1
-MainThread->>MainThread : 发送1000个请求
+MainThread->>MainThread : 发送1000个顺序请求
 MainThread->>IOMMU : 地址转换请求2
 IOMMU-->>MainThread : 转换结果2
-MainThread->>MainThread : 触发线程2事件
-Thread2->>IOMMU : 地址转换请求3
-IOMMU-->>Thread2 : 转换结果3
-MainThread->>MainThread : 触发线程3事件
-Thread3->>IOMMU : 地址转换请求4
-IOMMU-->>Thread3 : 转换结果4
 ```
 
 **图表来源**
-- [test_rp_thread.cc:192-300](file://rp/test_rp_thread.cc#L192-L300)
+- [test_rp_thread.cc:82-118](file://rp/test_rp_thread.cc#L82-L118)
 
-#### 线程同步机制
+#### 稳态采样窗口配置
 
-测试使用SystemC事件系统实现线程间的同步：
-- `concurrent_test_event`：触发并发测试线程
-- `response_count_event`：通知响应计数变化
-- `response_event`：接收单个响应
+**更新** 测试模块集成了改进的稳态IOPS采样窗口配置，跳过前10%和后10%的请求，只统计中间80%稳定段的性能指标：
+
+- **稳态开始百分比**：10%
+- **稳态结束百分比**：90%
+- **采样窗口大小**：4000个请求的80% = 3200个请求
 
 **章节来源**
-- [test_rp_thread.cc:192-300](file://rp/test_rp_thread.cc#L192-L300)
-- [test_rp.hh:70-76](file://rp/test_rp.hh#L70-L76)
+- [test_rp_thread.cc:196-198](file://rp/test_rp_thread.cc#L196-L198)
+- [iommu_perf_params.hh:149-152](file://iommu/iommu_perf_model/iommu_perf_params.hh#L149-L152)
 
-### Sv48 Bare模式测试
+### 1000请求顺序128KB读取测试（Sv48模式）
 
 该测试场景专门验证Sv48（四级页表）和Bare模式组合的地址转换功能：
 
@@ -344,41 +356,45 @@ A[test_rp_thread.cc]
 B[test_rp_sv48_bare_thread.cc]
 C[test_rp_func.cc]
 D[test_rp.hh]
+E[iommu_perf_params.hh]
 end
 subgraph "IOMMU核心依赖关系"
-E[iommu_top.hh]
-F[iommu_struct.hh]
-G[iommu_registers.hh]
-H[iommu_utils.hh]
+F[iommu_top.hh]
+G[iommu_struct.hh]
+H[iommu_registers.hh]
+I[iommu_utils.hh]
 end
 subgraph "SystemC依赖关系"
-I[SystemC库]
-J[TLM库]
-K[tlm_utils库]
+J[SystemC库]
+K[TLM库]
+L[tlm_utils库]
 end
 A --> D
 B --> D
 C --> D
-D --> E
 D --> F
 D --> G
 D --> H
 D --> I
 D --> J
 D --> K
+D --> L
+D --> E
 ```
 
 **图表来源**
 - [test_rp.hh:1-184](file://rp/test_rp.hh#L1-L184)
 - [iommu_struct.hh:1-102](file://iommu/include/iommu_struct.hh#L1-L102)
 - [iommu_registers.hh:1-200](file://iommu/include/iommu_registers.hh#L1-L200)
+- [iommu_perf_params.hh:149-152](file://iommu/iommu_perf_model/iommu_perf_params.hh#L149-L152)
 
 ### 关键依赖点
 
 1. **SystemC模块绑定**：测试模块通过socket接口与IOMMU核心进行通信
 2. **内存管理**：测试模块直接访问DDR内存进行页表和设备上下文的读写
 3. **寄存器访问**：通过寄存器定义文件访问IOMMU的各种控制寄存器
-4. **数据结构共享**：测试模块使用IOMMU定义的数据结构进行页表操作
+4. **性能参数配置**：通过iommu_perf_params.hh配置稳态采样窗口等性能参数
+5. **数据结构共享**：测试模块使用IOMMU定义的数据结构进行页表操作
 
 **章节来源**
 - [test_rp.hh:62-65](file://rp/test_rp.hh#L62-L65)
@@ -388,26 +404,28 @@ D --> K
 
 ### 缓存统计和性能监控
 
-测试模块集成了全面的性能监控功能：
+**更新** 测试模块集成了全面的性能监控功能，支持更长时间的测试运行：
 
 ```mermaid
 flowchart TD
 Start([测试开始]) --> EnableStats["启用缓存统计"]
-EnableStats --> RunTests["执行测试用例"]
+EnableStats --> RunTests["执行测试用例<br/>支持4000请求随机测试"]
 RunTests --> CollectStats["收集缓存统计数据"]
-CollectStats --> AnalyzeMetrics["分析性能指标"]
-AnalyzeMetrics --> PrintResults["打印测试结果"]
+CollectStats --> AnalyzeMetrics["分析性能指标<br/>稳态IOPS采样窗口"]
+AnalyzeMetrics --> PrintResults["打印测试结果<br/>支持16MB IOVA范围"]
 PrintResults --> End([测试结束])
 subgraph "性能指标"
 A[缓存命中率]
 B[请求延迟]
 C[并发处理能力]
 D[内存带宽利用率]
+E[稳态IOPS]
 end
 CollectStats --> A
 CollectStats --> B
 CollectStats --> C
 CollectStats --> D
+CollectStats --> E
 ```
 
 **图表来源**
@@ -416,12 +434,13 @@ CollectStats --> D
 
 ### 并发处理优化
 
-测试模块通过以下机制优化并发处理性能：
+**更新** 测试模块通过以下机制优化并发处理性能：
 
 1. **背靠背请求注入**：减少人工延迟，让硬件FIFO自然控制流量
 2. **事件驱动架构**：使用SystemC事件系统实现高效的异步通信
 3. **批量响应处理**：通过计数器机制批量处理多个响应
 4. **内存预分配**：预先分配页表和设备上下文内存，减少运行时开销
+5. **稳态采样窗口**：支持更长时间的性能采样，提高测试准确性
 
 **章节来源**
 - [test_rp_thread.cc:131-134](file://rp/test_rp_thread.cc#L131-L134)
@@ -454,12 +473,13 @@ RespError --> FixResp["修复响应"]
 
 #### 调试信息收集
 
-测试模块提供了丰富的调试输出信息：
+**更新** 测试模块提供了丰富的调试输出信息，支持更广泛的测试场景：
 
 1. **IOMMU模式信息**：显示当前IOMMU的工作模式
 2. **页表配置详情**：显示页表的创建和映射过程
 3. **请求处理状态**：跟踪每个请求的发送和接收状态
 4. **缓存统计信息**：提供详细的缓存命中率统计
+5. **随机访问模式**：支持随机页面选择和访问顺序验证
 
 **章节来源**
 - [test_rp_thread.cc:24-37](file://rp/test_rp_thread.cc#L24-L37)
@@ -497,9 +517,10 @@ Root Port测试模块为RISC-V IOMMU项目提供了全面的功能验证框架�
 ### 主要成就
 
 1. **多模式支持**：成功验证了Bare、Sv39、Sv48等多种页表模式
-2. **高并发测试**：通过2000请求并发测试验证了IOMMU的并发处理能力
-3. **完整功能覆盖**：从基础地址转换到高级故障处理的全方位验证
-4. **性能监控集成**：内置缓存统计和性能分析功能
+2. **高压缩测试**：通过4000请求随机4KB页面读取压力测试验证了IOMMU的高并发处理能力
+3. **扩展测试范围**：IOVA测试范围从1MB扩展到16MB，支持更广泛的地址空间验证
+4. **完整功能覆盖**：从基础地址转换到高级故障处理的全方位验证
+5. **性能监控集成**：内置缓存统计和性能分析功能，支持稳态采样窗口配置
 
 ### 技术创新
 
@@ -507,5 +528,8 @@ Root Port测试模块为RISC-V IOMMU项目提供了全面的功能验证框架�
 2. **灵活的测试配置**：支持多种页表模式和设备配置的动态切换
 3. **完善的验证机制**：集成了故障检测、响应验证和性能监控功能
 4. **可扩展的设计**：模块化的架构便于添加新的测试场景和验证逻辑
+5. **压力测试能力**：支持大规模请求的压力测试，验证IOMMU在极限条件下的稳定性
+
+**更新** 本次更新显著增强了测试模块的能力，通过扩展IOVA测试范围和支持4000请求的随机压力测试，为IOMMU的开发和验证提供了更加严格和全面的测试框架。
 
 该测试模块为IOMMU的开发和验证提供了坚实的基础，确保了系统的可靠性和性能表现。

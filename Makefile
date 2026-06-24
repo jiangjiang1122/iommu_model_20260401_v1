@@ -1,12 +1,13 @@
 # Makefile for RISC-V IOMMU SystemC Model
 #
 # Test scenario selection:
-#   make TEST=sv39_bare       (default) Sv39 + Bare, 2000 requests
-#   make TEST=sv48_bare       Sv48 + Bare, 1000 requests
-#   make test_dedup_unit      PT Cache去重+预取单元测试
+#   make TEST=rand4k        (default) 4KB随机读, 4000 requests, 16MB范围
+#   make TEST=seq128k       128KB顺序读, 2000 requests, 1MB范围
+#   make TEST=sv48_bare     Sv48 + Bare, 1000 requests
+#   make test_dedup_unit    PT Cache去重+预取单元测试
 #   make test_dedup_integration PT Cache去重+预取集成测试
 #
-TEST ?= sv39_bare
+TEST ?= rand4k
 
 # Compiler settings
 CXX = g++
@@ -19,7 +20,7 @@ SYSTEMC_INCLUDE = /usr/include
 SYSTEMC_LIB = /usr/lib/x86_64-linux-gnu
 
 # Compiler flags
-CXXFLAGS = -std=c++17 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -I./iommu/include -I./iommu/iommu_fun_model -I./iommu/iommu_perf_model -I./iommu/cache_src -I./iommu/cache_src/cache -I./iommu/cache_src/common -I./iommu/cache_src/replacement -I./iommu/cache_src/subsystem -I./slink -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK
+CXXFLAGS = -std=c++17 -w -I$(SYSTEMC_INCLUDE) -I. -I./iommu -I./iommu/include -I./iommu/iommu_fun_model -I./iommu/iommu_perf_model -I./iommu/cache_src -I./iommu/cache_src/cache -I./iommu/cache_src/common -I./iommu/cache_src/replacement -I./iommu/cache_src/subsystem -I./slink -DSC_INCLUDE_DYNAMIC_PROCESSES -DSC_DISABLE_API_VERSION_CHECK $(TEST_FLAGS)
 
 # Debug/Release build
 DEBUG ?= 1
@@ -34,11 +35,17 @@ endif
 # Libraries
 LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm
 
-# Test thread file selection based on TEST scenario
+# Test thread file selection and flags based on TEST scenario
 ifeq ($(TEST), sv48_bare)
     TEST_THREAD_SRC = rp/test_rp_sv48_bare_thread.cc
-else
+    TEST_FLAGS =
+else ifeq ($(TEST), seq128k)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_128K
+else
+    # rand4k (default)
+    TEST_THREAD_SRC = rp/test_rp_thread.cc
+    TEST_FLAGS =
 endif
 
 # Source files
