@@ -89,7 +89,7 @@ struct walk_context_t {
     uint16_t indexes[5] = {0};
     uint64_t read_addr = 0;
     uint32_t read_size = 0;
-    uint8_t read_buf[(1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8] = {0};  // 支持combined burst: (1+D)*ptesize
+    uint8_t read_buf[WALK_CTX_READ_BUF_SIZE] = {0};  // 支持 DC/PC 读取及 combined burst
     uint8_t ptesize = 0;
 
     // VS-stage walk context (for PTW)
@@ -308,7 +308,7 @@ struct ddr_req_entry_t {
 // ===================== DDR Response Entry =====================
 struct ddr_rsp_entry_t {
     uint32_t task_id;
-    uint8_t data[(1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8];  // 支持combined burst: (1+D)*ptesize
+    uint8_t data[WALK_CTX_READ_BUF_SIZE];  // 支持 DC/PC 读取及 combined burst
     uint32_t data_length;
     bool error;
     double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)，从req传递到rsp

@@ -1,11 +1,12 @@
 # Makefile for RISC-V IOMMU SystemC Model
 #
 # Test scenario selection:
-#   make TEST=rand4k        (default) 4KB随机读, 4000 requests, 16MB范围
-#   make TEST=seq128k       128KB顺序读, 2000 requests, 1MB范围
-#   make TEST=sv48_bare     Sv48 + Bare, 1000 requests
-#   make test_dedup_unit    PT Cache去重+预取单元测试
-#   make test_dedup_integration PT Cache去重+预取集成测试
+#   make TEST=rand4k              (default) 4KB随机读, 4000 requests, 16MB范围
+#   make TEST=seq128k             128KB顺序读, 2000 requests, 1MB范围
+#   make TEST=sv48_bare           Sv48 + Bare, 1000 requests
+#   make TEST=seq128k_twostage    128KB顺序读 + Sv48/Sv48x4两阶段地址翻译, 2000 requests
+#   make test_dedup_unit          PT Cache去重+预取单元测试
+#   make test_dedup_integration   PT Cache去重+预取集成测试
 #
 TEST ?= rand4k
 
@@ -42,6 +43,11 @@ ifeq ($(TEST), sv48_bare)
 else ifeq ($(TEST), seq128k)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K
+else ifeq ($(TEST), seq128k_twostage)
+    TEST_THREAD_SRC = rp/test_rp_128k_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=0
 else
     # rand4k (default)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
@@ -99,7 +105,7 @@ CXX_SOURCES = \
 MAIN_SOURCE = main.cpp
 
 # Object files - place them in the build directory
-CXX_OBJECTS = $(patsubst %.cc,build/%.o,$(CXX_SOURCES))
+CXX_OBJECTS = $(patsubst %.cc,build/%.o,$(patsubst %.cpp,build/%.o,$(CXX_SOURCES)))
 MAIN_OBJECT = build/$(MAIN_SOURCE:.cpp=.o)
 ALL_OBJECTS = $(CXX_OBJECTS) $(MAIN_OBJECT)
 
@@ -115,12 +121,12 @@ $(TARGET): $(ALL_OBJECTS)
 
 # Compile C++ sources into build directory
 build/%.o: %.cc
-	@mkdir -p build build/iommu build/iommu/iommu_fun_model build/iommu/iommu_perf_model build/iommu/cache_src build/iommu/cache_src/common build/iommu/cache_src/cache build/iommu/cache_src/replacement build/iommu/cache_src/subsystem build/rp build/pcienoc build/slink build/ddr build/test
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Compile main source into build directory
+# Compile C++ sources (.cpp) into build directory
 build/%.o: %.cpp
-	@mkdir -p build
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 

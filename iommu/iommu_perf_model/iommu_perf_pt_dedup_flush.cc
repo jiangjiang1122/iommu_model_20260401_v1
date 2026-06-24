@@ -166,31 +166,33 @@ void iommu_top::flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
             for (uint32_t i = 0; i < total_tasks; i++) {
                 if (group_iovas[i] == page_iova) {
                     // 找到匹配的IOVA，计算PA
-                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].vs_pte.PPN << 12) | offset;
+                    // [FIX] 使用pt_updates[i].pa的页基址（已包含最终SPA/GPA翻译）
+                    // 兼容单阶段(vs_pte.PPN)和两阶段(g_pte.PPN)翻译
+                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL) | offset;
                     pending_task->pa = pa;
                     pending_task->vs_pte = main_task->walk_ctx.pt_updates[i].vs_pte;
                     pending_task->g_pte = main_task->walk_ctx.pt_updates[i].g_pte;
                     pending_task->page_sz = main_task->walk_ctx.pt_updates[i].page_sz;
                     found = true;
                     
-                    printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (iova=0x%lx, PPN=0x%lx, offset=0x%lx)\n",
+                    printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (iova=0x%lx, page_base=0x%lx, offset=0x%lx)\n",
                            pending_task->task_id, pa, pending_task->iova,
-                           main_task->walk_ctx.pt_updates[i].vs_pte.PPN, offset);
+                           main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL, offset);
                     fflush(stdout);
                     break;
                 }
             }
             
             if (!found) {
-                // 未找到对应PTE，使用主任务的PPN（同页场景）
-                uint64_t pa = (main_task->walk_ctx.pt_updates[0].vs_pte.PPN << 12) | offset;
+                // 未找到对应PTE，使用主任务的页基址（同页场景）
+                uint64_t pa = (main_task->walk_ctx.pt_updates[0].pa & ~0xFFFULL) | offset;
                 pending_task->pa = pa;
                 pending_task->vs_pte = main_task->walk_ctx.pt_updates[0].vs_pte;
                 pending_task->g_pte = main_task->walk_ctx.pt_updates[0].g_pte;
                 pending_task->page_sz = main_task->walk_ctx.pt_updates[0].page_sz;
                 
-                printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (using main PPN=0x%lx, iova=0x%lx)\n",
-                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].vs_pte.PPN, pending_task->iova);
+                printf("[DEDUP_FLUSH] task_id=%u -> PA=0x%lx (using main page_base=0x%lx, iova=0x%lx)\n",
+                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].pa & ~0xFFFULL, pending_task->iova);
                 fflush(stdout);
             }
             
@@ -286,31 +288,32 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
             bool found = false;
             for (uint32_t i = 0; i < total_tasks; i++) {
                 if ((group_iovas[i] & ~0xFFFULL) == target_iova_aligned) {
-                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].vs_pte.PPN << 12) | offset;
+                    // [FIX] 使用pt_updates[i].pa的页基址（已包含最终SPA/GPA翻译）
+                    uint64_t pa = (main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL) | offset;
                     pending_task->pa = pa;
                     pending_task->vs_pte = main_task->walk_ctx.pt_updates[i].vs_pte;
                     pending_task->g_pte = main_task->walk_ctx.pt_updates[i].g_pte;
                     pending_task->page_sz = main_task->walk_ctx.pt_updates[i].page_sz;
                     found = true;
                     
-                    printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (iova=0x%lx, PPN=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
+                    printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (iova=0x%lx, page_base=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
                            pending_task->task_id, pa, pending_task->iova,
-                           main_task->walk_ctx.pt_updates[i].vs_pte.PPN, offset, idx);
+                           main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL, offset, idx);
                     fflush(stdout);
                     break;
                 }
             }
             
             if (!found) {
-                // 未找到对应PTE，使用主任务的PPN（同页场景）
-                uint64_t pa = (main_task->walk_ctx.pt_updates[0].vs_pte.PPN << 12) | offset;
+                // 未找到对应PTE，使用主任务的页基址（同页场景）
+                uint64_t pa = (main_task->walk_ctx.pt_updates[0].pa & ~0xFFFULL) | offset;
                 pending_task->pa = pa;
                 pending_task->vs_pte = main_task->walk_ctx.pt_updates[0].vs_pte;
                 pending_task->g_pte = main_task->walk_ctx.pt_updates[0].g_pte;
                 pending_task->page_sz = main_task->walk_ctx.pt_updates[0].page_sz;
                 
-                printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (using main PPN=0x%lx, iova=0x%lx) [buf_idx=%u]\n",
-                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].vs_pte.PPN,
+                printf("[DEDUP_FLUSH_IOVA] task_id=%u -> PA=0x%lx (using main page_base=0x%lx, iova=0x%lx) [buf_idx=%u]\n",
+                       pending_task->task_id, pa, main_task->walk_ctx.pt_updates[0].pa & ~0xFFFULL,
                        pending_task->iova, idx);
                 fflush(stdout);
             }

@@ -108,7 +108,13 @@ static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 2;         // PTW响应流水�
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
 
 // ===================== PTW模块参数 =====================
-static const bool PTW_WALKER_CACHE_ENABLED = true;           // Walker Cache开关（true=启用，false=禁用）
+// Walker Cache开关（true=启用，false=禁用）
+// 允许通过Makefile TEST_FLAGS传入 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=0 覆盖
+#ifndef TEST_CFG_PTW_WALKER_CACHE_ENABLED
+static const bool PTW_WALKER_CACHE_ENABLED = true;
+#else
+static const bool PTW_WALKER_CACHE_ENABLED = TEST_CFG_PTW_WALKER_CACHE_ENABLED;
+#endif
 
 // ===================== PT Cache VA去重参数 =====================
 static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能开关（true=启用，false=禁用）
@@ -116,8 +122,24 @@ static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能�
 // ===================== PT Cache去重+预取模块参数 =====================
 static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
 static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
-static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 3;           // 预取深度（页数量，D=0表示关闭预取）
+// 预取深度（页数量，D=0表示关闭预取）
+// 允许通过Makefile TEST_FLAGS传入 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 覆盖
+#ifndef TEST_CFG_PT_DEDUP_PREFETCH_DEPTH
+static const uint32_t PT_DEDUP_PREFETCH_DEPTH = 3;
+#else
+static const uint32_t PT_DEDUP_PREFETCH_DEPTH = TEST_CFG_PT_DEDUP_PREFETCH_DEPTH;
+#endif
 static const uint16_t DEDUP_BUFFER_INVALID_IDX = 0xFFFF;     // 无效索引标记（支持512 entries）
+
+// ===================== Walk上下文读缓冲区大小 =====================
+// 必须同时满足：
+//   1) DC/PC读取：最大 EXT_FORMAT_DC_SIZE = 64 字节
+//   2) PTW combined burst读取：(1 + D + 1) * 8 字节
+// 当 D=0 时 combined burst 为 16 字节，但 DC 读取需要 64 字节，
+// 因此缓冲区不能仅由预取深度决定，否则关闭预取时 DC/PC 读取会越界。
+static const uint32_t WALK_CTX_READ_BUF_SIZE =
+    (((1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8) > 64) ?
+     ((1 + PT_DEDUP_PREFETCH_DEPTH + 1) * 8) : 64;
 
 // ===================== Collector Outstanding 限制 =====================
 static const uint32_t COLLECTOR_MAX_DC_WALK_OUTSTANDING = 64;   // Collector DC walk outstanding上限
