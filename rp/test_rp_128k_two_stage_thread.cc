@@ -92,14 +92,16 @@ void RP_Module::send_translation_request_1_thread()
         // 1MB VS-stage page table + G-stage mapping
         // ============================================================
         const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
-        const uint64_t RANGE_1MB   = 0x100000;         // 1MB
         const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
-        const int NUM_REQUESTS     = 10;               // 10 sequential requests (walker cache验证)
-        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_1MB / 0x1000);  // 256
+        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests
+        // 自适应页表范围：根据NUM_REQUESTS计算所需页数，向上取整到MB
+        const int PAGES_NEEDED = (NUM_REQUESTS + 1 + 7) / 8;  // +1 for Phase 1
+        const uint64_t RANGE = ((uint64_t)((PAGES_NEEDED * 0x1000 + 0xFFFFF) / 0x100000) * 0x100000);
+        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE / 0x1000);
 
-        printf("\n[TEST] 1MB Two-Stage Page Table Construction:\n");
-        printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (1MB, %d pages)\n",
-               IOVA_BASE, IOVA_BASE + RANGE_1MB, TOTAL_PAGES_IN_RANGE);
+        printf("\n[TEST] Two-Stage Page Table Construction:\n");
+        printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (%luMB, %d pages)\n",
+               IOVA_BASE, IOVA_BASE + RANGE, (unsigned long)(RANGE / 0x100000), TOTAL_PAGES_IN_RANGE);
         printf("[TEST]   GPA = IOVA (identity), SPA = GPA + 0x%lx\n", PA_OFFSET);
 
         // Map all 256 pages in VS-stage page table, then map each GPA in G-stage
