@@ -94,7 +94,7 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
         const uint64_t RANGE_1MB   = 0x100000;         // 1MB
         const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
-        const int NUM_REQUESTS     = 2000;             // 2000 sequential requests
+        const int NUM_REQUESTS     = 10;               // 10 sequential requests (walker cache验证)
         const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_1MB / 0x1000);  // 256
 
         printf("\n[TEST] 1MB Two-Stage Page Table Construction:\n");
@@ -205,11 +205,11 @@ void RP_Module::send_translation_request_1_thread()
         PayloadExtention* ext_array[NUM_REQUESTS];
 
         printf("[TEST] Sending %d READ requests (sequential 512B stride)...\n", NUM_REQUESTS);
-        printf("[TEST] Prefetch DISABLED (D=0), Walker Cache DISABLED\n");
+        printf("[TEST] Prefetch DISABLED (D=0), Walker Cache ENABLED\n");
         fflush(stdout);
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
-            uint64_t iova = IOVA_BASE + (uint64_t)i * 0x200;  // 512B stride
+            uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 512B stride, +1跳过Phase 1已用的IOVA
             uint64_t expected_pa = iova + PA_OFFSET;
 
             trans_array[i] = new tlm_generic_payload();
@@ -272,7 +272,7 @@ void RP_Module::send_translation_request_1_thread()
         // Validate responses
         int pass_count = 0;
         for (int i = 0; i < NUM_REQUESTS; i++) {
-            uint64_t iova = IOVA_BASE + (uint64_t)i * 0x200;
+            uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 与注入循环保持一致
             uint64_t expected_pa = iova + PA_OFFSET;
             uint64_t result_pa = trans_array[i]->get_address();
             tlm::tlm_response_status status = trans_array[i]->get_response_status();

@@ -119,6 +119,9 @@ struct walk_context_t {
         bool valid_level2 = false;
         bool valid_level1 = false;
         bool valid_level0 = false;
+        // 两阶段专用: GS_IMPLICIT leaf 翻译后的 SPA，供 VS_WALK non-leaf 保存
+        uint64_t last_gs_implicit_spa = 0;
+        bool has_pending_spa = false;
     } walker_cache_entries;
 
     // Walker Cache lookup命中层级（用于update时避免冗余更新）

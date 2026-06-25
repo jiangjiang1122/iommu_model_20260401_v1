@@ -277,33 +277,51 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
     bool hit_c3 = false, hit_c2 = false, hit_c1 = false;
     
     // 查询 C3
+    iova_t va_seg_c3 = extract_addr_segment(va, 3, va_pa_flag, sv48_flag, x4_mode_flag);
     hit_c3 = ptw_c3_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
                              sv48_flag, x4_mode_flag, data_c3, lat_c3);
     if (hit_c3) {
-        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu, next_ppn=0x%lx\n",
                (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-               gscid, pscid, va, data_c3.next_ppn);
+               gscid, pscid, va, (unsigned long)va_seg_c3, data_c3.next_ppn);
+        fflush(stdout);
+    } else {
+        printf("[t=%llu ns][WALKER_CACHE] MISS: ptw_c3 (level=3), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, va, (unsigned long)va_seg_c3);
         fflush(stdout);
     }
     
     // 查询 C2
+    iova_t va_seg_c2 = extract_addr_segment(va, 2, va_pa_flag, sv48_flag, x4_mode_flag);
     hit_c2 = ptw_c2_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
                              sv48_flag, x4_mode_flag, data_c2, lat_c2);
     if (hit_c2) {
-        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+        printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu, next_ppn=0x%lx\n",
                (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-               gscid, pscid, va, data_c2.next_ppn);
+               gscid, pscid, va, (unsigned long)va_seg_c2, data_c2.next_ppn);
+        fflush(stdout);
+    } else {
+        printf("[t=%llu ns][WALKER_CACHE] MISS: ptw_c2 (level=2), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, va, (unsigned long)va_seg_c2);
         fflush(stdout);
     }
     
     // 查询 C1（仅 Sv48 模式）
     if (!sv39_mode_ && sv48_flag) {
+        iova_t va_seg_c1 = extract_addr_segment(va, 1, va_pa_flag, sv48_flag, x4_mode_flag);
         hit_c1 = ptw_c1_->lookup(gscid, pscid, va, va_pa_flag, stage_flag,
                                  sv48_flag, x4_mode_flag, data_c1, lat_c1);
         if (hit_c1) {
-            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu, next_ppn=0x%lx\n",
                    (unsigned long long)sc_core::sc_time_stamp().value()/1000,
-                   gscid, pscid, va, data_c1.next_ppn);
+                   gscid, pscid, va, (unsigned long)va_seg_c1, data_c1.next_ppn);
+            fflush(stdout);
+        } else {
+            printf("[t=%llu ns][WALKER_CACHE] MISS: ptw_c1 (level=1), gscid=%u, pscid=%u, iova=0x%lx, va_seg=%lu\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   gscid, pscid, va, (unsigned long)va_seg_c1);
             fflush(stdout);
         }
     }
@@ -360,10 +378,14 @@ WalkerCache::UpdateResult WalkerCache::update(gscid_t gscid, pscid_t pscid,
                                               const WalkerData& ptwc1_data,
                                               const WalkerData& ptwc2_data,
                                               const WalkerData& ptwc3_data) {
-    printf("[t=%llu ns][WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+    iova_t upd_va_seg_1 = extract_addr_segment(va, 1, true, true, false);
+    iova_t upd_va_seg_2 = extract_addr_segment(va, 2, true, true, false);
+    iova_t upd_va_seg_3 = extract_addr_segment(va, 3, true, true, false);
+    printf("[t=%llu ns][WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d, va_seg[L1=%lu,L2=%lu,L3=%lu]\n",
            (unsigned long long)sc_core::sc_time_stamp().value()/1000,
            gscid, pscid, va, static_cast<int>(kind),
-           ptwc1_data.reserved.valid, ptwc2_data.reserved.valid, ptwc3_data.reserved.valid);
+           ptwc1_data.reserved.valid, ptwc2_data.reserved.valid, ptwc3_data.reserved.valid,
+           (unsigned long)upd_va_seg_1, (unsigned long)upd_va_seg_2, (unsigned long)upd_va_seg_3);
     fflush(stdout);
     auto make_tag = [=](uint8_t level, const WalkerData& data) {
         WalkerTag tag;

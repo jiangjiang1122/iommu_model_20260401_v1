@@ -244,7 +244,9 @@ void iommu_top::ptw_req_process_thread() {
                                task->walk_ctx.vpn[task->walk_ctx.level] * PTESIZE;
 
             // Check if G-stage implicit translation needed
-            if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
+            // 两阶段 walker cache hit 时，base_addr 已是 SPA（来自 walker cache 的 next_ppn），
+            // pte_addr 也是 SPA，不需要 GS_IMPLICIT 翻译，直接读取
+            if (task->GV && task->iohgatp.MODE != IOHGATP_Bare && !(walker_cache_enabled && walker_hit)) {
                 task->walk_ctx.pending_vs_pte_addr = pte_addr;
                 task->walk_ctx.vs_level = task->walk_ctx.level;
                 init_gstage_walk(task, pte_addr);
@@ -447,6 +449,15 @@ void iommu_top::ptw_rsp_process_thread() {
             // Step 3: PTE validity check
             if ((pte.V == 0) || (pte.R == 0 && pte.W == 1) ||
                 (pte.PBMT == 3) || (pte.reserved != 0)) {
+                // Debug: dump read_buf for diagnosis
+                uint64_t buf_val = 0;
+                memcpy(&buf_val, task->walk_ctx.read_buf, 8);
+                printf("[PTW_RSP] task_id=%u, VS_WALK INVALID PTE: raw=0x%lx, buf_val=0x%lx, V=%d, R=%d, W=%d, PBMT=%d, reserved=%d, level=%d, base_addr=0x%lx, pte_addr=0x%lx, iova=0x%lx, vpn0=%d\n",
+                       task->task_id, (uint64_t)pte.raw, buf_val, pte.V, pte.R, pte.W, pte.PBMT, pte.reserved,
+                       task->walk_ctx.level, task->walk_ctx.base_addr,
+                       task->walk_ctx.base_addr + task->walk_ctx.vpn[task->walk_ctx.level] * task->walk_ctx.ptesize,
+                       task->iova, task->walk_ctx.vpn[0]);
+                fflush(stdout);
                 task->cause = (task->is_exec ? 12 : task->is_read ? 13 : 15);
                 walk_fault = true;
                 break;
@@ -619,43 +630,38 @@ void iommu_top::ptw_rsp_process_thread() {
                 // =====================================================================
                 // 保存中间结果到 Walker Cache entries（按 PTWc_X tag 含义对齐）
                 // =====================================================================
-                // PTWc_X 的 tag = 前 X 段 VPN 合并，其 data 是"读完前 X 段后的 PTE.PPN"：
-                //   Sv39: walk level=2 非叶子 -> PTWc_2（存 valid_level1）
-                //   Sv39: walk level=1 非叶子 -> PTWc_3（存 valid_level2）
-                //   Sv48: walk level=3 非叶子 -> PTWc_1（存 valid_level0）
-                //   Sv48: walk level=2 非叶子 -> PTWc_2（存 valid_level1）
-                //   Sv48: walk level=1 非叶子 -> PTWc_3（存 valid_level2）
-                //   level=0 为叶子节点 -> 不缓存
-                //
-                // 注意：task_to_walker_update 映射为
-                //   valid_level0 -> PTWc_1, valid_level1 -> PTWc_2, valid_level2 -> PTWc_3
-                if (task->iosatp.MODE == IOSATP_Sv48) {
-                    if (task->walk_ctx.level == 3) {
-                        task->walk_ctx.walker_cache_entries.ppn_level0 = pte.PPN;
-                        task->walk_ctx.walker_cache_entries.valid_level0 = true;
-                    } else if (task->walk_ctx.level == 2) {
-                        task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
-                        task->walk_ctx.walker_cache_entries.valid_level1 = true;
-                    } else if (task->walk_ctx.level == 1) {
-                        task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
-                        task->walk_ctx.walker_cache_entries.valid_level2 = true;
-                    }
-                } else {  // Sv39
-                    if (task->walk_ctx.level == 2) {
-                        task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
-                        task->walk_ctx.walker_cache_entries.valid_level1 = true;
-                    } else if (task->walk_ctx.level == 1) {
-                        task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
-                        task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                // 两阶段: VS PPN 是 GPA，SPA 将在 GS_IMPLICIT 完成后直接保存到 walker cache
+                // 单阶段: VS PPN 即 SPA，直接保存
+                // =====================================================================
+                if (!(task->GV && task->iohgatp.MODE != IOHGATP_Bare)) {
+                    // 单阶段: VS PPN 即 SPA，直接保存
+                    if (task->iosatp.MODE == IOSATP_Sv48) {
+                        if (task->walk_ctx.level == 3) {
+                            task->walk_ctx.walker_cache_entries.ppn_level0 = pte.PPN;
+                            task->walk_ctx.walker_cache_entries.valid_level0 = true;
+                        } else if (task->walk_ctx.level == 2) {
+                            task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
+                            task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                        } else if (task->walk_ctx.level == 1) {
+                            task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
+                            task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                        }
+                    } else {  // Sv39
+                        if (task->walk_ctx.level == 2) {
+                            task->walk_ctx.walker_cache_entries.ppn_level1 = pte.PPN;
+                            task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                        } else if (task->walk_ctx.level == 1) {
+                            task->walk_ctx.walker_cache_entries.ppn_level2 = pte.PPN;
+                            task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                        }
                     }
                 }
+                // 两阶段: walker cache 由 GS_IMPLICIT leaf handler 直接保存，此处无需操作
                 // level==0 为叶子节点，Walker Cache 不缓存叶子
                 
-                printf("[PTW_RSP] task_id=%u, saved walker cache: level=%d, PPN=0x%lx, valid=[L2=%d,L1=%d,L0=%d]\n",
-                       task->task_id, task->walk_ctx.level, pte.PPN,
-                       task->walk_ctx.walker_cache_entries.valid_level2,
-                       task->walk_ctx.walker_cache_entries.valid_level1,
-                       task->walk_ctx.walker_cache_entries.valid_level0);
+                printf("[PTW_RSP] task_id=%u, VS_WALK non-leaf: level=%d -> next level %d, read_count=%u\n",
+                       task->task_id, task->walk_ctx.level, task->walk_ctx.level - 1,
+                       task->walk_ctx.ddr_read_count);
                 fflush(stdout);
 
                 task->walk_ctx.level--;
@@ -670,6 +676,8 @@ void iommu_top::ptw_rsp_process_thread() {
                     task->walk_ctx.vpn[task->walk_ctx.level] * task->walk_ctx.ptesize;
 
                 if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
+                    // 两阶段: VS PPN 是 GPA，需要 GS_IMPLICIT 翻译为 SPA
+                    task->walk_ctx.vs_level = task->walk_ctx.level;
                     task->walk_ctx.pending_vs_pte_addr = next_pte_addr;
                     init_gstage_walk(task, next_pte_addr);
                     task->walk_ctx.walk_phase = PTW_GS_IMPLICIT;
@@ -768,8 +776,40 @@ void iommu_top::ptw_rsp_process_thread() {
                 task->walk_ctx.read_size = task->walk_ctx.ptesize;
                 task->walk_ctx.walk_phase = PTW_VS_WALK;
                 task->walk_ctx.ddr_read_count++;
-                printf("[PTW_RSP] task_id=%u, GS_IMPLICIT leaf -> VS_WALK (read_count=%u), spa=0x%lx\n",
-                       task->task_id, task->walk_ctx.ddr_read_count, spa);
+                // 两阶段: 直接保存 SPA 到 walker cache（根据 vs_level 确定缓存层级）
+                // vs_level = GS_IMPLICIT 翻译的目标 VS level（即即将读取的 VS PTE 所在表的层级）
+                // vs_level=2 → SPA of L2 table → ppn_level0 (ptwc1, tag=VPN[3])
+                // vs_level=1 → SPA of L1 table → ppn_level1 (ptwc2, tag=VPN[3]+VPN[2])
+                // vs_level=0 → SPA of L0 table → ppn_level2 (ptwc3, tag=VPN[3]+VPN[2]+VPN[1])
+                if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
+                    uint8_t vs_lvl = task->walk_ctx.vs_level;
+                    uint64_t spa_ppn = spa / PAGESIZE;
+                    if (task->iosatp.MODE == IOSATP_Sv48) {
+                        if (vs_lvl == 2) {
+                            task->walk_ctx.walker_cache_entries.ppn_level0 = spa_ppn;
+                            task->walk_ctx.walker_cache_entries.valid_level0 = true;
+                        } else if (vs_lvl == 1) {
+                            task->walk_ctx.walker_cache_entries.ppn_level1 = spa_ppn;
+                            task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                        } else if (vs_lvl == 0) {
+                            task->walk_ctx.walker_cache_entries.ppn_level2 = spa_ppn;
+                            task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                        }
+                    } else {  // Sv39
+                        if (vs_lvl == 1) {
+                            task->walk_ctx.walker_cache_entries.ppn_level1 = spa_ppn;
+                            task->walk_ctx.walker_cache_entries.valid_level1 = true;
+                        } else if (vs_lvl == 0) {
+                            task->walk_ctx.walker_cache_entries.ppn_level2 = spa_ppn;
+                            task->walk_ctx.walker_cache_entries.valid_level2 = true;
+                        }
+                    }
+                    printf("[PTW_RSP] task_id=%u, GS_IMPLICIT leaf -> VS_WALK (read_count=%u), spa=0x%lx, saved to walker cache vs_level=%d\n",
+                           task->task_id, task->walk_ctx.ddr_read_count, spa, vs_lvl);
+                } else {
+                    printf("[PTW_RSP] task_id=%u, GS_IMPLICIT leaf -> VS_WALK (read_count=%u), spa=0x%lx\n",
+                           task->task_id, task->walk_ctx.ddr_read_count, spa);
+                }
                 fflush(stdout);
             } else {
                 // G-stage non-leaf: continue walk

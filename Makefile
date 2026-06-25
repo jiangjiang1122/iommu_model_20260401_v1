@@ -47,7 +47,7 @@ else ifeq ($(TEST), seq128k_twostage)
     TEST_THREAD_SRC = rp/test_rp_128k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 \
-                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=0
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
 else
     # rand4k (default)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
