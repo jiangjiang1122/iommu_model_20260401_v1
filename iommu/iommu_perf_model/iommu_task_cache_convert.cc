@@ -368,6 +368,17 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
         task->walk_ctx.level = 3 - hit_level;
         task->walk_ctx.base_addr = next_ppn * PAGESIZE;
         
+        // [两阶段预取] Walker Cache hit at level=3:
+        // GS_IMPLICIT被完全跳过（L249 walker_hit条件），vs_l0_spa_ppn不会被GS_IMPLICIT设置
+        // next_ppn即为VS L0表所在物理页号，直接保存供两阶段预取使用
+        if (hit_level == 3) {
+            task->walk_ctx.vs_l0_spa_ppn = next_ppn;
+            printf("[t=%llu ns][CONVERT] Walker Cache hit L3 -> saved vs_l0_spa_ppn=0x%lx for two-stage prefetch\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   next_ppn);
+            fflush(stdout);
+        }
+        
         printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_LOOKUP response (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
                (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                task->task_id, hit_level, next_ppn, task->walk_ctx.level);

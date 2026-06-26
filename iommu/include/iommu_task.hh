@@ -71,7 +71,8 @@ enum ptw_walk_phase_t {
     PTW_GS_IMPLICIT,
     PTW_GS_EXPLICIT,
     PTW_AD_UPDATE,
-    PTW_PREFETCH_WAIT  // NEW: 等待预取DDR响应
+    PTW_PREFETCH_WAIT,  // NEW: 等待预取DDR响应
+    PTW_VS_PTE_READ     // NEW: 两阶段预取 - 读取VS L0 PTE
 };
 
 // ===================== MSIPTW Walk Phase Enum =====================
@@ -102,6 +103,10 @@ struct walk_context_t {
     uint64_t gs_pte_addr = 0;
     uint64_t pending_vs_pte_addr = 0;
     uint16_t gs_vpn[5] = {0};
+
+    // Two-stage prefetch: VS L0 table info (for reading sequential VS L0 PTEs)
+    uint64_t vs_l0_spa_ppn = 0;    // VS L0表所在物理页号 (from GS_IMPLICIT)
+    uint64_t vs_l0_gpa_base = 0;   // VS L0表GPA基址 (from VS walk)
 
     // A/D bit update context
     spte_t ad_pte{};
@@ -162,6 +167,7 @@ struct walk_context_t {
     // NEW: 预取组管理(Burst预取方案)
     uint32_t  prefetch_group_id = 0;        // 预取组ID(同一组共享,使用主task_id)
     bool      is_prefetch_task = false;     // 是否为预取任务(非主任务)
+    bool      is_two_stage_prefetch = false; // 是否为两阶段预取主任务(monitor读取group arrays)
     uint32_t  prefetch_idx = 0;             // 预取索引(0=主任务, 1~D=预取)
     uint32_t  prefetch_total = 0;           // 预取组总任务数(1+D)
     uint64_t  leaf_pt_base_addr = 0;        // Leaf页表基址(用于地址计算)

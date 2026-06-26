@@ -278,6 +278,101 @@ void iommu_top::ptw_req_process_thread() {
                         printf("[PTW_REQ] task_id=%u -> Walker HIT combined leaf+burst read, size=%u (1+D=%u PTEs)\n",
                                task->task_id, task->walk_ctx.read_size, 1 + D);
                         fflush(stdout);
+
+                        // [两阶段预取-early spawn] Walker cache hit@L3 + 两阶段翻译:
+                        // 立即spawn预取任务，使其与主任务的5次DDR访问全部并发
+                        // 此时所有信息已就绪: vs_l0_spa_ppn(来自walker cache hit), vpn[0](来自IOVA)
+                        if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
+                            uint32_t group_id = task->task_id;
+                            task->walk_ctx.is_two_stage_prefetch = true;
+                            task->walk_ctx.prefetch_group_id = group_id;
+                            task->walk_ctx.prefetch_total = 1 + D;
+                            task->walk_ctx.prefetch_idx = 0;
+
+                            // 预初始化预取组(供monitor线程读取)
+                            // pending_tasks = D: 仅D个预取任务各递减一次
+                            // 主任务walk_complete时跳过此块(由is_prefetch_task条件控制)
+                            prefetch_group_mtx.lock();
+                            auto& group = prefetch_groups[group_id];
+                            group.main_task = task;
+                            group.pending_tasks = D;
+                            group.total_tasks = 1 + D;
+                            group.completed = false;
+                            group.group_iovas[0] = task->iova & ~PAGE_MASK_4KB;
+                            prefetch_group_mtx.unlock();
+
+                            uint16_t main_vpn0 = task->walk_ctx.vpn[0];
+                            uint64_t vs_l0_spa_ppn = task->walk_ctx.vs_l0_spa_ppn;
+
+                            printf("[PTW_REQ_EARLY_PF] task_id=%u -> Early spawn %u prefetch tasks, vs_l0_spa_ppn=0x%lx, main_vpn0=%u\n",
+                                   task->task_id, D, vs_l0_spa_ppn, main_vpn0);
+                            fflush(stdout);
+
+                            for (uint32_t d = 0; d < D; d++) {
+                                iommu_task_t* pf_task = new iommu_task_t();
+                                task_id_mtx.lock();
+                                pf_task->task_id = next_task_id++;
+                                task_id_mtx.unlock();
+
+                                // 复制主任务上下文
+                                pf_task->iosatp = task->iosatp;
+                                pf_task->iohgatp = task->iohgatp;
+                                pf_task->DC = task->DC;
+                                pf_task->GV = task->GV;
+                                pf_task->GADE = task->GADE;
+                                pf_task->GSCID = task->GSCID;
+                                pf_task->PSCID = task->PSCID;
+                                pf_task->device_id = task->device_id;
+
+                                // 预取专用标志
+                                pf_task->walk_ctx.is_prefetch_task = true;
+                                pf_task->walk_ctx.prefetch_group_id = group_id;
+                                pf_task->walk_ctx.prefetch_idx = d + 1;
+                                pf_task->walk_ctx.prefetch_enabled = false;
+
+                                // 计算预取IOVA和VS L0 PTE SPA地址
+                                uint64_t pf_iova = (task->iova & ~PAGE_MASK_4KB) + (d + 1) * PAGE_SIZE_4KB;
+                                pf_task->iova = pf_iova;
+                                pf_task->timestamp = task->timestamp;
+                                pf_task->state = TASK_PTW_REQ;
+                                pf_task->page_sz = PAGE_SIZE_4KB;
+
+                                uint16_t pf_vpn0 = main_vpn0 + d + 1;
+                                uint64_t vs_l0_pte_spa = (vs_l0_spa_ppn * PAGESIZE) + pf_vpn0 * ptesz;
+
+                                // 保存预取IOVA到组(供monitor线程使用)
+                                group.group_iovas[d + 1] = pf_iova;
+                                task->walk_ctx.prefetch_group.group_iovas[d + 1] = pf_iova;
+
+                                // 设置walk context: 直接读VS L0 PTE SPA，跳过GS_IMPLICIT
+                                pf_task->walk_ctx.read_addr = vs_l0_pte_spa;
+                                pf_task->walk_ctx.read_size = ptesz;
+                                pf_task->walk_ctx.walk_phase = PTW_VS_PTE_READ;
+                                pf_task->walk_ctx.ddr_read_count = 1;
+                                pf_task->walk_ctx.ptesize = ptesz;
+                                for (int k = 0; k < 5; k++)
+                                    pf_task->walk_ctx.vpn[k] = task->walk_ctx.vpn[k];
+                                pf_task->walk_ctx.vpn[0] = pf_vpn0;
+
+                                // 注册到active_walks
+                                ptw_walks_mtx.lock();
+                                ptw_active_walks[pf_task->task_id] = pf_task;
+                                ptw_walks_mtx.unlock();
+
+                                // 立即发送DDR请求(与主任务DDR#1并发)
+                                ddr_req_entry_t pf_req;
+                                pf_req.task_id = pf_task->task_id;
+                                pf_req.addr = vs_l0_pte_spa;
+                                pf_req.size = ptesz;
+                                pf_req.is_write = false;
+                                pf_req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;
+                                ptw_req_ddr_fifo.write(pf_req);
+
+                                printf("[PTW_REQ_EARLY_PF] Spawned prefetch task_id=%u, idx=%u, vs_l0_pte_spa=0x%lx, pf_vpn0=%u, pf_iova=0x%lx\n",
+                                       pf_task->task_id, d + 1, vs_l0_pte_spa, pf_vpn0, pf_iova);
+                                fflush(stdout);
+                            }
+                        }
                     }
                 }
             }
@@ -586,6 +681,9 @@ void iommu_top::ptw_rsp_process_thread() {
 
                 // Step 19: G-stage explicit translation
                 if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
+                    // [两阶段预取] 保存VS L0表GPA基址（供预取任务计算顺序VS L0 PTE的GPA）
+                    task->walk_ctx.vs_l0_gpa_base = task->walk_ctx.base_addr;
+                    
                     init_gstage_walk(task, task->gpa);
                     task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
                     task->walk_ctx.ddr_read_count++;
@@ -784,6 +882,10 @@ void iommu_top::ptw_rsp_process_thread() {
                 if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
                     uint8_t vs_lvl = task->walk_ctx.vs_level;
                     uint64_t spa_ppn = spa / PAGESIZE;
+                    // [两阶段预取] 保存VS L0表所在物理页号（供预取任务读取顺序VS L0 PTE）
+                    if (vs_lvl == 0) {
+                        task->walk_ctx.vs_l0_spa_ppn = spa_ppn;
+                    }
                     if (task->iosatp.MODE == IOSATP_Sv48) {
                         if (vs_lvl == 2) {
                             task->walk_ctx.walker_cache_entries.ppn_level0 = spa_ppn;
@@ -838,6 +940,61 @@ void iommu_top::ptw_rsp_process_thread() {
                 fflush(stdout);
                 // walk_phase stays PTW_GS_IMPLICIT
             }
+            need_next_ddr = true;
+            break;
+        }
+
+        case PTW_VS_PTE_READ: {
+            // ========== [两阶段预取] 读取顺序VS L0 PTE ==========
+            // 预取任务从DDR读取VS L0 PTE，提取数据页GPA PPN，然后启动G-stage walk
+            spte_t vs_pte;
+            vs_pte.raw = 0;
+            memcpy(&vs_pte.raw, task->walk_ctx.read_buf, task->walk_ctx.ptesize);
+            
+            printf("[PTW_2STAGE_PF] task_id=%u, VS_PTE_READ -> raw=0x%lx, V=%d, R=%d, W=%d, PPN=0x%lx\n",
+                   task->task_id, (uint64_t)vs_pte.raw, vs_pte.V, vs_pte.R, vs_pte.W, (uint64_t)vs_pte.PPN);
+            fflush(stdout);
+            
+            // 验证VS L0 PTE
+            if (vs_pte.V == 0 || (vs_pte.R == 0 && vs_pte.W == 1)) {
+                printf("[PTW_2STAGE_PF] task_id=%u -> VS PTE invalid, skip prefetch\n", task->task_id);
+                fflush(stdout);
+                // 预取PTE无效，保存当前组结果并通知monitor
+                if (task->walk_ctx.prefetch_group_id != 0) {
+                    uint32_t group_id = task->walk_ctx.prefetch_group_id;
+                    uint32_t task_idx = task->walk_ctx.prefetch_idx;
+                    prefetch_group_mtx.lock();
+                    auto& group = prefetch_groups[group_id];
+                    group.vs_ptes[task_idx].raw = 0;
+                    group.g_ptes[task_idx].raw = 0;
+                    group.pas[task_idx] = 0;
+                    group.page_szs[task_idx] = PAGE_SIZE_4KB;
+                    group.pending_tasks--;
+                    if (group.pending_tasks == 0 && !group.completed) {
+                        group.completed = true;
+                        prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                    }
+                    prefetch_group_mtx.unlock();
+                }
+                delete task;
+                goto skip_walk_cleanup;
+            }
+            
+            // 提取数据页GPA PPN并计算GPA
+            uint64_t data_page_gpa = vs_pte.PPN * PAGESIZE;  // 4KB页，offset=0
+            task->vs_pte = vs_pte;
+            task->vs_pte.PPN = vs_pte.PPN;
+            task->gpa = data_page_gpa;
+            
+            // 初始化G-stage walk（将数据页GPA翻译为SPA）
+            init_gstage_walk(task, data_page_gpa);
+            task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+            task->walk_ctx.ddr_read_count++;  // DDR #2: G-stage开始
+            
+            printf("[PTW_2STAGE_PF] task_id=%u, VS_PTE_READ -> GS_EXPLICIT, data_gpa=0x%lx, ddr_count=%u\n",
+                   task->task_id, data_page_gpa, task->walk_ctx.ddr_read_count);
+            fflush(stdout);
+            
             need_next_ddr = true;
             break;
         }
@@ -1032,7 +1189,7 @@ void iommu_top::ptw_rsp_process_thread() {
             // 预取组结果收集(完整9笔独立walk方案)
             // =====================================================================
             if (task->walk_ctx.prefetch_group_id != 0) {
-                // 这是预取组的一员
+                // 这是预取组的一员(主任务或预取任务)
                 uint32_t group_id = task->walk_ctx.prefetch_group_id;
                 uint32_t task_idx = task->walk_ctx.prefetch_idx;
                 
@@ -1045,17 +1202,38 @@ void iommu_top::ptw_rsp_process_thread() {
                 group.pas[task_idx] = task->pa;
                 group.page_szs[task_idx] = task->page_sz;
                 
-                // 减少pending计数
-                group.pending_tasks--;
+                // [FIX] 同步填充main_task的pt_updates[]，供flush_dedup_buffer_by_iova使用
+                // early spawn路径跳过了combined burst处理(其中原本会填充pt_updates[])
+                // 关键: 所有任务(主+预取)都必须写到main_task的pt_updates[]中
+                // 因为flush_dedup_buffer_by_iova只读取main_task->walk_ctx.pt_updates[]
+                {
+                    iommu_task_t* pt_upd_owner = group.main_task ? group.main_task : task;
+                    pt_upd_owner->walk_ctx.pt_updates[task_idx].vs_pte = task->vs_pte;
+                    pt_upd_owner->walk_ctx.pt_updates[task_idx].g_pte = task->g_pte;
+                    pt_upd_owner->walk_ctx.pt_updates[task_idx].pa = task->pa;
+                    pt_upd_owner->walk_ctx.pt_updates[task_idx].iova = task->iova & ~PAGE_MASK_4KB;
+                    pt_upd_owner->walk_ctx.pt_updates[task_idx].page_sz = task->page_sz;
+                }
                 
-                printf("[PTW_PREFETCH] Walk completed: group=%u, idx=%u, pending=%u\n",
-                       group_id, task_idx, group.pending_tasks);
-                fflush(stdout);
+                // 标记主任务已完成pt_updates填充
+                if (!task->walk_ctx.is_prefetch_task) {
+                    group.main_task_done = true;
+                }
                 
-                // 检查是否全部完成
-                if (group.pending_tasks == 0 && !group.completed) {
+                // 仅预取任务递减pending计数(主任务由monitor线程单独处理)
+                if (task->walk_ctx.is_prefetch_task) {
+                    // 减少pending计数
+                    group.pending_tasks--;
+                    
+                    printf("[PTW_PREFETCH] Walk completed: group=%u, idx=%u, pending=%u\n",
+                           group_id, task_idx, group.pending_tasks);
+                    fflush(stdout);
+                }
+                
+                // 检查是否可以触发monitor: 预取任务全部完成 + 主任务已完成
+                if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
                     group.completed = true;
-                    printf("[PTW_PREFETCH] Group %u ALL COMPLETED! Trigger batch update.\n", group_id);
+                    printf("[PTW_PREFETCH] Group %u ALL COMPLETED (pending=0, main_done)! Trigger batch update.\n", group_id);
                     fflush(stdout);
                     
                     // 触发批量返回
@@ -1075,10 +1253,177 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // =====================================================================
+            // [两阶段预取] GS_EXPLICIT leaf完成 + 预取启用 + 两阶段模式
+            // 仅在early spawn未触发时执行(walker cache miss路径)
+            // early spawn已在ptw_req_thread中设置is_two_stage_prefetch=true
+            // =====================================================================
+            if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0
+                && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                && !task->walk_ctx.is_prefetch_task
+                && !task->walk_ctx.is_two_stage_prefetch) {
+                
+                uint32_t D = task->walk_ctx.prefetch_depth;
+                uint32_t group_id = task->task_id;
+                
+                task->walk_ctx.is_two_stage_prefetch = true;
+                
+                printf("[PTW_2STAGE_PF] task_id=%u -> Two-stage prefetch, D=%u, base_vs_ppn=0x%lx\n",
+                       task->task_id, D, (uint64_t)task->vs_pte.PPN);
+                fflush(stdout);
+                
+                // 1. 初始化预取组，主任务结果存到index 0
+                task->walk_ctx.prefetch_group_id = group_id;
+                task->walk_ctx.prefetch_total = 1 + D;
+                task->walk_ctx.prefetch_idx = 0;
+                
+                prefetch_group_mtx.lock();
+                auto& group = prefetch_groups[group_id];
+                group.main_task = task;
+                group.pending_tasks = D;  // D个预取任务待完成
+                group.total_tasks = 1 + D;
+                group.completed = false;
+                group.vs_ptes[0] = task->vs_pte;
+                group.g_ptes[0] = task->g_pte;
+                group.pas[0] = task->pa;
+                group.page_szs[0] = task->page_sz;
+                group.group_iovas[0] = task->iova & ~PAGE_MASK_4KB;
+                
+                // 2. 主任务Walker Cache更新（两阶段预取路径）
+                if (PTW_WALKER_CACHE_ENABLED) {
+                    iommu::CacheMessage walker_req = task_to_walker_update(task);
+                    cache_sub.walker_update_fifo.write(walker_req);
+                    printf("[t=%llu ns][PTW_RSP] task_id=%u -> Walker Cache UPDATE (Two-stage PF path)\n",
+                           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                           task->task_id);
+                    fflush(stdout);
+                }
+                
+                // 3. 创建D个预取任务：先SPA读VS L0 PTE，再G-stage walk数据页GPA（共5次DDR）
+                uint64_t vs_l0_spa_ppn = task->walk_ctx.vs_l0_spa_ppn;  // VS L0表所在物理页号
+                // [FIX] Walker Cache hit L3时，vs_l0_spa_ppn已在walker_response_to_task()中设置
+                // 若仍为0（不应发生），使用base_addr作为最终回填（level=0时base_addr=VS L0表SPA）
+                if (vs_l0_spa_ppn == 0 && task->walk_ctx.level == 0) {
+                    vs_l0_spa_ppn = task->walk_ctx.base_addr / PAGESIZE;
+                    printf("[PTW_2STAGE_PF] vs_l0_spa_ppn recovered from base_addr: 0x%lx\n", vs_l0_spa_ppn);
+                    fflush(stdout);
+                }
+                uint64_t vs_l0_gpa_base = task->walk_ctx.vs_l0_gpa_base; // VS L0表GPA基址
+                uint16_t main_vpn0 = task->walk_ctx.vpn[0];              // 主任务的VPN[0]
+                uint8_t ptesize = task->walk_ctx.ptesize;                // PTE大小(8字节)
+                
+                printf("[PTW_2STAGE_PF] vs_l0_spa_ppn=0x%lx, vs_l0_gpa_base=0x%lx, vpn[0]=%u\n",
+                       vs_l0_spa_ppn, vs_l0_gpa_base, main_vpn0);
+                fflush(stdout);
+                
+                for (uint32_t d = 0; d < D; d++) {
+                    iommu_task_t* pf_task = new iommu_task_t();
+                    task_id_mtx.lock();
+                    pf_task->task_id = next_task_id++;
+                    task_id_mtx.unlock();
+                    
+                    // 复制主任务上下文
+                    pf_task->iosatp = task->iosatp;
+                    pf_task->iohgatp = task->iohgatp;
+                    pf_task->DC = task->DC;
+                    pf_task->GV = task->GV;
+                    pf_task->GADE = task->GADE;
+                    pf_task->GSCID = task->GSCID;
+                    pf_task->PSCID = task->PSCID;
+                    pf_task->device_id = task->device_id;
+                    
+                    // 预取专用标志
+                    pf_task->walk_ctx.is_prefetch_task = true;
+                    pf_task->walk_ctx.prefetch_group_id = group_id;
+                    pf_task->walk_ctx.prefetch_idx = d + 1;  // 1-based
+                    pf_task->walk_ctx.prefetch_enabled = false;  // 预取任务不再生成预取
+                    
+                    // 计算预取IOVA
+                    uint64_t pf_iova = (task->iova & ~PAGE_MASK_4KB) + (d + 1) * PAGE_SIZE_4KB;
+                    pf_task->iova = pf_iova;
+                    pf_task->timestamp = task->timestamp;
+                    pf_task->state = TASK_PTW_REQ;
+                    pf_task->page_sz = PAGE_SIZE_4KB;  // 4KB页
+                    
+                    // 计算顺序VS L0 PTE的SPA地址
+                    // VS L0 PTE在VS L0表中，该表在物理页 vs_l0_spa_ppn
+                    // 顺序页面的VPN[0] = main_vpn0 + d + 1
+                    uint16_t pf_vpn0 = main_vpn0 + d + 1;
+                    uint64_t vs_l0_pte_spa = (vs_l0_spa_ppn * PAGESIZE) + pf_vpn0 * ptesize;
+                    
+                    // 保存预取IOVA到组
+                    group.group_iovas[d + 1] = pf_iova;
+                    task->walk_ctx.prefetch_group.group_iovas[d + 1] = pf_iova;
+                    
+                    // DDR #1: 读取VS L0 PTE（SPA地址，无需G-stage翻译）
+                    pf_task->walk_ctx.read_addr = vs_l0_pte_spa;
+                    pf_task->walk_ctx.read_size = ptesize;
+                    pf_task->walk_ctx.walk_phase = PTW_VS_PTE_READ;
+                    pf_task->walk_ctx.ddr_read_count = 1;
+                    pf_task->walk_ctx.ptesize = ptesize;
+                    pf_task->walk_ctx.vpn[0] = pf_vpn0;
+                    // 复制完整vpn数组供后续G-stage使用
+                    for (int k = 0; k < 5; k++) pf_task->walk_ctx.vpn[k] = task->walk_ctx.vpn[k];
+                    pf_task->walk_ctx.vpn[0] = pf_vpn0;  // 修改VPN[0]为预取值
+                    
+                    // 注册到active_walks并发送DDR请求
+                    ptw_walks_mtx.lock();
+                    ptw_active_walks[pf_task->task_id] = pf_task;
+                    ptw_walks_mtx.unlock();
+                    
+                    ddr_req_entry_t pf_req;
+                    pf_req.task_id = pf_task->task_id;
+                    pf_req.addr = vs_l0_pte_spa;
+                    pf_req.size = ptesize;
+                    pf_req.is_write = false;
+                    pf_req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;
+                    ptw_req_ddr_fifo.write(pf_req);
+                    
+                    printf("[PTW_2STAGE_PF] Spawned prefetch task_id=%u, idx=%u, vs_l0_pte_spa=0x%lx, pf_vpn0=%u, pf_iova=0x%lx\n",
+                           pf_task->task_id, d + 1, vs_l0_pte_spa, pf_vpn0, pf_iova);
+                    fflush(stdout);
+                }
+                
+                task->walk_ctx.pt_update_count = 1 + D;
+                task->walk_ctx.prefetch_group.group_iovas[0] = task->iova & ~PAGE_MASK_4KB;
+                
+                // [FIX] 非early-spawn路径: 填充pt_updates[0]和设置main_task_done
+                // 因为主任务进入walk_complete时prefetch_group_id=0，跳过了group分支
+                group.main_task->walk_ctx.pt_updates[0].vs_pte = task->vs_pte;
+                group.main_task->walk_ctx.pt_updates[0].g_pte = task->g_pte;
+                group.main_task->walk_ctx.pt_updates[0].pa = task->pa;
+                group.main_task->walk_ctx.pt_updates[0].iova = task->iova & ~PAGE_MASK_4KB;
+                group.main_task->walk_ctx.pt_updates[0].page_sz = task->page_sz;
+                group.main_task_done = true;
+                
+                // 检查是否可以触发monitor（预取任务可能已全部完成）
+                if (group.pending_tasks == 0 && !group.completed) {
+                    group.completed = true;
+                    printf("[PTW_PREFETCH] Group %u ALL COMPLETED (2stage_init, pending=0, main_done)! Trigger.\n", group_id);
+                    fflush(stdout);
+                    prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                }
+                
+                prefetch_group_mtx.unlock();
+                
+                // 主任务不进入normal cleanup路径，等待monitor线程释放
+                goto skip_walk_cleanup;
+            }
+            
+            // [early spawn] 主任务已通过early spawn初始化预取组，
+            // 跳过normal cleanup路径，由monitor线程统一处理outstanding递减
+            if (task->walk_ctx.is_two_stage_prefetch) {
+                ptw_walks_mtx.lock();
+                ptw_active_walks.erase(rsp.task_id);
+                ptw_walks_mtx.unlock();
+                goto skip_walk_cleanup;
+            }
+            
+            // =====================================================================
             // NEW: Burst预取方案 (v2.0)
             // 利用L0页表连续性,1次Burst读代替D次独立walk
             // =====================================================================
-            if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0) {
+            if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0
+                && !(task->GV && task->iohgatp.MODE != IOHGATP_Bare)) {
                 printf("[PTW_PREFETCH] task_id=%u -> Burst prefetch mode, depth=%u\n",
                        task->task_id, task->walk_ctx.prefetch_depth);
                 fflush(stdout);
@@ -1471,8 +1816,14 @@ void iommu_top::prefetch_group_monitor_thread() {
                     uint64_t iova = group.group_iovas[i];
                     
                     iommu::PTData pt_data;
-                    pt_data.vs_pte.raw = main_task->walk_ctx.pt_updates[i].vs_pte.raw;
-                    pt_data.g_pte.raw = main_task->walk_ctx.pt_updates[i].g_pte.raw;
+                    // 两阶段预取: 结果在group arrays中; 单阶段burst: 在pt_updates中
+                    if (main_task->walk_ctx.is_two_stage_prefetch) {
+                        pt_data.vs_pte.raw = group.vs_ptes[i].raw;
+                        pt_data.g_pte.raw = group.g_ptes[i].raw;
+                    } else {
+                        pt_data.vs_pte.raw = main_task->walk_ctx.pt_updates[i].vs_pte.raw;
+                        pt_data.g_pte.raw = main_task->walk_ctx.pt_updates[i].g_pte.raw;
+                    }
                     pt_data.reserved.raw = 0;
                     pt_data.reserved.valid = 1;
                     pt_data.reserved.trans_type = static_cast<uint32_t>(stage);
@@ -1485,8 +1836,10 @@ void iommu_top::prefetch_group_monitor_thread() {
                     
                     batch_updates.push_back({iova, pt_data});
                     
-                    printf("[PTW_PREFETCH_MONITOR] Batch update[%u]: iova=0x%lx, vs_ppn=0x%lx\n",
-                           i, iova, main_task->walk_ctx.pt_updates[i].vs_pte.PPN);
+                    printf("[PTW_PREFETCH_MONITOR] Batch update[%u]: iova=0x%lx, vs_ppn=0x%lx, g_ppn=0x%lx\n",
+                           i, iova,
+                           main_task->walk_ctx.is_two_stage_prefetch ? group.vs_ptes[i].PPN : main_task->walk_ctx.pt_updates[i].vs_pte.PPN,
+                           main_task->walk_ctx.is_two_stage_prefetch ? (uint64_t)group.g_ptes[i].PPN : (uint64_t)main_task->walk_ctx.pt_updates[i].g_pte.PPN);
                     fflush(stdout);
                 }
                 
@@ -1519,7 +1872,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                     ptw_max_ddr_reads = main_task->walk_ctx.ddr_read_count;
                 if (main_task->walk_ctx.ddr_read_count < ptw_min_ddr_reads)
                     ptw_min_ddr_reads = main_task->walk_ctx.ddr_read_count;
-                print_ptw_task_summary(main_task, "burst_complete");
+                print_ptw_task_summary(main_task, main_task->walk_ctx.is_two_stage_prefetch ? "two_stage_pf_complete" : "burst_complete");
                 { auto _s = ptw_task_start_ns.find(main_task->task_id);
                   if (_s != ptw_task_start_ns.end()) {
                       double task_latency = sc_time_stamp().to_seconds()*1e9 - _s->second;

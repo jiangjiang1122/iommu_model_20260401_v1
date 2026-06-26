@@ -102,7 +102,7 @@ static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
 static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
-static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 4;          // PTW总outstanding任务数
+static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 4;          // PTW总outstanding任务数（按主任务计数，每组=1主+D预取）
 static const uint32_t PTW_REQ_PIPELINE_DELAY_NS = 30;         // PTW请求流水延时(ns, PEQ)
 static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 2;         // PTW响应流水延时(ns, PEQ)
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数

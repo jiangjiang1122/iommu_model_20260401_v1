@@ -1,14 +1,14 @@
 # Makefile for RISC-V IOMMU SystemC Model
 #
 # Test scenario selection:
-#   make TEST=rand4k              (default) 4KB随机读, 4000 requests, 16MB范围
-#   make TEST=seq128k             128KB顺序读, 2000 requests, 1MB范围
-#   make TEST=sv48_bare           Sv48 + Bare, 1000 requests
-#   make TEST=seq128k_twostage    128KB顺序读 + Sv48/Sv48x4两阶段地址翻译, 2000 requests
-#   make test_dedup_unit          PT Cache去重+预取单元测试
-#   make test_dedup_integration   PT Cache去重+预取集成测试
+#   make TEST=rand4k_singlestage      (default) 4KB随机读 + 仅一级地址翻译, 4000 requests, 16MB范围
+#   make TEST=seq128k_singlestage     128KB顺序读 + 仅一级地址翻译, 2000 requests, 1MB范围
+#   make TEST=sv48_bare               Sv48 + Bare, 1000 requests
+#   make TEST=seq128k_twostage        128KB顺序读 + Sv48/Sv48x4两阶段地址翻译, 5000 requests
+#   make test_dedup_unit              PT Cache去重+预取单元测试
+#   make test_dedup_integration       PT Cache去重+预取集成测试
 #
-TEST ?= rand4k
+TEST ?= rand4k_singlestage
 
 # Compiler settings
 CXX = g++
@@ -40,16 +40,16 @@ LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm
 ifeq ($(TEST), sv48_bare)
     TEST_THREAD_SRC = rp/test_rp_sv48_bare_thread.cc
     TEST_FLAGS =
-else ifeq ($(TEST), seq128k)
+else ifeq ($(TEST), seq128k_singlestage)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K
 else ifeq ($(TEST), seq128k_twostage)
     TEST_THREAD_SRC = rp/test_rp_128k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
-                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
 else
-    # rand4k (default)
+    # rand4k_singlestage (default)
     TEST_THREAD_SRC = rp/test_rp_thread.cc
     TEST_FLAGS =
 endif

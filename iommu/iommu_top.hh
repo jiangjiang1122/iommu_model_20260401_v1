@@ -187,6 +187,7 @@ public:
         uint32_t pending_tasks = 0;           // 待完成walk数
         uint32_t total_tasks = 0;             // 总任务数(1+D)
         bool     completed = false;           // 组完成标志
+        bool     main_task_done = false;      // 主任务walk完成标志(pt_updates[0]已填充)
         
         // 收集所有walk结果
         spte_t   vs_ptes[17];

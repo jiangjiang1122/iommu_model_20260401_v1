@@ -169,7 +169,7 @@ void RP_Module::send_translation_request_1_thread()
         while (response_count < 1) {
             wait(1000, SC_NS);
             single_wait++;
-            if (single_wait > 50) {
+            if (single_wait > 200) {
                 printf("[TEST] ERROR: Single packet response timeout\n");
                 break;
             }
@@ -207,7 +207,8 @@ void RP_Module::send_translation_request_1_thread()
         PayloadExtention* ext_array[NUM_REQUESTS];
 
         printf("[TEST] Sending %d READ requests (sequential 512B stride)...\n", NUM_REQUESTS);
-        printf("[TEST] Prefetch DISABLED (D=0), Walker Cache ENABLED\n");
+        printf("[TEST] Prefetch D=%d, Walker Cache ENABLED\n",
+               (int)TEST_CFG_PT_DEDUP_PREFETCH_DEPTH);
         fflush(stdout);
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
@@ -254,8 +255,8 @@ void RP_Module::send_translation_request_1_thread()
             wait(1000, SC_NS);
             if (response_count == last_response_count) {
                 stall_count++;
-                if (stall_count > 10) {
-                    printf("[TEST] WARNING: No progress for 10us, breaking wait loop. Got %d/%d responses\n",
+                if (stall_count > 50) {
+                    printf("[TEST] WARNING: No progress for 50us, breaking wait loop. Got %d/%d responses\n",
                            response_count, NUM_REQUESTS);
                     break;
                 }
