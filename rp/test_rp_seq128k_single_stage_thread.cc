@@ -1,4 +1,4 @@
-﻿#include "test_rp.hh"
+#include "test_rp.hh"
 #include "iommu_struct.hh"
 #include "iommu_registers.hh"
 #include "iommu_utils.hh"
@@ -10,6 +10,13 @@
 #include <ctime>
 using namespace std;
 
+// ============================================================
+// Test Scenario: 128KB Sequential Read + Single-Stage Address Translation
+//   iosatp = Sv39, iohgatp = Bare
+//   IOVA range: 1MB (0x100000 ~ 0x200000), 256 pages
+//   PA = IOVA + 0x10000 (fixed offset)
+//   2000 sequential READ requests, each 512B
+// ============================================================
 void RP_Module::send_translation_request_1_thread()
 {
     while (true)
@@ -22,11 +29,7 @@ void RP_Module::send_translation_request_1_thread()
         hb_to_iommu_req_t req;
         iommu_to_hb_rsp_t rsp;
 
-#ifdef TEST_SEQ_128K
         printf("\n========== IOMMU 2000-Request Sequential 128KB Read Test (1MB Range) ==========\n");
-#else
-        printf("\n========== IOMMU 4000-Request Random 4KB Read Test (16MB Range, Shuffled) ==========\n");
-#endif
 
         // Check IOMMU mode
         ddtp_t ddtp_check;
@@ -42,17 +45,10 @@ void RP_Module::send_translation_request_1_thread()
         printf("[DEBUG] IOMMU mode after enable_iommu: %d (expect 2 for DDT_1LVL)\n",
                read_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 4) & 0x7);
 
-#ifdef TEST_SEQ_128K
         // ============================================================
         // ===== 1MB Page Table + Sequential 128KB Read Scenario =====
         // ============================================================
         printf("\n========== 1MB Page Table + Sequential 128KB Read Test ==========\n");
-#else
-        // ============================================================
-        // ===== 16MB Page Table + Random 4KB Read Scenario (Shuffled) =====
-        // ============================================================
-        printf("\n========== 16MB Page Table + Random 4KB Read Test (Shuffled) ==========\n");
-#endif
 
         // Configure device 0x0A with iohgatp=Bare, iosatp=Sv39
         uint64_t dc6_addr = add_device(iommu_ptr, 0x0A, 1, 0, 0, 0, 0, 0,
@@ -79,7 +75,6 @@ void RP_Module::send_translation_request_1_thread()
         pte6.D = 1;
         pte6.PBMT = PMA;
 
-#ifdef TEST_SEQ_128K
         // ============================================================
         // 128KB Sequential Read Scenario:
         //   IOVA range: 1MB = 0x100000 bytes = 256 pages (4KB each)
@@ -116,72 +111,6 @@ void RP_Module::send_translation_request_1_thread()
         }
         printf("[TEST]   Mapped %d sequential pages in S-stage page table\n", TOTAL_PAGES_IN_RANGE);
 
-#else
-        // ============================================================
-        // Address layout:
-        //   IOVA range: 16MB = 0x1000000 bytes = 4096 pages (4KB each)
-        //   IOVA base:  0x100000 (1MB aligned)
-        //   IOVA end:   0x100000 + 0x1000000 = 0x1100000
-        //   PA = IOVA + 0x10000 (fixed offset)
-        //
-        //   We select 500 unique random pages from 4096 possible pages,
-        //   then shuffle the access order to simulate random access.
-        //   Each page gets 8 requests (8 x 512B = 4KB).
-        //   Total: 500 pages x 8 reqs = 4000 requests.
-        //   All requests are READ.
-        //
-        //   Random access order: prefetch D=3 will be INEFFECTIVE because
-        //   consecutive 4KB pages are NOT spatially local (shuffled order).
-        // ============================================================
-        const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
-        const uint64_t RANGE_16MB  = 0x1000000;        // 16MB
-        const uint64_t PA_OFFSET   = 0x10000;          // PA = IOVA + 0x10000
-        const int PAGES_NEEDED     = 500;              // 4000 reqs / 8 per page
-        const int REQ_PER_PAGE     = 8;                // 8 x 512B = 4KB
-        const int NUM_REQUESTS     = PAGES_NEEDED * REQ_PER_PAGE;  // 4000
-        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_16MB / 0x1000);  // 4096
-
-        printf("\n[TEST] 16MB Page Table Construction:\n");
-        printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (16MB, %d pages)\n",
-               IOVA_BASE, IOVA_BASE + RANGE_16MB, TOTAL_PAGES_IN_RANGE);
-        printf("[TEST]   PA offset: +0x%lx\n", PA_OFFSET);
-        printf("[TEST]   Selecting %d unique random 4KB pages from %d candidates...\n",
-               PAGES_NEEDED, TOTAL_PAGES_IN_RANGE);
-
-        // Generate unique random page indices using deterministic seed
-        srand(42);
-        set<int> page_set;
-        while ((int)page_set.size() < PAGES_NEEDED) {
-            page_set.insert(rand() % TOTAL_PAGES_IN_RANGE);
-        }
-
-        // Convert to vector for indexed access
-        vector<int> page_indices(page_set.begin(), page_set.end());
-        
-        // Shuffle the page access order to simulate random access pattern
-        // This ensures prefetch D=3 is ineffective (non-sequential access)
-        srand(123);
-        for (int i = page_indices.size() - 1; i > 0; i--) {
-            int j = rand() % (i + 1);
-            std::swap(page_indices[i], page_indices[j]);
-        }
-        
-        printf("[TEST]   Generated %d unique random page indices (SHUFFLED access order)\n", (int)page_indices.size());
-        printf("[TEST]   Sample access order: page[%d]=IOVA 0x%lx, page[%d]=IOVA 0x%lx, page[%d]=IOVA 0x%lx\n",
-               0, IOVA_BASE + (uint64_t)page_indices[0] * 0x1000,
-               1, IOVA_BASE + (uint64_t)page_indices[1] * 0x1000,
-               499, IOVA_BASE + (uint64_t)page_indices[499] * 0x1000);
-
-        // Map 500 random pages in S-stage page table
-        for (int p = 0; p < PAGES_NEEDED; p++) {
-            uint64_t iova_page = IOVA_BASE + (uint64_t)page_indices[p] * 0x1000;
-            uint64_t pa_page = iova_page + PA_OFFSET;
-            pte6.PPN = pa_page / PAGESIZE;
-            add_s_stage_pte(DC6.fsc.iosatp, iova_page, pte6, 0, 0);
-        }
-        printf("[TEST]   Mapped %d random pages in S-stage page table\n", PAGES_NEEDED);
-#endif
-
         // Reset response counter
         response_count = 0;
 
@@ -200,31 +129,15 @@ void RP_Module::send_translation_request_1_thread()
         tlm_generic_payload* trans_array[NUM_REQUESTS];
         PayloadExtention* ext_array[NUM_REQUESTS];
 
-#ifdef TEST_SEQ_128K
         printf("\n[TEST] Sending %d READ requests (sequential 512B stride)...\n", NUM_REQUESTS);
         printf("[TEST] Prefetch D=3 ENABLED - expected to be VERY EFFECTIVE (sequential addresses)\n");
         printf("[TEST] Each page: req 0 MISS + 7 HIT (same page), next page MISS + prefetch\n");
-#else
-        printf("\n[TEST] Sending %d READ requests (random 4KB pages, 8 reqs/page)...\n", NUM_REQUESTS);
-        printf("[TEST] Prefetch D=3 ENABLED - expected to be INEFFECTIVE (random addresses)\n");
-        printf("[TEST] Dedup within 4KB page: req 0 MISS + 3 prefetch, req 1-7 HIT dedup\n");
-#endif
         fflush(stdout);
 
-#ifdef TEST_SEQ_128K
         for (int i = 0; i < NUM_REQUESTS; i++) {
             // Sequential access: IOVA increments by 512B each request
             uint64_t iova = IOVA_BASE + (uint64_t)i * 0x200;  // 512B stride
             uint64_t expected_pa = iova + PA_OFFSET;
-#else
-        for (int i = 0; i < NUM_REQUESTS; i++) {
-            int page_idx = i / REQ_PER_PAGE;    // which random page (0~499)
-            int offset_in_page = i % REQ_PER_PAGE;  // offset within page (0~7)
-
-            uint64_t iova = IOVA_BASE + (uint64_t)page_indices[page_idx] * 0x1000
-                          + offset_in_page * 0x200;  // 512B stride within page
-            uint64_t expected_pa = iova + PA_OFFSET;
-#endif
 
             trans_array[i] = new tlm_generic_payload();
             sc_time delay = SC_ZERO_TIME;
@@ -251,13 +164,8 @@ void RP_Module::send_translation_request_1_thread()
 
             // Print progress every 100 requests
             if ((i + 1) % 100 == 0) {
-#ifdef TEST_SEQ_128K
                 printf("[TEST] Progress: %d/%d requests injected (IOVA=0x%lx)\n",
                        i + 1, NUM_REQUESTS, iova);
-#else
-                printf("[TEST] Progress: %d/%d requests injected (page[%d] IOVA=0x%lx)\n",
-                       i + 1, NUM_REQUESTS, page_idx, iova);
-#endif
                 fflush(stdout);
             }
 
@@ -294,32 +202,18 @@ void RP_Module::send_translation_request_1_thread()
         // Validate responses
         int pass_count = 0;
         for (int i = 0; i < NUM_REQUESTS; i++) {
-#ifdef TEST_SEQ_128K
             // Sequential access: IOVA increments by 512B each request
             uint64_t iova = IOVA_BASE + (uint64_t)i * 0x200;
             uint64_t expected_pa = iova + PA_OFFSET;
-#else
-            int page_idx = i / REQ_PER_PAGE;
-            int offset_in_page = i % REQ_PER_PAGE;
-            uint64_t iova = IOVA_BASE + (uint64_t)page_indices[page_idx] * 0x1000
-                          + offset_in_page * 0x200;
-            uint64_t expected_pa = iova + PA_OFFSET;
-#endif
             uint64_t result_pa = trans_array[i]->get_address();
             tlm::tlm_response_status status = trans_array[i]->get_response_status();
 
             if (status == tlm::TLM_OK_RESPONSE && result_pa == expected_pa) {
                 pass_count++;
             } else {
-#ifdef TEST_SEQ_128K
                 printf("[TEST] FAIL req %4d: IOVA=0x%lx, expected PA=0x%lx, got PA=0x%lx, status=%s\n",
                        i, iova, expected_pa, result_pa,
                        trans_array[i]->get_response_string().c_str());
-#else
-                printf("[TEST] FAIL req %4d: page[%d]+%d IOVA=0x%lx, expected PA=0x%lx, got PA=0x%lx, status=%s\n",
-                       i, page_idx, offset_in_page, iova, expected_pa, result_pa,
-                       trans_array[i]->get_response_string().c_str());
-#endif
             }
         }
 
@@ -340,11 +234,7 @@ void RP_Module::send_translation_request_1_thread()
             delete trans_array[i];
         }
 
-#ifdef TEST_SEQ_128K
         printf("\n[TEST] %d-request sequential 128KB read test completed!\n", NUM_REQUESTS);
-#else
-        printf("\n[TEST] %d-request random 4KB read test completed!\n", NUM_REQUESTS);
-#endif
 
         // [STAT] Print Buffer peak statistics
         auto* dedup_buf = iommu_ptr->cache_sub.get_pt_dedup_buffer();

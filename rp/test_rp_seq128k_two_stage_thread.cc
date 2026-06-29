@@ -46,6 +46,37 @@ void RP_Module::send_translation_request_1_thread()
                read_register(&iommu_ptr->iommu_inst, DDTP_OFFSET, 4) & 0x7);
 
         // ============================================================
+        // 1MB VS-stage page table + G-stage mapping
+        // GPA pattern: 2MB递增 (非恒等映射)
+        // ============================================================
+        const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
+        const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
+        const uint64_t GPA_STRIDE  = 0x200000;         // 2MB per page (GPA递增步长)
+        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests
+        // 自适应页表范围：根据NUM_REQUESTS计算所需页数，向上取整到MB
+        const int PAGES_NEEDED = (NUM_REQUESTS + 1 + 7) / 8;  // +1 for Phase 1
+        const uint64_t RANGE = ((uint64_t)((PAGES_NEEDED * 0x1000 + 0xFFFFF) / 0x100000) * 0x100000);
+        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE / 0x1000);
+
+        printf("\n[TEST] Two-Stage Page Table Construction:\n");
+        printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (%luMB, %d pages)\n",
+               IOVA_BASE, IOVA_BASE + RANGE, (unsigned long)(RANGE / 0x100000), TOTAL_PAGES_IN_RANGE);
+        printf("[TEST]   GPA = page_idx × 0x%lx (2MB stride), SPA = GPA + 0x%lx\n",
+               GPA_STRIDE, PA_OFFSET);
+
+        // ============================================================
+        // 关键修复：在add_device之前将GPPN分配器偏移到测试GPA范围之上
+        // 这样add_device分配的VS root GPPN也在高位，避免与测试GPA冲突
+        // 测试GPA的GPPN范围: 0 ~ (TOTAL_PAGES_IN_RANGE-1) × (GPA_STRIDE/PAGESIZE)
+        // 例如: 767 × 0x200 = 0x5FE00
+        // ============================================================
+        extern uint64_t next_free_gpage[65536];
+        uint64_t test_max_gppn = (uint64_t)(TOTAL_PAGES_IN_RANGE - 1) * (GPA_STRIDE / PAGESIZE);
+        uint64_t gppn_offset = ((test_max_gppn + 0xFFFF) / 0x10000) * 0x10000;  // 向上对齐到64K
+        next_free_gpage[1] = gppn_offset;  // GSCID=1, 必须在add_device之前设置!
+        printf("[TEST]   GPPN offset: 0x%lx (test GPPN max=0x%lx)\n", gppn_offset, test_max_gppn);
+
+        // ============================================================
         // Configure device 0x0A: iohgatp=Sv48x4, iosatp=Sv48
         // ============================================================
         printf("\n========== Configuring Device 0x0A: iosatp=Sv48, iohgatp=Sv48x4 ==========\n");
@@ -58,9 +89,38 @@ void RP_Module::send_translation_request_1_thread()
         read_memory_test_rp(dc6_addr, sizeof(device_context_t), (char*)&DC6);
         printf("[DEV6] DC addr: 0x%lx, iohgatp.MODE=%d (Sv48x4), iosatp.MODE=%d (Sv48)\n",
                dc6_addr, DC6.iohgatp.MODE, DC6.fsc.iosatp.MODE);
+        printf("[DEV6] iosatp.PPN=0x%lx -> VS root GPA=0x%lx\n",
+               (uint64_t)DC6.fsc.iosatp.PPN, (uint64_t)DC6.fsc.iosatp.PPN * PAGESIZE);
 
         // Do NOT reset next_free_page here. add_device has already allocated
         // G-stage page table pages; resetting it would collide with those pages.
+
+        // ============================================================
+        // 关键修复：为VS root page创建G-stage映射
+        // add_device分配了VS root GPPN（高位），但G-stage中还没有该GPA的映射
+        // add_vs_stage_pte需要translate_gpa来定位VS页表页，如果G-stage映射不存在会失败
+        // ============================================================
+        {
+            uint64_t vs_root_gpa = (uint64_t)DC6.fsc.iosatp.PPN * PAGESIZE;
+            gpte_t vs_root_gpte;
+            vs_root_gpte.raw = 0;
+            vs_root_gpte.V = 1;
+            vs_root_gpte.R = 1;
+            vs_root_gpte.W = 1;
+            vs_root_gpte.X = 0;
+            vs_root_gpte.U = 1;
+            vs_root_gpte.G = 0;
+            vs_root_gpte.A = 1;
+            vs_root_gpte.D = 1;
+            vs_root_gpte.PBMT = PMA;
+            vs_root_gpte.PPN = get_free_ppn(1);
+            // 清零VS root page内存
+            unsigned char zero_page[4096] = {0};
+            write_memory_test_rp((char*)zero_page, vs_root_gpte.PPN * PAGESIZE, 4096);
+            add_g_stage_pte(iommu_ptr, DC6.iohgatp, vs_root_gpa, vs_root_gpte, 0);
+            printf("[TEST] Created G-stage mapping: GPA=0x%lx -> SPA=0x%lx (VS root page)\n",
+                   vs_root_gpa, (uint64_t)vs_root_gpte.PPN * PAGESIZE);
+        }
 
         // Setup VS-stage page table template (leaf PTE)
         spte_t pte6;
@@ -88,27 +148,11 @@ void RP_Module::send_translation_request_1_thread()
         gpte.D = 1;
         gpte.PBMT = PMA;
 
-        // ============================================================
-        // 1MB VS-stage page table + G-stage mapping
-        // ============================================================
-        const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
-        const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
-        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests
-        // 自适应页表范围：根据NUM_REQUESTS计算所需页数，向上取整到MB
-        const int PAGES_NEEDED = (NUM_REQUESTS + 1 + 7) / 8;  // +1 for Phase 1
-        const uint64_t RANGE = ((uint64_t)((PAGES_NEEDED * 0x1000 + 0xFFFFF) / 0x100000) * 0x100000);
-        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE / 0x1000);
-
-        printf("\n[TEST] Two-Stage Page Table Construction:\n");
-        printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (%luMB, %d pages)\n",
-               IOVA_BASE, IOVA_BASE + RANGE, (unsigned long)(RANGE / 0x100000), TOTAL_PAGES_IN_RANGE);
-        printf("[TEST]   GPA = IOVA (identity), SPA = GPA + 0x%lx\n", PA_OFFSET);
-
-        // Map all 256 pages in VS-stage page table, then map each GPA in G-stage
+        // Map all pages: VS-stage (IOVA→GPA) + G-stage (GPA→SPA)
         for (int p = 0; p < TOTAL_PAGES_IN_RANGE; p++) {
             uint64_t iova_page = IOVA_BASE + (uint64_t)p * 0x1000;
-            uint64_t gpa_page  = iova_page;                     // identity GPA
-            uint64_t pa_page   = gpa_page + PA_OFFSET;          // final SPA
+            uint64_t gpa_page  = (uint64_t)p * GPA_STRIDE;       // 2MB递增GPA (非identity)
+            uint64_t pa_page   = gpa_page + PA_OFFSET;           // final SPA
 
             // VS-stage leaf: IOVA -> GPA
             pte6.PPN = gpa_page / PAGESIZE;
@@ -136,7 +180,9 @@ void RP_Module::send_translation_request_1_thread()
 
         response_count = 0;
         uint64_t single_iova = IOVA_BASE;
-        uint64_t single_expected_pa = single_iova + PA_OFFSET;
+        // Phase 1: IOVA=IOVA_BASE=0x100000, 页0, GPA=0×GPA_STRIDE=0, SPA=0+PA_OFFSET=0x10000
+        uint64_t single_page_idx = (single_iova - IOVA_BASE) / 0x1000;
+        uint64_t single_expected_pa = (single_page_idx * GPA_STRIDE) + PA_OFFSET + (single_iova & 0xFFF);
 
         tlm_generic_payload single_trans;
         sc_time single_delay = SC_ZERO_TIME;
@@ -213,7 +259,8 @@ void RP_Module::send_translation_request_1_thread()
 
         for (int i = 0; i < NUM_REQUESTS; i++) {
             uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 512B stride, +1跳过Phase 1已用的IOVA
-            uint64_t expected_pa = iova + PA_OFFSET;
+            uint64_t p2_page_idx = (iova - IOVA_BASE) / 0x1000;
+            uint64_t expected_pa = (p2_page_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
 
             trans_array[i] = new tlm_generic_payload();
             sc_time delay = SC_ZERO_TIME;
@@ -276,7 +323,9 @@ void RP_Module::send_translation_request_1_thread()
         int pass_count = 0;
         for (int i = 0; i < NUM_REQUESTS; i++) {
             uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 与注入循环保持一致
-            uint64_t expected_pa = iova + PA_OFFSET;
+            // GPA = page_idx × 2MB, SPA = GPA + PA_OFFSET, PA = SPA_page_base | iova_offset
+            uint64_t page_idx = (iova - IOVA_BASE) / 0x1000;
+            uint64_t expected_pa = (page_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
             uint64_t result_pa = trans_array[i]->get_address();
             tlm::tlm_response_status status = trans_array[i]->get_response_status();
 

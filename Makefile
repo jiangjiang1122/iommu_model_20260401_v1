@@ -37,20 +37,25 @@ endif
 LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm
 
 # Test thread file selection and flags based on TEST scenario
+# Each scenario has a dedicated source file with clear naming:
+#   - test_rp_seq128k_single_stage_thread.cc   : 128KB顺序读 + 单级翻译
+#   - test_rp_seq128k_two_stage_thread.cc      : 128KB顺序读 + 两阶段翻译
+#   - test_rp_rand4k_single_stage_thread.cc    : 4KB随机读 + 单级翻译
+#   - test_rp_sv48_bare_thread.cc              : Sv48+Bare基础测试
 ifeq ($(TEST), sv48_bare)
     TEST_THREAD_SRC = rp/test_rp_sv48_bare_thread.cc
     TEST_FLAGS =
 else ifeq ($(TEST), seq128k_singlestage)
-    TEST_THREAD_SRC = rp/test_rp_thread.cc
-    TEST_FLAGS = -DTEST_SEQ_128K
+    TEST_THREAD_SRC = rp/test_rp_seq128k_single_stage_thread.cc
+    TEST_FLAGS =
 else ifeq ($(TEST), seq128k_twostage)
-    TEST_THREAD_SRC = rp/test_rp_128k_two_stage_thread.cc
+    TEST_THREAD_SRC = rp/test_rp_seq128k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
 else
     # rand4k_singlestage (default)
-    TEST_THREAD_SRC = rp/test_rp_thread.cc
+    TEST_THREAD_SRC = rp/test_rp_rand4k_single_stage_thread.cc
     TEST_FLAGS =
 endif
 
