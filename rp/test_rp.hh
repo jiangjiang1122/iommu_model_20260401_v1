@@ -67,9 +67,6 @@ public:
     sc_event response_event;
     tlm::tlm_generic_payload* pending_response_trans;
 
-    // Concurrent test synchronization
-    sc_event concurrent_test_event;
-
     // Multi-request response tracking
     int response_count;
     sc_event response_count_event;
@@ -89,8 +86,6 @@ public:
             this, &RP_Module::ats_slave_b_transport);
 
         SC_THREAD(send_translation_request_1_thread);
-        SC_THREAD(send_translation_request_2_thread);
-        SC_THREAD(send_translation_request_3_thread);
     }
 
     // nb_transport_bw callback: receives AT responses from IOMMU
@@ -141,8 +136,6 @@ public:
     }
 
     void send_translation_request_1_thread();
-    void send_translation_request_2_thread();
-    void send_translation_request_3_thread();
 
     // Function declarations
     void send_translation_request_rp(iommu_top *iommu, uint32_t did, uint8_t pid_valid, uint32_t pid, uint8_t no_write,uint8_t exec_req,

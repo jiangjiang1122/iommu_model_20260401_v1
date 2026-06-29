@@ -11,7 +11,10 @@ DDR_Module::DDR_Module(sc_module_name name) : sc_module(name),
     read_outstanding(0),
     write_outstanding(0)
 {
-    memset(memory, 0, sizeof(memory));
+    // Dynamically allocate DDR memory (avoids large object size issues with SystemC)
+    memory = new unsigned char[DDR_MEMORY_SIZE];
+    memset(memory, 0, DDR_MEMORY_SIZE);
+    printf("[DDR] Allocated %zu MB DDR memory\n", DDR_MEMORY_SIZE / (1024*1024));
 
     // Register nb_transport_fw for the main DDR socket (from IOMMU arbiter)
     axi_slave_from_cmn_rnd_1_socket.register_nb_transport_fw(
@@ -135,9 +138,9 @@ void DDR_Module::process_memory_access(tlm_generic_payload& trans) {
     unsigned char* data = trans.get_data_ptr();
     unsigned int len = trans.get_data_length();
 
-    if (addr + len > sizeof(memory)) {
+    if (addr + len > DDR_MEMORY_SIZE) {
         printf("[DDR] ERROR: Address 0x%lx + len %d exceeds memory size %zu\n",
-               (unsigned long)addr, len, sizeof(memory));
+               (unsigned long)addr, len, DDR_MEMORY_SIZE);
         trans.set_response_status(TLM_ADDRESS_ERROR_RESPONSE);
         return;
     }

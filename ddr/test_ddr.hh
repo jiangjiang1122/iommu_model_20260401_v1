@@ -21,8 +21,9 @@ public:
     static const int DDR_INTERNAL_LATENCY_NS   = 100;  // ns, 内部固定访问延时
     static const int DDR_WRITE_MAX_OUTSTANDING = 64;
 
-    // Simulated DDR memory - 1MB storage space
-    unsigned char memory[1024 * 1024];
+    // Simulated DDR memory - 16MB storage space (expanded for 2MB GPA stride page tables)
+    static const size_t DDR_MEMORY_SIZE = 16 * 1024 * 1024;
+    unsigned char* memory;
 
 public:
     // Target sockets (slave)
@@ -46,6 +47,9 @@ public:
 
     // Constructor
     DDR_Module(sc_module_name name);
+
+    // Destructor
+    ~DDR_Module() { delete[] memory; }
 
     // TLM interface callbacks
     tlm::tlm_sync_enum nb_transport_fw(

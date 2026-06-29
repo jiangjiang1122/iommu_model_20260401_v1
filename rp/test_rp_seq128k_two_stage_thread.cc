@@ -377,20 +377,3 @@ void RP_Module::send_translation_request_1_thread()
     }
 }
 
-void RP_Module::send_translation_request_2_thread()
-{
-    while (true) {
-        wait(concurrent_test_event);
-        // Not used in this test scenario
-        return;
-    }
-}
-
-void RP_Module::send_translation_request_3_thread()
-{
-    while (true) {
-        wait(concurrent_test_event);
-        // Not used in this test scenario
-        return;
-    }
-}
