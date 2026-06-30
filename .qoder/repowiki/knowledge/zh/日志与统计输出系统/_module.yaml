@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: logging_system
+title: 日志与统计输出系统
+scope: []
+source_files:
+    - iommu/cache_src/common/stats_collector.h
+    - iommu/cache_src/common/stats_collector.cpp
+    - iommu/cache_src/subsystem/cache_subsystem.cpp
+    - iommu/iommu_perf_model/iommu_perf_collector.cc
+    - main.cpp
+depends_on: []
+related_to: []

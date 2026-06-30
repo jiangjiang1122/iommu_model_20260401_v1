@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: configuration_system
+title: 基于JSON的缓存子系统配置加载机制
+scope: []
+source_files:
+    - iommu/cache_config/default_config.json
+    - iommu/cache_src/common/json_config.cpp
+    - iommu/cache_src/common/json_config.h
+    - iommu/cache_src/common/mini_json.h
+    - iommu/cache_src/common/types.h
+    - iommu/iommu_top.hh
+depends_on: []
+related_to: []

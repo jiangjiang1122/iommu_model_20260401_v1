@@ -5,6 +5,7 @@
 #   make TEST=seq128k_singlestage     128KB顺序读 + 仅一级地址翻译, 2000 requests, 1MB范围
 #   make TEST=sv48_bare               Sv48 + Bare, 1000 requests
 #   make TEST=seq128k_twostage        128KB顺序读 + Sv48/Sv48x4两阶段地址翻译, 5000 requests
+#   make TEST=rand4k_twostage         4KB随机读 + Sv48/Sv48x4两阶段地址翻译, 4000 requests
 #   make test_dedup_unit              PT Cache去重+预取单元测试
 #   make test_dedup_integration       PT Cache去重+预取集成测试
 #
@@ -51,6 +52,11 @@ else ifeq ($(TEST), seq128k_singlestage)
 else ifeq ($(TEST), seq128k_twostage)
     TEST_THREAD_SRC = rp/test_rp_seq128k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
+else ifeq ($(TEST), rand4k_twostage)
+    TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
 else

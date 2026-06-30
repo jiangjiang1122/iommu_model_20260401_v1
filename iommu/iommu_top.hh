@@ -166,6 +166,14 @@ public:
     // TODO: 暂时禁用，待修复崩溃问题
     // std::set<uint32_t> forwarded_task_ids;
     
+    // [FIX] 占位CL转换回调: 当batch update将is_req=1的占位CL转为常规CL时,
+    // flush buffer中等待的任务. 解决时序竞争: 任务在monitor flush之后、batch update
+    // 处理之前到达, 导致永远卡在buffer中.
+    sc_mutex pt_pa_lookup_mtx;  // 保护pt_iova_pa_map
+    std::map<uint64_t, uint64_t> pt_iova_pa_map;  // IOVA(4KB aligned) → PA(页基址)
+    void on_placeholder_converted(uint64_t iova, iommu::gscid_t gscid, iommu::pscid_t pscid,
+                                  iommu::TransStage stage, const iommu::PTData& pt_data);
+    
     // [新增] Flush单个PT Cache条目 (占位CL → 常规CL)
     void flush_single_pt_cache(uint64_t iova,
                                const iommu::PTData& pt_data,
@@ -188,6 +196,7 @@ public:
         uint32_t total_tasks = 0;             // 总任务数(1+D)
         bool     completed = false;           // 组完成标志
         bool     main_task_done = false;      // 主任务walk完成标志(pt_updates[0]已填充)
+        bool     has_fault = false;           // 组中有任务fault
         
         // 收集所有walk结果
         spte_t   vs_ptes[17];

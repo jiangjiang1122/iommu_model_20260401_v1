@@ -661,8 +661,20 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
             uint8_t is_req = data.reserved.is_req;
             
             // [V3.0] 分支3 - 预取占位CL (is_req=0),首次有任务访问
+            // [FIX] 检查placeholder是否包含有效PTE数据
+            // 如果预取任务因PTE无效提前退出，placeholder的vs_pte和g_pte均为0
+            // 此时不能当作有效HIT，应转为MISS触发PTW获取正确翻译
             if (is_req == 0) {
-                printf("[PT_CACHE_EXECUTE] task_id=%u -> HIT prefetch placeholder (is_req=0)\n",
+                if (data.vs_pte.raw == 0 && data.g_pte.raw == 0) {
+                    printf("[PT_CACHE_EXECUTE] task_id=%u -> EMPTY prefetch placeholder (is_req=0, PTE=0), treat as MISS\n",
+                           req.task_id);
+                    fflush(stdout);
+                    resp.hit = false;
+                    resp.pt_data = data;
+                    return resp;
+                }
+                
+                printf("[PT_CACHE_EXECUTE] task_id=%u -> HIT prefetch placeholder (is_req=0, PTE=VALID)\n",
                        req.task_id);
                 fflush(stdout);
                 
@@ -953,6 +965,7 @@ CacheMessage CacheSubsystem::execute_pt_update_request(const CacheMessage& req) 
     pt_cache_->set_current_phase(1);
 
     pt_cache_->fill_pt(req.gscid, req.pscid, req.iova, req.stage, req.pt_data, req.from_prefetch);
+    
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_UPDATE_RESPONSE;
     resp.task_id = req.task_id;

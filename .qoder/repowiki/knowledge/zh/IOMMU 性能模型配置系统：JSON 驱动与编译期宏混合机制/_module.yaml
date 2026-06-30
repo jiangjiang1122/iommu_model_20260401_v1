@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: configuration_system
+title: IOMMU 性能模型配置系统：JSON 驱动与编译期宏混合机制
+scope: []
+source_files:
+    - iommu/cache_config/default_config.json
+    - iommu/cache_src/common/json_config.cpp
+    - iommu/cache_src/common/types.h
+    - iommu/iommu_perf_model/iommu_perf_params.hh
+    - Makefile
+    - iommu/iommu_top.hh
+depends_on: []
+related_to: []

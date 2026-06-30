@@ -278,17 +278,25 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
         uint64_t entry_iova = entry.iova;  // 保存iova（free_entry会清空）
         
         if (pending_task != nullptr) {
-            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
-            // 直接处理任务，不检查是否已转发
+            // [FIX] 区分预取任务和普通挂起任务
+            if (pending_task->walk_ctx.is_prefetch_task) {
+                // 预取任务: 不在reorder中注册，不应转发
+                // 直接释放（预取结果已通过group收集）
+                printf("[DEDUP_FLUSH_IOVA] entry[%u] prefetch task_id=%u -> skip forward, delete\n",
+                       idx, pending_task->task_id);
+                fflush(stdout);
+                dedup_buf->free_entry(idx);
+                delete pending_task;
+                flushed_count++;
+                continue;  // 跳过后续转发逻辑
+            }
             
-            // 计算PA：使用对应IOVA的PTE.PPN + task的offset
-            uint64_t offset = pending_task->iova & 0xFFFL;  // 页内偏移
+            // 普通挂起任务: 计算PA并转发
+            uint64_t offset = pending_task->iova & 0xFFFL;
             
-            // 在group_iovas中查找匹配的PTE数据
             bool found = false;
             for (uint32_t i = 0; i < total_tasks; i++) {
                 if ((group_iovas[i] & ~0xFFFULL) == target_iova_aligned) {
-                    // [FIX] 使用pt_updates[i].pa的页基址（已包含最终SPA/GPA翻译）
                     uint64_t pa = (main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL) | offset;
                     pending_task->pa = pa;
                     pending_task->vs_pte = main_task->walk_ctx.pt_updates[i].vs_pte;
@@ -305,7 +313,6 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
             }
             
             if (!found) {
-                // 未找到对应PTE，使用主任务的页基址（同页场景）
                 uint64_t pa = (main_task->walk_ctx.pt_updates[0].pa & ~0xFFFULL) | offset;
                 pending_task->pa = pa;
                 pending_task->vs_pte = main_task->walk_ctx.pt_updates[0].vs_pte;
@@ -318,11 +325,7 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
                 fflush(stdout);
             }
             
-            // 设置任务状态为PTW完成
             pending_task->state = TASK_PTW_DONE;
-            
-            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
-            // forwarded_task_ids.insert(pending_task->task_id);
         }
         
         // 释放Buffer Entry
@@ -333,7 +336,7 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
                idx, (void*)pending_task, entry_iova);
         fflush(stdout);
         
-        // 发送到forwarder
+        // 发送到forwarder（仅普通挂起任务）
         if (pending_task != nullptr) {
             pt_cache_to_fwd_fifo.write(pending_task);
         }

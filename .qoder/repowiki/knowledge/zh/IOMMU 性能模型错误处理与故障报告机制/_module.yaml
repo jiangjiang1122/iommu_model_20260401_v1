@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: error_handling
+title: IOMMU 性能模型错误处理与故障报告机制
+scope: []
+source_files:
+    - iommu/iommu_perf_model/iommu_perf_ptw.cc
+    - iommu/iommu_reg.cc
+    - iommu/iommu_top.cc
+    - iommu/include/iommu_registers.hh
+    - iommu/cache_src/cache/cache_base.h
+depends_on: []
+related_to: []

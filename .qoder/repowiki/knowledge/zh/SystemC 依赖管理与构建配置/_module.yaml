@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: dependency_management
+title: SystemC 依赖管理与构建配置
+scope: []
+source_files:
+    - Makefile
+    - README.md
+    - compile_wsl.sh
+    - build_cpp.sh
+    - compile_systemc.bat
+    - iommu/cache_src/common/mini_json.h
+    - iommu/cache_src/common/json_config.cpp
+depends_on: []
+related_to: []

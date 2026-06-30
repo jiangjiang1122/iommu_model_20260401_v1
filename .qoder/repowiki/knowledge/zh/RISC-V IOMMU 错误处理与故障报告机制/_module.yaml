@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: error_handling
+title: RISC-V IOMMU 错误处理与故障报告机制
+scope: []
+source_files:
+    - iommu/include/iommu_fault.hh
+    - iommu/iommu_fun_model/iommu_faults.cc
+    - iommu/iommu_fun_model/iommu_translate.cc
+    - iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc
+    - iommu/include/iommu_registers.hh
+    - iommu/iommu_top.cc
+depends_on: []
+related_to: []

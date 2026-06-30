@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: logging_system
+title: 基于printf与StatsCollector的混合日志与统计机制
+scope: []
+source_files:
+    - iommu/cache_src/common/stats_collector.h
+    - iommu/cache_src/common/stats_collector.cpp
+    - iommu/iommu_top.cc
+    - iommu/cache_src/subsystem/cache_subsystem.cpp
+    - main.cpp
+depends_on: []
+related_to: []

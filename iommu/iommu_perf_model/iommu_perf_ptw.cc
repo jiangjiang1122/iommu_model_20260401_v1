@@ -435,6 +435,13 @@ void iommu_top::ptw_rsp_process_thread() {
                rsp.task_id, rsp.data_length, rsp.error);
         fflush(stdout);
 
+        // [FIX] 防御性检查: task_id=0不应存在(next_task_id从1开始)
+        if (rsp.task_id == 0) {
+            printf("[PTW_RSP] ERROR: task_id=0 in DDR response! Skipping (memory corruption detected).\n");
+            fflush(stdout);
+            continue;
+        }
+
         // Find corresponding task
         ptw_walks_mtx.lock();
         auto it = ptw_active_walks.find(rsp.task_id);
@@ -444,6 +451,15 @@ void iommu_top::ptw_rsp_process_thread() {
             continue;
         }
         iommu_task_t* task = it->second;
+        // [FIX] 验证task指针有效性
+        if (task == nullptr || task->task_id != rsp.task_id) {
+            ptw_walks_mtx.unlock();
+            printf("[PTW] ERROR: task_id %u stale/corrupt pointer (task=%p, task->task_id=%u)! Skipping.\n",
+                   rsp.task_id, (void*)task, task ? task->task_id : 0);
+            fflush(stdout);
+            ptw_active_walks.erase(rsp.task_id);  // 清除无效条目
+            continue;
+        }
         ptw_walks_mtx.unlock();
 
         memcpy(task->walk_ctx.read_buf, rsp.data, rsp.data_length);
@@ -970,13 +986,18 @@ void iommu_top::ptw_rsp_process_thread() {
                     group.pas[task_idx] = 0;
                     group.page_szs[task_idx] = PAGE_SIZE_4KB;
                     group.pending_tasks--;
-                    if (group.pending_tasks == 0 && !group.completed) {
+                    // [FIX] 必须等待主任务也完成(main_task_done=true)才能触发monitor
+                    // 否则monitor会在主任务GS_EXPLICIT完成之前就处理组，导致PA=0
+                    if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
                         group.completed = true;
                         prefetch_group_completed_event.notify(SC_ZERO_TIME);
                     }
                     prefetch_group_mtx.unlock();
                 }
-                delete task;
+                // [FIX] 从active_walks中移除，不delete（Buffer entry可能指向该task）
+                ptw_walks_mtx.lock();
+                ptw_active_walks.erase(task->task_id);
+                ptw_walks_mtx.unlock();
                 goto skip_walk_cleanup;
             }
             
@@ -1151,32 +1172,85 @@ void iommu_top::ptw_rsp_process_thread() {
 
         // ========== Unified walk result handling ==========
         if (walk_fault) {
-            printf("[PTW_RSP] task_id=%u -> WALK FAULT, cause=%d, total_reads=%u\n",
-                   task->task_id, task->cause, task->walk_ctx.ddr_read_count);
+            printf("[PTW_RSP] task_id=%u -> WALK FAULT, cause=%d, total_reads=%u, is_pf=%d\n",
+                   task->task_id, task->cause, task->walk_ctx.ddr_read_count,
+                   task->walk_ctx.is_prefetch_task);
             fflush(stdout);
             task->state = TASK_FAULT;
             ptw_walks_mtx.lock();
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
-            ptw_outstanding_task_count--;
+            
+            // [FIX] 仅非预取任务递减outstanding计数
+            // 预取任务不经过ptw_req_thread，未递增该计数器
+            if (!task->walk_ctx.is_prefetch_task) {
+                ptw_outstanding_task_count--;
+                ptw_task_completed_event.notify(SC_ZERO_TIME);
+            }
             ptw_total_completed++;  // [STAT]
-            // [STAT] 累加PTW完成统计（walk fault）
             ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
             { auto _s = ptw_task_start_ns.find(task->task_id);
               if (_s != ptw_task_start_ns.end()) {
                   ptw_total_exec_ns += sc_time_stamp().to_seconds()*1e9 - _s->second;
                   ptw_task_start_ns.erase(_s); } }
-            ptw_task_completed_event.notify(SC_ZERO_TIME);
             
-            // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
+            // [FIX] 预取任务fault: 递减group.pending_tasks并通知monitor
+            if (task->walk_ctx.is_prefetch_task) {
+                if (task->walk_ctx.prefetch_group_id != 0) {
+                    uint32_t group_id = task->walk_ctx.prefetch_group_id;
+                    uint32_t task_idx = task->walk_ctx.prefetch_idx;
+                    prefetch_group_mtx.lock();
+                    auto git = prefetch_groups.find(group_id);
+                    if (git != prefetch_groups.end()) {
+                        auto& group = git->second;
+                        // 保存无效结果
+                        group.vs_ptes[task_idx].raw = 0;
+                        group.g_ptes[task_idx].raw = 0;
+                        group.pas[task_idx] = 0;
+                        group.pending_tasks--;
+                        printf("[PTW_PREFETCH] Prefetch task %u fault in group %u, pending=%u\n",
+                               task->task_id, group_id, group.pending_tasks);
+                        if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
+                            group.completed = true;
+                            prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                        }
+                    }
+                    prefetch_group_mtx.unlock();
+                }
+                goto skip_walk_cleanup;
+            }
+            
+            // [FIX] 非预取任务fault处理
+            // 如果该任务是预取组的main_task，不能直接转发（monitor还需要访问task指针）
+            // 标记组为fault完成，由monitor统一处理转发和释放
+            if (task->walk_ctx.prefetch_group_id != 0 || task->walk_ctx.is_two_stage_prefetch) {
+                uint32_t group_id = task->walk_ctx.prefetch_group_id;
+                if (group_id != 0) {
+                    prefetch_group_mtx.lock();
+                    auto git = prefetch_groups.find(group_id);
+                    if (git != prefetch_groups.end()) {
+                        auto& group = git->second;
+                        group.main_task_done = true;
+                        group.pending_tasks = 0;
+                        group.completed = true;
+                        group.has_fault = true;
+                        printf("[PTW_PREFETCH] Main task %u fault in group %u, marked group as faulted.\n",
+                               task->task_id, group_id);
+                        fflush(stdout);
+                        prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                    }
+                    prefetch_group_mtx.unlock();
+                }
+                // 不转发、不写pt_update_fifo - 由monitor处理
+                goto skip_walk_cleanup;
+            }
+            
+            // 普通非预取任务fault: 正常转发
             iommu::CacheMessage pt_update_req = task_to_pt_update(task);
-            pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
+            pt_update_req.timestamp = sc_time_stamp();
             cache_sub.pt_update_fifo.write(pt_update_req);
             
-            // Also route to forwarder after PT update
-            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
             pt_cache_to_fwd_fifo.write(task);
-            // VA Dedup: 恢复挂起的同页任务(fault)
             va_dedup_recover(task, true);
         }
         else if (walk_complete) {
@@ -1242,11 +1316,16 @@ void iommu_top::ptw_rsp_process_thread() {
                 
                 prefetch_group_mtx.unlock();
                 
-                // 预取任务直接释放(不经过后续流程)
+                // [FIX] 预取任务处理
                 if (task->walk_ctx.is_prefetch_task) {
-                    printf("[PTW_PREFETCH] Prefetch task %u completed, freeing.\n", task->task_id);
+                    // 从active_walks中移除（预取任务已完成walk）
+                    ptw_walks_mtx.lock();
+                    ptw_active_walks.erase(rsp.task_id);
+                    ptw_walks_mtx.unlock();
+                    // 不delete! Buffer entry可能仍指向该task
+                    // flush_dedup_buffer_by_iova会检查is_prefetch_task并释放
+                    printf("[PTW_PREFETCH] Prefetch task %u completed, deferred to flush.\n", task->task_id);
                     fflush(stdout);
-                    delete task;
                     goto skip_walk_cleanup;
                 }
                 // 主任务继续后续流程(由monitor thread释放)
@@ -1411,7 +1490,8 @@ void iommu_top::ptw_rsp_process_thread() {
             
             // [early spawn] 主任务已通过early spawn初始化预取组，
             // 跳过normal cleanup路径，由monitor线程统一处理outstanding递减
-            if (task->walk_ctx.is_two_stage_prefetch) {
+            // [FIX] 只有当walk_complete=true时才跳转，need_next_ddr时应继续发送DDR请求
+            if (task->walk_ctx.is_two_stage_prefetch && walk_complete) {
                 ptw_walks_mtx.lock();
                 ptw_active_walks.erase(rsp.task_id);
                 ptw_walks_mtx.unlock();
@@ -1681,13 +1761,10 @@ void iommu_top::ptw_rsp_process_thread() {
               } }
             ptw_task_completed_event.notify(SC_ZERO_TIME);
             
-            // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
-            iommu::CacheMessage pt_update_req = task_to_pt_update(task);
-            pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
-            cache_sub.pt_update_fifo.write(pt_update_req);
-            
             // =====================================================================
             // [D=0] 无预取场景: 直接flush Buffer链表并释放entry
+            // [FIX] 必须先flush释放Buffer entry, 再写pt_update_fifo
+            //       避免pt_update_fifo满时阻塞导致Buffer无法释放的死锁
             // =====================================================================
             if (!task->walk_ctx.prefetch_enabled || task->walk_ctx.prefetch_depth == 0) {
                 // D=0: 没有预取组,直接flush主任务的Buffer链表
@@ -1711,6 +1788,11 @@ void iommu_top::ptw_rsp_process_thread() {
                     flush_dedup_buffer_chain(head_idx, task->task_id, task, &main_iova, 1);
                 }
             }
+            
+            // [FIX] PT Cache更新放在flush之后, 确保Buffer entry已释放
+            iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+            pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
+            cache_sub.pt_update_fifo.write(pt_update_req);
             
             // =====================================================================
             // Update Walker Cache (如果启用)
@@ -1771,6 +1853,18 @@ void iommu_top::prefetch_group_monitor_thread() {
         // 等待预取组完成事件
         wait(prefetch_group_completed_event);
         
+        // [FIX] 收集待处理的组数据，在持锁期间完成Buffer刷新和组删除
+        // 释放锁后再写pt_update_fifo，避免FIFO满时持锁阻塞导致死锁
+        struct pending_group_update {
+            uint32_t group_id;
+            iommu_task_t* main_task;
+            iommu::TransStage stage;
+            bool sv48;
+            bool gstage_x4;
+            std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
+        };
+        std::vector<pending_group_update> deferred_updates;
+        
         prefetch_group_mtx.lock();
         
         // 查找已完成的组 (Burst预取方案)
@@ -1784,8 +1878,6 @@ void iommu_top::prefetch_group_monitor_thread() {
                        group_id, group.total_tasks);
                 fflush(stdout);
                 
-                // ========== 批量更新PT Cache ==========
-                // 注意: pt_updates已在PTW_PREFETCH_WAIT状态中填充
                 auto* main_task = group.main_task;
                 
                 // [FIX] 安全检查
@@ -1796,7 +1888,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                     continue;
                 }
                 
-                // [FIX] 动态计算stage（与task_to_pt_request保持一致）
+                // 动态计算stage
                 bool sv48 = (main_task->iosatp.MODE == IOSATP_Sv48);
                 bool gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4);
                 bool stage1_bare = (main_task->iosatp.MODE == RVI_IOMMU_IOSATP_Bare);
@@ -1810,13 +1902,17 @@ void iommu_top::prefetch_group_monitor_thread() {
                     stage = iommu::TransStage::STAGE1_ONLY;
                 }
                 
-                std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
+                // 收集batch_updates数据
+                pending_group_update pgu;
+                pgu.group_id = group_id;
+                pgu.main_task = main_task;
+                pgu.stage = stage;
+                pgu.sv48 = sv48;
+                pgu.gstage_x4 = gstage_x4;
                 
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     uint64_t iova = group.group_iovas[i];
-                    
                     iommu::PTData pt_data;
-                    // 两阶段预取: 结果在group arrays中; 单阶段burst: 在pt_updates中
                     if (main_task->walk_ctx.is_two_stage_prefetch) {
                         pt_data.vs_pte.raw = group.vs_ptes[i].raw;
                         pt_data.g_pte.raw = group.g_ptes[i].raw;
@@ -1827,32 +1923,24 @@ void iommu_top::prefetch_group_monitor_thread() {
                     pt_data.reserved.raw = 0;
                     pt_data.reserved.valid = 1;
                     pt_data.reserved.trans_type = static_cast<uint32_t>(stage);
-                    pt_data.reserved.input_page_size = 0;  // 4KB
-                    pt_data.reserved.result_page_size = 0;  // 4KB
+                    pt_data.reserved.input_page_size = 0;
+                    pt_data.reserved.result_page_size = 0;
                     pt_data.reserved.iova_is_va = 1;
-                    pt_data.reserved.sv48 = (main_task->iosatp.MODE == IOSATP_Sv48) ? 1U : 0U;
-                    pt_data.reserved.gstage_x4 = (main_task->iohgatp.MODE == IOHGATP_Sv48x4) ? 1U : 0U;
-                    pt_data.reserved.is_ph = 0;  // 常规CL
-                    
-                    batch_updates.push_back({iova, pt_data});
+                    pt_data.reserved.sv48 = sv48 ? 1U : 0U;
+                    pt_data.reserved.gstage_x4 = gstage_x4 ? 1U : 0U;
+                    pt_data.reserved.is_ph = 0;
+                    pgu.batch_updates.push_back({iova, pt_data});
                     
                     printf("[PTW_PREFETCH_MONITOR] Batch update[%u]: iova=0x%lx, vs_ppn=0x%lx, g_ppn=0x%lx\n",
                            i, iova,
                            main_task->walk_ctx.is_two_stage_prefetch ? group.vs_ptes[i].PPN : main_task->walk_ctx.pt_updates[i].vs_pte.PPN,
                            main_task->walk_ctx.is_two_stage_prefetch ? (uint64_t)group.g_ptes[i].PPN : (uint64_t)main_task->walk_ctx.pt_updates[i].g_pte.PPN);
-                    fflush(stdout);
                 }
+                fflush(stdout);
                 
-                // ========== [方案A] 对1+D个IOVA直接扫描Buffer刷新 ==========
-                // Monitor不查询PT Cache，直接扫描Buffer中匹配IOVA的entry
-                // 避免Monitor与pt_scheduler_thread之间的PT Cache状态竞争
-                // 使用forwarded_task_ids防止PTW路径和flush路径重复转发
-                
-                // [STAT] 保存phase_tracker_并设置为PTW_MONITOR阶段(2)（仅用于统计）
+                // [STAT] phase_tracker
                 int saved_phase = cache_sub.pt_cache().current_phase();
                 cache_sub.pt_cache().set_current_phase(2);
-                
-                // 日志：记录1+D个IOVA的处理
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     uint64_t iova = group.group_iovas[i];
                     if (iova == 0) continue;
@@ -1860,11 +1948,9 @@ void iommu_top::prefetch_group_monitor_thread() {
                            group_id, iova);
                 }
                 fflush(stdout);
-                
-                // [STAT] 恢复phase_tracker_
                 cache_sub.pt_cache().set_current_phase(saved_phase);
                 
-                // ========== PTW任务统计（在PT Cache update之前计算，避免包含PT Cache延时）==========
+                // PTW任务统计
                 ptw_outstanding_task_count--;
                 ptw_total_completed++;
                 ptw_total_ddr_reads += main_task->walk_ctx.ddr_read_count;
@@ -1885,29 +1971,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                   } }
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
                 
-                // ========== 异步更新PT Cache（通过FIFO解耦，不阻塞PTW线程）==========
-                for (const auto& [iova, pt_data] : batch_updates) {
-                    iommu::CacheMessage update_msg;
-                    update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
-                    update_msg.task_id = main_task->task_id;
-                    update_msg.gscid = main_task->GSCID;
-                    update_msg.pscid = main_task->PSCID;
-                    update_msg.iova = iova;
-                    update_msg.stage = stage;
-                    update_msg.pt_sv48 = sv48;
-                    update_msg.pt_gstage_x4 = gstage_x4;
-                    update_msg.pt_data = pt_data;
-                    update_msg.from_prefetch = false;
-                    update_msg.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
-                    cache_sub.pt_update_fifo.write(update_msg);
-                }
-                printf("[PTW_PREFETCH_MONITOR] Group %u: sent %zu async PT Cache updates via FIFO\n",
-                       group_id, batch_updates.size());
-                fflush(stdout);
-                
-                // ========== [方案A] 扫描Buffer刷新所有匹配IOVA的entry ==========
-                // 对每个IOVA扫描Buffer，找到匹配的entry并刷新
-                // 使用forwarded_task_ids防止重复转发
+                // ========== 先扫描Buffer刷新entry（持锁期间完成）==========
                 uint32_t flushed_iova_count = 0;
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     uint64_t iova = group.group_iovas[i];
@@ -1916,18 +1980,55 @@ void iommu_top::prefetch_group_monitor_thread() {
                                               group.group_iovas, group.total_tasks);
                     flushed_iova_count++;
                 }
-                
                 printf("[PTW_PREFETCH_MONITOR] Group %u completed, scanned %u IOVAs for buffer flush.\n",
                        group_id, flushed_iova_count);
                 fflush(stdout);
                 
-                // 删除组记录
+                // 删除组记录（持锁期间完成）
+                deferred_updates.push_back(std::move(pgu));
                 it = prefetch_groups.erase(it);
             } else {
                 ++it;
             }
         }
         
+        // ========== [FIX] 释放mutex后再写pt_update_fifo ==========
+        // 避免pt_update_fifo满时Monitor持锁阻塞，导致其他组无法被处理
         prefetch_group_mtx.unlock();
+        
+        // 异步更新PT Cache（无锁状态下写入FIFO）
+        for (auto& pgu : deferred_updates) {
+            // [FIX] 存储IOVA→PA映射到共享表, 供占位CL转换回调使用
+            // 解决时序竞争: 任务在monitor flush之后、batch update处理之前到达,
+            // 导致永远卡在buffer中的问题.
+            pt_pa_lookup_mtx.lock();
+            for (uint32_t i = 0; i < pgu.main_task->walk_ctx.prefetch_total; i++) {
+                uint64_t iova = pgu.main_task->walk_ctx.pt_updates[i].iova & ~0xFFFULL;
+                uint64_t pa = pgu.main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL;
+                if (iova != 0) {
+                    pt_iova_pa_map[iova] = pa;
+                }
+            }
+            pt_pa_lookup_mtx.unlock();
+            
+            for (const auto& [iova, pt_data] : pgu.batch_updates) {
+                iommu::CacheMessage update_msg;
+                update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
+                update_msg.task_id = pgu.main_task->task_id;
+                update_msg.gscid = pgu.main_task->GSCID;
+                update_msg.pscid = pgu.main_task->PSCID;
+                update_msg.iova = iova;
+                update_msg.stage = pgu.stage;
+                update_msg.pt_sv48 = pgu.sv48;
+                update_msg.pt_gstage_x4 = pgu.gstage_x4;
+                update_msg.pt_data = pt_data;
+                update_msg.from_prefetch = false;
+                update_msg.timestamp = sc_time_stamp();
+                cache_sub.pt_update_fifo.write(update_msg);
+            }
+            printf("[PTW_PREFETCH_MONITOR] Group %u: sent %zu async PT Cache updates via FIFO\n",
+                   pgu.group_id, pgu.batch_updates.size());
+            fflush(stdout);
+        }
     }
 }
