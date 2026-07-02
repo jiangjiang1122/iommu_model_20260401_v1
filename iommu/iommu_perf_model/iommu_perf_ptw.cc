@@ -1998,19 +1998,6 @@ void iommu_top::prefetch_group_monitor_thread() {
         
         // 异步更新PT Cache（无锁状态下写入FIFO）
         for (auto& pgu : deferred_updates) {
-            // [FIX] 存储IOVA→PA映射到共享表, 供占位CL转换回调使用
-            // 解决时序竞争: 任务在monitor flush之后、batch update处理之前到达,
-            // 导致永远卡在buffer中的问题.
-            pt_pa_lookup_mtx.lock();
-            for (uint32_t i = 0; i < pgu.main_task->walk_ctx.prefetch_total; i++) {
-                uint64_t iova = pgu.main_task->walk_ctx.pt_updates[i].iova & ~0xFFFULL;
-                uint64_t pa = pgu.main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL;
-                if (iova != 0) {
-                    pt_iova_pa_map[iova] = pa;
-                }
-            }
-            pt_pa_lookup_mtx.unlock();
-            
             for (const auto& [iova, pt_data] : pgu.batch_updates) {
                 iommu::CacheMessage update_msg;
                 update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;

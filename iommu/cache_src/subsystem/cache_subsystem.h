@@ -13,7 +13,6 @@
 #include "cache/walker_cache.h"
 
 #include <memory>
-#include <functional>
 
 namespace iommu {
 
@@ -80,12 +79,6 @@ public:
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     void set_pt_dedup_enabled(bool enabled) { pt_dedup_enabled_ = enabled; }
-    
-    // [FIX] 占位CL转换回调: 当batch update将is_req=1的占位CL转为常规CL时,
-    // 通知顶层flush buffer中等待的任务
-    using PlaceholderFlushCallback = std::function<void(uint64_t iova, gscid_t gscid, pscid_t pscid,
-                                                        TransStage stage, const PTData& pt_data)>;
-    void set_placeholder_flush_callback(PlaceholderFlushCallback cb) { placeholder_flush_cb_ = cb; }
 
     // [STAT] PT Scheduler任务间隔分析报告
     void print_pt_scheduler_gap_report() const;
@@ -176,7 +169,6 @@ private:
     // NEW: PT Cache去重相关成员
     DedupBuffer* dedup_buffer_ = nullptr;
     bool pt_dedup_enabled_ = false;
-    PlaceholderFlushCallback placeholder_flush_cb_ = nullptr;  // [FIX] 占位CL转换回调
 
     // [STAT] PT Scheduler任务间隔分析 (gap = 当前任务start - 上一任务end)
     double   pt_sched_first_start_ns_ = -1.0;   // 第一笔任务开始时刻

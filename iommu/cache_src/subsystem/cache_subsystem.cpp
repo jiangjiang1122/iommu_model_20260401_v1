@@ -115,7 +115,7 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       msi_response_fifo(1),
       dc_update_fifo(1),
       pc_update_fifo(1),
-      pt_update_fifo(1),
+      pt_update_fifo(16),
       walker_update_fifo(1),
       msi_update_fifo(1),
       dc_invalidate_fifo(1),
@@ -367,8 +367,39 @@ void CacheSubsystem::pt_scheduler_thread() {
                 push_fifo(pt_miss_response_fifo, resp);
             }
             processed = true;
+            
+            // [FIX] 处理完REQUEST后，排空pending UPDATEs
+            // 防止pt_update_fifo堆积导致Monitor/PTW线程阻塞
+            while (pt_update_fifo.num_available() > 0) {
+                CacheMessage upd = pt_update_fifo.read();
+                const sc_time upd_dequeue_time = sc_time_stamp();
+                const double upd_start_ns = upd_dequeue_time.to_seconds() * 1e9;
+                double upd_fifo_wait_ns = upd_start_ns - upd.timestamp.to_seconds() * 1e9;
+                stats_.accumulate_phase_task_wait("pt_cache", 1, upd_fifo_wait_ns);
+                trace_task_event("begin", "pt_cache", "update", upd, upd_dequeue_time);
+                CacheMessage upd_resp = execute_pt_update_request(upd);
+                const sc_time upd_end = sc_time_stamp();
+                const double upd_end_ns = upd_end.to_seconds() * 1e9;
+                if (pt_sched_last_task_end_ >= 0.0) {
+                    double gap_ns = upd_start_ns - pt_sched_last_task_end_;
+                    if (gap_ns > 0.0) {
+                        pt_sched_total_gap_ns_ += gap_ns;
+                        pt_sched_gap_count_++;
+                        if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
+                    }
+                }
+                if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = upd_start_ns;
+                pt_sched_last_end_ns_ = upd_end_ns;
+                pt_sched_total_exec_ns_ += (upd_end_ns - upd_start_ns);
+                pt_sched_task_count_++;
+                pt_sched_upd_count_++;
+                pt_sched_last_task_end_ = upd_end_ns;
+                record_task_completion("pt_cache", upd_dequeue_time, upd_end);
+                stats_.record_pt_phase_timestamp("pt_cache", 1, upd_start_ns, upd_end_ns);
+                trace_task_event("end", "pt_cache", "update", upd, upd_dequeue_time, &upd_resp);
+            }
         }
-        // 2. 处理 UPDATE 请求
+        // 2. 处理 UPDATE 请求（无REQUEST时）
         else if (pt_update_fifo.num_available() > 0) {
             req = pt_update_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
@@ -661,20 +692,8 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
             uint8_t is_req = data.reserved.is_req;
             
             // [V3.0] 分支3 - 预取占位CL (is_req=0),首次有任务访问
-            // [FIX] 检查placeholder是否包含有效PTE数据
-            // 如果预取任务因PTE无效提前退出，placeholder的vs_pte和g_pte均为0
-            // 此时不能当作有效HIT，应转为MISS触发PTW获取正确翻译
             if (is_req == 0) {
-                if (data.vs_pte.raw == 0 && data.g_pte.raw == 0) {
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> EMPTY prefetch placeholder (is_req=0, PTE=0), treat as MISS\n",
-                           req.task_id);
-                    fflush(stdout);
-                    resp.hit = false;
-                    resp.pt_data = data;
-                    return resp;
-                }
-                
-                printf("[PT_CACHE_EXECUTE] task_id=%u -> HIT prefetch placeholder (is_req=0, PTE=VALID)\n",
+                printf("[PT_CACHE_EXECUTE] task_id=%u -> HIT prefetch placeholder (is_req=0)\n",
                        req.task_id);
                 fflush(stdout);
                 
@@ -965,7 +984,6 @@ CacheMessage CacheSubsystem::execute_pt_update_request(const CacheMessage& req) 
     pt_cache_->set_current_phase(1);
 
     pt_cache_->fill_pt(req.gscid, req.pscid, req.iova, req.stage, req.pt_data, req.from_prefetch);
-    
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_UPDATE_RESPONSE;
     resp.task_id = req.task_id;

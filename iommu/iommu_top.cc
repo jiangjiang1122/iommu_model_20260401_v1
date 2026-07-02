@@ -45,14 +45,6 @@ void iommu_top::before_end_of_elaboration()
     }
 
     iommu_inst.reg_file.ddtp.iommu_mode = DDT_1LVL;
-    
-    // [DEBUG] 临时禁用callback注册, 排查崩溃原因
-    //cache_sub.set_placeholder_flush_callback(
-    //    [this](uint64_t iova, iommu::gscid_t gscid, iommu::pscid_t pscid,
-    //           iommu::TransStage stage, const iommu::PTData& pt_data) {
-    //        this->on_placeholder_converted(iova, gscid, pscid, stage, pt_data);
-    //    }
-    //);
 }
 
 /**********************************************/
@@ -554,93 +546,6 @@ void iommu_top::va_dedup_recover(iommu_task_t* completed_task, bool is_fault) {
                pending.size(), key.page_iova);
         fflush(stdout);
     }
-}
-
-/**********************************************/
-// on_placeholder_converted - 占位CL转换回调
-//
-// 当batch update将is_req=1的占位CL转为常规CL时,
-// 扫描buffer中是否有等待该IOVA的任务, 如果有则计算PA并转发.
-// 解决时序竞争: 任务在monitor flush之后、batch update处理之前到达,
-// 导致永远卡在buffer中的问题.
-/**********************************************/
-void iommu_top::on_placeholder_converted(uint64_t iova, iommu::gscid_t gscid, iommu::pscid_t pscid,
-                                          iommu::TransStage stage, const iommu::PTData& pt_data) {
-    uint64_t iova_aligned = iova & ~0xFFFULL;
-    
-    // 从共享映射表中查找PA
-    uint64_t page_pa = 0;
-    bool found_pa = false;
-    
-    pt_pa_lookup_mtx.lock();
-    auto it = pt_iova_pa_map.find(iova_aligned);
-    if (it != pt_iova_pa_map.end()) {
-        page_pa = it->second;
-        found_pa = true;
-    }
-    pt_pa_lookup_mtx.unlock();
-    
-    if (!found_pa) {
-        printf("[PLACEHOLDER_CB] iova=0x%lx -> PA not found in map, skip callback flush\n", iova_aligned);
-        fflush(stdout);
-        return;
-    }
-    
-    // 扫描buffer, 查找匹配该IOVA的等待任务
-    auto* dedup_buf = cache_sub.get_pt_dedup_buffer();
-    if (dedup_buf == nullptr) return;
-    
-    uint32_t flushed = 0;
-    for (uint32_t idx = 0; idx < PT_DEDUP_BUFFER_SIZE; idx++) {
-        auto& entry = dedup_buf->entries[idx];
-        if (!entry.is_valid()) continue;
-        
-        uint64_t entry_iova_aligned = entry.iova & ~0xFFFULL;
-        if (entry_iova_aligned != iova_aligned) continue;
-        
-        iommu_task_t* pending_task = entry.task_ptr;
-        if (pending_task == nullptr) continue;
-        
-        // 跳过预取任务（预取任务不经过reorder，不应转发）
-        if (pending_task->walk_ctx.is_prefetch_task) {
-            printf("[PLACEHOLDER_CB] entry[%u] prefetch task_id=%u -> skip, delete\n",
-                   idx, pending_task->task_id);
-            fflush(stdout);
-            dedup_buf->free_entry(idx);
-            delete pending_task;
-            flushed++;
-            continue;
-        }
-        
-        // 计算最终PA: 页基址 + 页内偏移
-        uint64_t offset = pending_task->iova & 0xFFFL;
-        uint64_t final_pa = page_pa | offset;
-        
-        pending_task->pa = final_pa;
-        // 从PTData的raw值构造spte_t/gpte_t
-        pending_task->vs_pte.raw = pt_data.vs_pte.raw;
-        pending_task->g_pte.raw = pt_data.g_pte.raw;
-        pending_task->page_sz = PAGE_SIZE_4KB;
-        pending_task->state = TASK_PTW_DONE;
-        
-        printf("[PLACEHOLDER_CB] task_id=%u -> PA=0x%lx (iova=0x%lx, page_base=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
-               pending_task->task_id, final_pa, pending_task->iova, page_pa, offset, idx);
-        fflush(stdout);
-        
-        dedup_buf->free_entry(idx);
-        pt_cache_to_fwd_fifo.write(pending_task);
-        flushed++;
-    }
-    
-    if (flushed > 0) {
-        printf("[PLACEHOLDER_CB] iova=0x%lx -> flushed %u waiting tasks\n", iova_aligned, flushed);
-        fflush(stdout);
-    }
-    
-    // 清理映射表（该IOVA已处理完毕）
-    pt_pa_lookup_mtx.lock();
-    pt_iova_pa_map.erase(iova_aligned);
-    pt_pa_lookup_mtx.unlock();
 }
 
 /**********************************************/
