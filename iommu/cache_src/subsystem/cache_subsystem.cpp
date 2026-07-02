@@ -310,14 +310,47 @@ void CacheSubsystem::pc_worker_thread() {
 
 // PT Cache 统一轮询调度线程
 // 合并 pt_worker_thread 和 pt_update_worker_thread，实现任务级串行
-// REQUEST 优先处理，UPDATE 次之
+// [FIX] UPDATE 优先处理，确保PT Cache状态最新，避免task看到旧的placeholder
 void CacheSubsystem::pt_scheduler_thread() {
     uint64_t pt_req_counter = 0;  // [STAT] REQUEST区间统计计数器
     while (true) {
         bool processed = false;
         CacheMessage req;
         
-        // 1. 优先处理 REQUEST 请求
+        // [FIX] 0. 优先排空pending UPDATE（确保PT Cache状态最新）
+        // 在处理REQUEST前先处理UPDATE，避免task命中旧的placeholder后被挂起无法唤醒
+        // 这修复了场景4(4KB随机+二阶段)中task 6408超时失败的时序问题
+        while (pt_update_fifo.num_available() > 0) {
+            req = pt_update_fifo.read();
+            const sc_time upd_dequeue_time = sc_time_stamp();
+            const double upd_start_ns = upd_dequeue_time.to_seconds() * 1e9;
+            double upd_fifo_wait_ns = upd_start_ns - req.timestamp.to_seconds() * 1e9;
+            stats_.accumulate_phase_task_wait("pt_cache", 1, upd_fifo_wait_ns);
+            trace_task_event("begin", "pt_cache", "update", req, upd_dequeue_time);
+            CacheMessage upd_resp = execute_pt_update_request(req);
+            const sc_time upd_end = sc_time_stamp();
+            const double upd_end_ns = upd_end.to_seconds() * 1e9;
+            if (pt_sched_last_task_end_ >= 0.0) {
+                double gap_ns = upd_start_ns - pt_sched_last_task_end_;
+                if (gap_ns > 0.0) {
+                    pt_sched_total_gap_ns_ += gap_ns;
+                    pt_sched_gap_count_++;
+                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
+                }
+            }
+            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = upd_start_ns;
+            pt_sched_last_end_ns_ = upd_end_ns;
+            pt_sched_total_exec_ns_ += (upd_end_ns - upd_start_ns);
+            pt_sched_task_count_++;
+            pt_sched_upd_count_++;
+            pt_sched_last_task_end_ = upd_end_ns;
+            record_task_completion("pt_cache", upd_dequeue_time, upd_end);
+            stats_.record_pt_phase_timestamp("pt_cache", 1, upd_start_ns, upd_end_ns);
+            trace_task_event("end", "pt_cache", "update", req, upd_dequeue_time, &upd_resp);
+            processed = true;
+        }
+
+        // 1. 处理 REQUEST 请求
         if (pt_request_fifo.num_available() > 0) {
             req = pt_request_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
