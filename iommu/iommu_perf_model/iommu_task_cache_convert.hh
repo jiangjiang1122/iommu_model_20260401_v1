@@ -36,4 +36,10 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task);
 // Convert iommu_task_t to CacheMessage for Walker Cache update
 iommu::CacheMessage task_to_walker_update(iommu_task_t* task);
 
+// [S2] S2 Walker Cache lookup request (G-stage explicit, GPA as key)
+iommu::CacheMessage task_to_s2_walker_request(iommu_task_t* task, uint64_t gpa);
+
+// [S2] S2 Walker Cache update request (G-stage explicit, GPA as key)
+iommu::CacheMessage task_to_s2_walker_update(iommu_task_t* task, uint64_t gpa);
+
 #endif // IOMMU_TASK_CACHE_CONVERT_HH

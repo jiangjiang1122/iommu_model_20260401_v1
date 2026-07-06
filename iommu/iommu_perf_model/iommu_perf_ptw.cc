@@ -700,10 +700,47 @@ void iommu_top::ptw_rsp_process_thread() {
                     // [两阶段预取] 保存VS L0表GPA基址（供预取任务计算顺序VS L0 PTE的GPA）
                     task->walk_ctx.vs_l0_gpa_base = task->walk_ctx.base_addr;
                     
-                    init_gstage_walk(task, task->gpa);
-                    task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
-                    task->walk_ctx.ddr_read_count++;
-                    need_next_ddr = true;
+                    // [S2] S2 Walker Cache lookup before GS_EXPLICIT
+                    bool s2_cache_hit = false;
+                    if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                        && task->iosatp.MODE != IOSATP_Bare) {
+                        iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                        cache_sub.walker_request_fifo.write(s2_req);
+                        iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                        
+                        if (s2_resp.hit) {
+                            s2_cache_hit = true;
+                            task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                            uint8_t GS_LEVELS = 0;
+                            uint16_t gs_vpn[5] = {0};
+                            extract_gs_vpn(task->gpa, task->iohgatp.MODE, gs_vpn, &GS_LEVELS);
+                            for (int k = 0; k < 5; k++) task->walk_ctx.gs_vpn[k] = gs_vpn[k];
+                            uint8_t gs_start_level = GS_LEVELS - 1 - s2_resp.walker_level;
+                            task->walk_ctx.gs_level = gs_start_level;
+                            task->walk_ctx.gs_base_addr = s2_resp.walker_data.next_ppn * PAGESIZE;
+                            uint64_t gs_pte_addr = task->walk_ctx.gs_base_addr +
+                                task->walk_ctx.gs_vpn[gs_start_level] * 8;
+                            task->walk_ctx.read_addr = gs_pte_addr;
+                            task->walk_ctx.read_size = 8;
+                            task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+                            task->walk_ctx.ddr_read_count++;
+                            need_next_ddr = true;
+                            printf("[PTW_RSP] task_id=%u, S2 Cache HIT level=%d -> GS_EXPLICIT from level=%d, addr=0x%lx\n",
+                                   task->task_id, s2_resp.walker_level, gs_start_level, gs_pte_addr);
+                            fflush(stdout);
+                        } else {
+                            task->walk_ctx.s2_walker_hit_level = 0;
+                            printf("[PTW_RSP] task_id=%u, S2 Cache MISS -> normal GS_EXPLICIT\n", task->task_id);
+                            fflush(stdout);
+                        }
+                    }
+                    
+                    if (!s2_cache_hit) {
+                        init_gstage_walk(task, task->gpa);
+                        task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+                        task->walk_ctx.ddr_read_count++;
+                        need_next_ddr = true;
+                    }
                     // [STAT] DDR access log - GS_EXPLICIT
                     if (task->walk_ctx.ddr_log_count < 8) {
                         task->walk_ctx.ddr_log_type[task->walk_ctx.ddr_log_count] = 4; // GS_EXPLICIT
@@ -1007,16 +1044,52 @@ void iommu_top::ptw_rsp_process_thread() {
             task->vs_pte.PPN = vs_pte.PPN;
             task->gpa = data_page_gpa;
             
-            // 初始化G-stage walk（将数据页GPA翻译为SPA）
-            init_gstage_walk(task, data_page_gpa);
-            task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
-            task->walk_ctx.ddr_read_count++;  // DDR #2: G-stage开始
+            // [S2] S2 Walker Cache lookup before GS_EXPLICIT (prefetch path)
+            bool s2_pf_hit = false;
+            if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                && task->iosatp.MODE != IOSATP_Bare) {
+                iommu::CacheMessage s2_req = task_to_s2_walker_request(task, data_page_gpa);
+                cache_sub.walker_request_fifo.write(s2_req);
+                iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                
+                if (s2_resp.hit) {
+                    s2_pf_hit = true;
+                    task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                    uint8_t GS_LEVELS = 0;
+                    uint16_t gs_vpn[5] = {0};
+                    extract_gs_vpn(data_page_gpa, task->iohgatp.MODE, gs_vpn, &GS_LEVELS);
+                    for (int k = 0; k < 5; k++) task->walk_ctx.gs_vpn[k] = gs_vpn[k];
+                    uint8_t gs_start_level = GS_LEVELS - 1 - s2_resp.walker_level;
+                    task->walk_ctx.gs_level = gs_start_level;
+                    task->walk_ctx.gs_base_addr = s2_resp.walker_data.next_ppn * PAGESIZE;
+                    uint64_t gs_pte_addr = task->walk_ctx.gs_base_addr +
+                        task->walk_ctx.gs_vpn[gs_start_level] * 8;
+                    task->walk_ctx.read_addr = gs_pte_addr;
+                    task->walk_ctx.read_size = 8;
+                    task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+                    task->walk_ctx.ddr_read_count++;
+                    need_next_ddr = true;
+                    printf("[PTW_2STAGE_PF] task_id=%u, S2 Cache HIT level=%d -> GS_EXPLICIT from level=%d\n",
+                           task->task_id, s2_resp.walker_level, gs_start_level);
+                    fflush(stdout);
+                } else {
+                    task->walk_ctx.s2_walker_hit_level = 0;
+                }
+            }
+            
+            if (!s2_pf_hit) {
+                // 初始化G-stage walk（将数据页GPA翻译为SPA）
+                init_gstage_walk(task, data_page_gpa);
+                task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+                task->walk_ctx.ddr_read_count++;  // DDR #2: G-stage开始
+                need_next_ddr = true;
+            }
             
             printf("[PTW_2STAGE_PF] task_id=%u, VS_PTE_READ -> GS_EXPLICIT, data_gpa=0x%lx, ddr_count=%u\n",
                    task->task_id, data_page_gpa, task->walk_ctx.ddr_read_count);
             fflush(stdout);
             
-            need_next_ddr = true;
             break;
         }
 
@@ -1114,6 +1187,22 @@ void iommu_top::ptw_rsp_process_thread() {
                     task->iotval2 = (task->gpa & ~0x3ULL);
                     walk_fault = true;
                     break;
+                }
+                // [S2] Save intermediate GS walk results for S2 Cache update
+                // gs_level=3 result → ptwc1 (highest intermediate)
+                // gs_level=2 result → ptwc2
+                // gs_level=1 result → ptwc3 (lowest intermediate, closest to leaf)
+                if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED) {
+                    if (task->walk_ctx.gs_level == 3) {
+                        task->walk_ctx.s2_walker_cache_entries.s2_ppn_level1 = gs_pte.PPN;
+                        task->walk_ctx.s2_walker_cache_entries.s2_valid_level1 = true;
+                    } else if (task->walk_ctx.gs_level == 2) {
+                        task->walk_ctx.s2_walker_cache_entries.s2_ppn_level2 = gs_pte.PPN;
+                        task->walk_ctx.s2_walker_cache_entries.s2_valid_level2 = true;
+                    } else if (task->walk_ctx.gs_level == 1) {
+                        task->walk_ctx.s2_walker_cache_entries.s2_ppn_level3 = gs_pte.PPN;
+                        task->walk_ctx.s2_walker_cache_entries.s2_valid_level3 = true;
+                    }
                 }
                 task->walk_ctx.gs_level--;
                 if (task->walk_ctx.gs_level < 0) {
@@ -1375,6 +1464,18 @@ void iommu_top::ptw_rsp_process_thread() {
                            (unsigned long long)sc_core::sc_time_stamp().value()/1000,
                            task->task_id);
                     fflush(stdout);
+                }
+                // [S2] S2 Walker Cache update (Two-stage PF path)
+                if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                    && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                    && task->iosatp.MODE != IOSATP_Bare) {
+                    iommu::CacheMessage s2_req = task_to_s2_walker_update(task, task->gpa);
+                    if (s2_req.walker_update_kind != iommu::WalkerUpdateKind::NONE) {
+                        cache_sub.walker_update_fifo.write(s2_req);
+                        printf("[t=%llu ns][PTW_RSP] task_id=%u -> S2 Walker Cache UPDATE (Two-stage PF path)\n",
+                               (unsigned long long)sc_core::sc_time_stamp().value()/1000, task->task_id);
+                        fflush(stdout);
+                    }
                 }
                 
                 // 3. 创建D个预取任务：先SPA读VS L0 PTE，再G-stage walk数据页GPA（共5次DDR）
@@ -1814,6 +1915,20 @@ void iommu_top::ptw_rsp_process_thread() {
                        task->walk_ctx.walker_cache_entries.valid_level0);
                 fflush(stdout);
             }
+            // [S2] S2 Walker Cache update (normal walk complete path)
+            if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                && task->iosatp.MODE != IOSATP_Bare) {
+                iommu::CacheMessage s2_req = task_to_s2_walker_update(task, task->gpa);
+                if (s2_req.walker_update_kind != iommu::WalkerUpdateKind::NONE) {
+                    cache_sub.walker_update_fifo.write(s2_req);
+                    printf("[t=%llu ns][PTW_RSP] task_id=%u -> S2 Walker Cache UPDATE (gpa=0x%lx, kind=%d)\n",
+                           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                           task->task_id, task->gpa,
+                           static_cast<int>(s2_req.walker_update_kind));
+                    fflush(stdout);
+                }
+            }
             
             // Also route to forwarder after PT update
             // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
@@ -1853,8 +1968,9 @@ void iommu_top::prefetch_group_monitor_thread() {
         // 等待预取组完成事件
         wait(prefetch_group_completed_event);
         
-        // [FIX] 收集待处理的组数据，在持锁期间完成Buffer刷新和组删除
-        // 释放锁后再写pt_update_fifo，避免FIFO满时持锁阻塞导致死锁
+        // [FIX-V2] 收集待处理的组数据
+        // 两阶段模式: 持锁仅收集数据+标记处理中, 释放锁后再执行flush和FIFO写入
+        // 彻底避免FIFO满时持锁阻塞导致PTW响应线程死锁
         struct pending_group_update {
             uint32_t group_id;
             iommu_task_t* main_task;
@@ -1862,6 +1978,9 @@ void iommu_top::prefetch_group_monitor_thread() {
             bool sv48;
             bool gstage_x4;
             std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
+            // [FIX-V2] 保存flush参数, 在无锁阶段执行
+            std::vector<uint64_t> group_iovas;
+            uint32_t total_tasks;
         };
         std::vector<pending_group_update> deferred_updates;
         
@@ -1938,6 +2057,12 @@ void iommu_top::prefetch_group_monitor_thread() {
                 }
                 fflush(stdout);
                 
+                // [FIX-V2] 保存flush参数到deferred结构, 在无锁阶段执行
+                pgu.total_tasks = group.total_tasks;
+                for (uint32_t i = 0; i < group.total_tasks; i++) {
+                    pgu.group_iovas.push_back(group.group_iovas[i]);
+                }
+                
                 // [STAT] phase_tracker
                 int saved_phase = cache_sub.pt_cache().current_phase();
                 cache_sub.pt_cache().set_current_phase(2);
@@ -1971,18 +2096,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                   } }
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
                 
-                // ========== 先扫描Buffer刷新entry（持锁期间完成）==========
-                uint32_t flushed_iova_count = 0;
-                for (uint32_t i = 0; i < group.total_tasks; i++) {
-                    uint64_t iova = group.group_iovas[i];
-                    if (iova == 0) continue;
-                    flush_dedup_buffer_by_iova(iova, group_id, main_task,
-                                              group.group_iovas, group.total_tasks);
-                    flushed_iova_count++;
-                }
-                printf("[PTW_PREFETCH_MONITOR] Group %u completed, scanned %u IOVAs for buffer flush.\n",
-                       group_id, flushed_iova_count);
-                fflush(stdout);
+                // [FIX-V2] Buffer刷新移到无锁阶段执行（避免FIFO满时持锁阻塞）
                 
                 // 删除组记录（持锁期间完成）
                 deferred_updates.push_back(std::move(pgu));
@@ -1992,12 +2106,26 @@ void iommu_top::prefetch_group_monitor_thread() {
             }
         }
         
-        // ========== [FIX] 释放mutex后再写pt_update_fifo ==========
-        // 避免pt_update_fifo满时Monitor持锁阻塞，导致其他组无法被处理
+        // ========== 释放mutex ==========
         prefetch_group_mtx.unlock();
         
-        // 异步更新PT Cache（无锁状态下写入FIFO）
+        // ========== [FIX-V2] 无锁阶段: 先flush Buffer, 再更新PT Cache ==========
+        // flush必须在pt_update之前, 确保Buffer entry先释放
         for (auto& pgu : deferred_updates) {
+            // Step 1: 扫描Buffer刷新entry（无锁状态, FIFO满时阻塞不会死锁）
+            uint32_t flushed_iova_count = 0;
+            for (uint32_t i = 0; i < pgu.total_tasks; i++) {
+                uint64_t iova = pgu.group_iovas[i];
+                if (iova == 0) continue;
+                flush_dedup_buffer_by_iova(iova, pgu.group_id, pgu.main_task,
+                                          pgu.group_iovas.data(), pgu.total_tasks);
+                flushed_iova_count++;
+            }
+            printf("[PTW_PREFETCH_MONITOR] Group %u completed, scanned %u IOVAs for buffer flush.\n",
+                   pgu.group_id, flushed_iova_count);
+            fflush(stdout);
+            
+            // Step 2: 异步更新PT Cache（无锁状态下写入FIFO）
             for (const auto& [iova, pt_data] : pgu.batch_updates) {
                 iommu::CacheMessage update_msg;
                 update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;

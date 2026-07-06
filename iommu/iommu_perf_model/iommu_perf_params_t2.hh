@@ -109,6 +109,7 @@ static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstan
 
 // ===================== PTW模块参数 =====================
 static const bool PTW_WALKER_CACHE_ENABLED = true;           // Walker Cache开关（true=启用，false=禁用）
+static const bool PTW_WALKER_S2_CACHE_ENABLED = true;        // [S2] Walker Cache S2 Cache开关（G-stage显式第二阶段）
 
 // ===================== PT Cache VA去重参数 =====================
 static const bool PT_CACHE_VA_DEDUP_ENABLED = true;          // VA去重功能开关（true=启用，false=禁用）

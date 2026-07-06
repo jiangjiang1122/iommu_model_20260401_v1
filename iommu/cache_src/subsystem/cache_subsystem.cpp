@@ -969,12 +969,22 @@ CacheMessage CacheSubsystem::execute_walker_request(const CacheMessage& req) {
     resp.iova = req.iova;  // FIX: 复制IOVA到响应
     WalkerData data;
     uint8_t hit_level = 0;
-    resp.hit = walker_cache_->lookup(req.gscid, req.pscid, req.iova,
-                                     req.walker_addr_is_va,
-                                     req.walker_from_two_stage,
-                                     req.walker_sv48,
-                                     req.walker_x4_mode,
-                                     data, hit_level, resp.latency);
+
+    if (req.walker_is_s2_lookup) {
+        // [S2] S2 Cache查询: 用GPA查询is_s2=1的cacheline
+        resp.hit = walker_cache_->lookup_s2(req.gscid, req.pscid, req.iova,
+                                            req.walker_sv48,
+                                            req.walker_x4_mode,
+                                            data, hit_level, resp.latency);
+    } else {
+        // 普通Walker Cache查询
+        resp.hit = walker_cache_->lookup(req.gscid, req.pscid, req.iova,
+                                         req.walker_addr_is_va,
+                                         req.walker_from_two_stage,
+                                         req.walker_sv48,
+                                         req.walker_x4_mode,
+                                         data, hit_level, resp.latency);
+    }
     resp.gscid = req.gscid;
     resp.pscid = req.pscid;
     if (resp.hit) {
@@ -1028,13 +1038,23 @@ CacheMessage CacheSubsystem::execute_walker_update_request(const CacheMessage& r
     WalkerData ptwc2_data = req.walker_data_ptwc2;
     WalkerData ptwc3_data = req.walker_data_ptwc3;
 
-    auto result = walker_cache_->update(req.gscid, req.pscid, req.iova,
-                                        req.walker_update_kind,
-                                        ptwc1_data, ptwc2_data, ptwc3_data);
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_UPDATE_RESPONSE;
     resp.task_id = req.task_id;
-    resp.latency = result.latency;
+
+    if (req.walker_is_s2_lookup) {
+        // [S2] S2 Cache更新
+        auto result = walker_cache_->update_s2(req.gscid, req.pscid, req.iova,
+                                               req.walker_update_kind,
+                                               ptwc1_data, ptwc2_data, ptwc3_data);
+        resp.latency = result.latency;
+    } else {
+        // 普通Walker Cache更新
+        auto result = walker_cache_->update(req.gscid, req.pscid, req.iova,
+                                            req.walker_update_kind,
+                                            ptwc1_data, ptwc2_data, ptwc3_data);
+        resp.latency = result.latency;
+    }
     return resp;
 }
 

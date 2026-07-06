@@ -53,13 +53,15 @@ struct WalkerTag {
     bool     stage_flag   = true;
     bool     sv48_flag    = true;
     bool     x4_mode_flag = false;
+    bool     is_s2        = false;  // [S2] S2 Cache标志位 (区分G-stage显式第二阶段)
     bool operator==(const WalkerTag& o) const {
         return gscid == o.gscid && pscid == o.pscid &&
                va_segment == o.va_segment && level == o.level &&
                va_pa_flag == o.va_pa_flag &&
                stage_flag == o.stage_flag &&
                sv48_flag == o.sv48_flag &&
-               x4_mode_flag == o.x4_mode_flag;
+               x4_mode_flag == o.x4_mode_flag &&
+               is_s2 == o.is_s2;
     }
 };
 

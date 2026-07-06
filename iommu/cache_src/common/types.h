@@ -415,12 +415,13 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
 // Walker Cache 中间结果。
 // 说明：
 // - `gscid` / `pscid` / `walker_level` 由外层 `CacheMessage` 携带，不在这里重复。
-// - `reserved` 对齐架构定义中的 8bit 保留区，其中已知低 5bit 语义如下：
+// - `reserved` 对齐架构定义中的 8bit 保留区，其中已知低 6bit 语义如下：
 //   bit0: valid
 //   bit1: VA/PA 类型标志
 //   bit2: 单阶段/双阶段来源标志
 //   bit3: Sv39/Sv48 标志
 //   bit4: x4 模式标志（Sv39/Sv48 与 Sv39x4/Sv48x4 区分）
+//   bit5: is_s2 标志（S2 Cache，G-stage显式第二阶段缓存）
 union walker_reserved_t {
     struct {
         uint8_t valid:1;
@@ -428,7 +429,8 @@ union walker_reserved_t {
         uint8_t stage_flag:1;
         uint8_t sv48_flag:1;
         uint8_t x4_mode_flag:1;
-        uint8_t reserved:3;
+        uint8_t is_s2:1;       // [S2] S2 Cache标志
+        uint8_t reserved:2;
     };
     uint8_t raw = 0;
 };
@@ -443,6 +445,7 @@ inline bool walker_va_pa_flag(const WalkerData& data) { return data.reserved.va_
 inline bool walker_stage_flag(const WalkerData& data) { return data.reserved.stage_flag != 0; }
 inline bool walker_sv48_flag(const WalkerData& data) { return data.reserved.sv48_flag != 0; }
 inline bool walker_x4_mode_flag(const WalkerData& data) { return data.reserved.x4_mode_flag != 0; }
+inline bool walker_is_s2(const WalkerData& data) { return data.reserved.is_s2 != 0; }
 
 inline void walker_set_valid(WalkerData& data, bool valid) {
     data.reserved.valid = valid ? 1U : 0U;
@@ -453,7 +456,8 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
                                    bool is_va = true,
                                    bool is_stage1_and_2 = true,
                                    bool is_sv48 = true,
-                                   bool is_x4_mode = false) {
+                                   bool is_x4_mode = false,
+                                   bool is_s2 = false) {
     WalkerData data;
     data.next_ppn = next_ppn;
     data.reserved.valid = valid ? 1U : 0U;
@@ -461,6 +465,7 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
     data.reserved.stage_flag = is_stage1_and_2 ? 1U : 0U;
     data.reserved.sv48_flag = is_sv48 ? 1U : 0U;
     data.reserved.x4_mode_flag = is_x4_mode ? 1U : 0U;
+    data.reserved.is_s2 = is_s2 ? 1U : 0U;
     return data;
 }
 
@@ -499,6 +504,7 @@ struct CacheMessage {
     bool            walker_from_two_stage = true;
     bool            walker_sv48 = true;
     bool            walker_x4_mode = false;
+    bool            walker_is_s2_lookup = false;  // [S2] S2 Cache查询/更新请求标志
 
     // Walker update 请求类型和各 level 独立 payload。 更新输入
     WalkerUpdateKind walker_update_kind = WalkerUpdateKind::PTWC_3;

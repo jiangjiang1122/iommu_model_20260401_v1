@@ -38,6 +38,13 @@ public:
     void fill(gscid_t gscid, pscid_t pscid, iova_t va,
               uint8_t level, const WalkerData& data);
 
+    // [S2] S2 Cache 查询: 用GPA查询is_s2=1的cacheline (G-stage显式第二阶段)
+    // gpa: 第一阶段翻译完成的GPA，用作查询key
+    // x4_mode_flag: G-stage使用Sv48x4/Sv39x4，通常为true
+    bool lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
+                   bool sv48_flag, bool x4_mode_flag,
+                   WalkerData& out_data, uint8_t& hit_level, sc_time& latency);
+
     struct UpdateResult {
         bool    updated_ptwc1 = false;
         bool    updated_ptwc2 = false;
@@ -50,6 +57,13 @@ public:
                         const WalkerData& ptwc1_data,
                         const WalkerData& ptwc2_data,
                         const WalkerData& ptwc3_data);
+
+    // [S2] S2 Cache 更新: 更新is_s2=1的cacheline
+    UpdateResult update_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
+                           WalkerUpdateKind kind,
+                           const WalkerData& ptwc1_data,
+                           const WalkerData& ptwc2_data,
+                           const WalkerData& ptwc3_data);
 
     // 按 gscid 失效所有子表
     uint32_t invalidate_by_gscid(gscid_t gscid, sc_time* latency = nullptr);
@@ -82,6 +96,13 @@ public:
     uint64_t get_update_ptwc_3_count() const { return update_ptwc_3_count_; }
     uint64_t get_update_none_count() const { return update_none_count_; }
 
+    // [S2] S2 Cache统计接口
+    uint64_t get_s2_lookup_count() const { return s2_lookup_count_; }
+    uint64_t get_s2_hit_c3_count() const { return s2_hit_c3_count_; }
+    uint64_t get_s2_hit_c2_count() const { return s2_hit_c2_count_; }
+    uint64_t get_s2_hit_c1_count() const { return s2_hit_c1_count_; }
+    uint64_t get_s2_miss_count() const { return s2_miss_count_; }
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -101,6 +122,13 @@ private:
     uint64_t update_ptwc_3_count_ = 0;    // PTWC_3 更新次数
     uint64_t update_none_count_ = 0;      // NONE 跳过次数（避免冗余更新）
 
+    // [S2] S2 Cache统计
+    uint64_t s2_lookup_count_ = 0;
+    uint64_t s2_hit_c3_count_ = 0;
+    uint64_t s2_hit_c2_count_ = 0;
+    uint64_t s2_hit_c1_count_ = 0;
+    uint64_t s2_miss_count_ = 0;
+
 };
 
 // Walker 子表: 继承 CacheBase 实现特定散列函数
@@ -114,6 +142,10 @@ public:
     bool lookup(gscid_t gscid, pscid_t pscid, iova_t va,
                 bool va_pa_flag, bool stage_flag, bool sv48_flag,
                 bool x4_mode_flag, WalkerData& out_data, sc_time& latency);
+    // [S2] S2 Cache子表查询: 构造tag时设is_s2=true
+    bool lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
+                   bool sv48_flag, bool x4_mode_flag,
+                   WalkerData& out_data, sc_time& latency);
     struct UpdateResult {
         bool    updated = false;
         sc_time latency = SC_ZERO_TIME;

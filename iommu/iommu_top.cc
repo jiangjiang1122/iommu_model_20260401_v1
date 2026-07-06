@@ -607,6 +607,37 @@ void iommu_top::print_cache_statistics() {
     }
     printf("======================================================\n\n");
 
+    // [S2] S2 Walker Cache Statistics
+    printf("========== S2 Walker Cache Statistics ==========\n");
+    printf("  S2 Cache Enabled:    %s\n", PTW_WALKER_S2_CACHE_ENABLED ? "YES" : "NO");
+    {
+        uint64_t s2_lookup = cache_sub.walker_cache().get_s2_lookup_count();
+        uint64_t s2_hit_c3 = cache_sub.walker_cache().get_s2_hit_c3_count();
+        uint64_t s2_hit_c2 = cache_sub.walker_cache().get_s2_hit_c2_count();
+        uint64_t s2_hit_c1 = cache_sub.walker_cache().get_s2_hit_c1_count();
+        uint64_t s2_miss   = cache_sub.walker_cache().get_s2_miss_count();
+        uint64_t s2_total_hit = s2_hit_c3 + s2_hit_c2 + s2_hit_c1;
+        printf("  S2 Lookups:          %lu\n", (unsigned long)s2_lookup);
+        printf("  S2 Hits (total):     %lu\n", (unsigned long)s2_total_hit);
+        printf("    C3 hit (1 DDR):    %lu\n", (unsigned long)s2_hit_c3);
+        printf("    C2 hit (2 DDR):    %lu\n", (unsigned long)s2_hit_c2);
+        printf("    C1 hit (3 DDR):    %lu\n", (unsigned long)s2_hit_c1);
+        printf("  S2 Miss (4 DDR):     %lu\n", (unsigned long)s2_miss);
+        if (s2_lookup > 0) {
+            printf("  S2 Hit Rate:         %.1f%%\n", 100.0 * s2_total_hit / s2_lookup);
+            printf("  S2 Hit Distribution:\n");
+            printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%  Miss: %.1f%%\n",
+                   100.0 * s2_hit_c3 / s2_lookup,
+                   100.0 * s2_hit_c2 / s2_lookup,
+                   100.0 * s2_hit_c1 / s2_lookup,
+                   100.0 * s2_miss / s2_lookup);
+            // DDR walk节省次数: 每次C3 hit省3次, C2 hit省2次, C1 hit省1次
+            uint64_t ddr_saved = s2_hit_c3 * 3 + s2_hit_c2 * 2 + s2_hit_c1 * 1;
+            printf("  DDR Walks Saved:     %lu  (vs baseline 4 reads/lookup)\n", (unsigned long)ddr_saved);
+        }
+    }
+    printf("================================================\n\n");
+
     // IOMMU / PTW IOPS
     double sim_time_sec = sc_time_stamp().to_seconds();
     printf("========== IOMMU / PTW Throughput (IOPS) ==========\n");

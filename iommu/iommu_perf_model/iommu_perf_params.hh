@@ -116,6 +116,14 @@ static const bool PTW_WALKER_CACHE_ENABLED = true;
 static const bool PTW_WALKER_CACHE_ENABLED = TEST_CFG_PTW_WALKER_CACHE_ENABLED;
 #endif
 
+// Walker Cache S2 Cache开关（两阶段翻译中G-stage显式第二阶段的walker cache）
+// true=启用，false=禁用（禁用时为现有基线状态）
+#ifndef TEST_CFG_WALKER_CACHE_S2_ENABLED
+static const bool PTW_WALKER_S2_CACHE_ENABLED = true;
+#else
+static const bool PTW_WALKER_S2_CACHE_ENABLED = TEST_CFG_WALKER_CACHE_S2_ENABLED;
+#endif
+
 // ===================== PT Cache VA去重参数 =====================
 static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能开关（true=启用，false=禁用）
 

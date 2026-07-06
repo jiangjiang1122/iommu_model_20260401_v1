@@ -49,6 +49,26 @@ bool WalkerSubCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
     tag.stage_flag = stage_flag;
     tag.sv48_flag = sv48_flag;
     tag.x4_mode_flag = x4_mode_flag;
+    tag.is_s2 = false;
+    return CacheBase<WalkerTag, WalkerData>::lookup(tag, out_data, latency);
+}
+
+// [S2] S2 Cache子表查询: tag构造时设is_s2=true, va_pa_flag=false(GPA)
+bool WalkerSubCache::lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
+                               bool sv48_flag, bool x4_mode_flag,
+                               WalkerData& out_data, sc_time& latency) {
+    WalkerTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    // S2 Cache: GPA作为key，addr_is_va=false
+    tag.va_segment = WalkerCache::extract_addr_segment(
+        gpa, level_, false, sv48_flag, x4_mode_flag);
+    tag.level = level_;
+    tag.va_pa_flag = false;   // GPA不是VA
+    tag.stage_flag = true;    // 两阶段
+    tag.sv48_flag = sv48_flag;
+    tag.x4_mode_flag = x4_mode_flag;
+    tag.is_s2 = true;         // [S2] 标识S2 Cache查询
     return CacheBase<WalkerTag, WalkerData>::lookup(tag, out_data, latency);
 }
 
@@ -347,6 +367,77 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
     return (hit_c3 || hit_c2 || hit_c1);
 }
 
+// [S2] S2 Cache查询: 用GPA查询is_s2=1的cacheline
+bool WalkerCache::lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
+                            bool sv48_flag, bool x4_mode_flag,
+                            WalkerData& out_data, uint8_t& hit_level,
+                            sc_time& latency) {
+    latency = SC_ZERO_TIME;
+    hit_level = 0;
+    s2_lookup_count_++;
+
+    // 与lookup()逻辑一致，但使用lookup_s2子表接口
+    WalkerData data_c3, data_c2, data_c1;
+    sc_time lat_c3 = SC_ZERO_TIME, lat_c2 = SC_ZERO_TIME, lat_c1 = SC_ZERO_TIME;
+    bool hit_c3 = false, hit_c2 = false, hit_c1 = false;
+
+    // 查询 S2_C3
+    hit_c3 = ptw_c3_->lookup_s2(gscid, pscid, gpa, sv48_flag, x4_mode_flag, data_c3, lat_c3);
+    if (hit_c3) {
+        printf("[t=%llu ns][WALKER_S2_CACHE] HIT: ptw_c3 (level=3), gscid=%u, pscid=%u, gpa=0x%lx, next_ppn=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, gpa, data_c3.next_ppn);
+        fflush(stdout);
+    }
+
+    // 查询 S2_C2
+    hit_c2 = ptw_c2_->lookup_s2(gscid, pscid, gpa, sv48_flag, x4_mode_flag, data_c2, lat_c2);
+    if (hit_c2) {
+        printf("[t=%llu ns][WALKER_S2_CACHE] HIT: ptw_c2 (level=2), gscid=%u, pscid=%u, gpa=0x%lx, next_ppn=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, gpa, data_c2.next_ppn);
+        fflush(stdout);
+    }
+
+    // 查询 S2_C1（仅Sv48x4模式）
+    if (!sv39_mode_ && sv48_flag) {
+        hit_c1 = ptw_c1_->lookup_s2(gscid, pscid, gpa, sv48_flag, x4_mode_flag, data_c1, lat_c1);
+        if (hit_c1) {
+            printf("[t=%llu ns][WALKER_S2_CACHE] HIT: ptw_c1 (level=1), gscid=%u, pscid=%u, gpa=0x%lx, next_ppn=0x%lx\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   gscid, pscid, gpa, data_c1.next_ppn);
+            fflush(stdout);
+        }
+    }
+
+    // [仲裁] 按 C3 > C2 > C1 优先级选择最高级命中
+    if (hit_c3) {
+        out_data = data_c3;
+        hit_level = 3;
+        latency = lat_c3;
+        s2_hit_c3_count_++;
+    } else if (hit_c2) {
+        out_data = data_c2;
+        hit_level = 2;
+        latency = lat_c2;
+        s2_hit_c2_count_++;
+    } else if (hit_c1) {
+        out_data = data_c1;
+        hit_level = 1;
+        latency = lat_c1;
+        s2_hit_c1_count_++;
+    } else {
+        latency = lat_c3 + lat_c2 + lat_c1;
+        s2_miss_count_++;
+        printf("[t=%llu ns][WALKER_S2_CACHE] MISS: all levels, gscid=%u, pscid=%u, gpa=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, gpa);
+        fflush(stdout);
+    }
+
+    return (hit_c3 || hit_c2 || hit_c1);
+}
+
 void WalkerCache::fill(gscid_t gscid, pscid_t pscid, iova_t va,
                        uint8_t level, const WalkerData& data) {
     WalkerTag tag;
@@ -485,6 +576,76 @@ WalkerCache::UpdateResult WalkerCache::update(gscid_t gscid, pscid_t pscid,
                  result.updated_ptwc3);
 
     join.wait();
+    return result;
+}
+
+// [S2] S2 Cache更新: 与update()逻辑一致，但构造tag时设is_s2=true, va_pa_flag=false
+WalkerCache::UpdateResult WalkerCache::update_s2(gscid_t gscid, pscid_t pscid,
+                                                  iova_t gpa, WalkerUpdateKind kind,
+                                                  const WalkerData& ptwc1_data,
+                                                  const WalkerData& ptwc2_data,
+                                                  const WalkerData& ptwc3_data) {
+    printf("[t=%llu ns][WALKER_S2_CACHE] UPDATE: gscid=%u, pscid=%u, gpa=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+           gscid, pscid, gpa, static_cast<int>(kind),
+           ptwc1_data.reserved.valid, ptwc2_data.reserved.valid, ptwc3_data.reserved.valid);
+    fflush(stdout);
+
+    // S2 tag构造: is_s2=true, va_pa_flag=false (GPA), stage_flag=true
+    auto make_tag = [=](uint8_t level, const WalkerData& data) {
+        WalkerTag tag;
+        tag.gscid = gscid;
+        tag.pscid = pscid;
+        tag.level = level;
+        tag.va_pa_flag = false;    // [S2] GPA不是VA
+        tag.stage_flag = true;     // [S2] 两阶段
+        tag.sv48_flag = walker_sv48_flag(data);
+        tag.x4_mode_flag = walker_x4_mode_flag(data);
+        tag.is_s2 = true;          // [S2]
+        tag.va_segment = extract_addr_segment(
+            gpa, level, false, tag.sv48_flag, tag.x4_mode_flag);
+        return tag;
+    };
+
+    UpdateResult result;
+
+    if (kind == WalkerUpdateKind::NONE) {
+        printf("[t=%llu ns][WALKER_S2_CACHE] UPDATE: NONE (skip), gscid=%u, pscid=%u, gpa=0x%lx\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               gscid, pscid, gpa);
+        fflush(stdout);
+        return result;
+    }
+
+    const bool update_ptwc1 = kind == WalkerUpdateKind::PTWC_1_2_3;
+    const bool update_ptwc2 = kind == WalkerUpdateKind::PTWC_1_2_3 ||
+                              kind == WalkerUpdateKind::PTWC_2_3;
+
+    auto merge_result = [&result](bool& updated_flag,
+                                  const WalkerSubCache::UpdateResult& partial) {
+        updated_flag = partial.updated;
+        if (partial.latency > result.latency) result.latency = partial.latency;
+    };
+
+    // 串行更新（S2 Cache使用简单路径，不需要并行spawn）
+    if (update_ptwc1 && !sv39_mode_ && walker_sv48_flag(ptwc1_data)) {
+        auto r1 = ptw_c1_->update_entry(make_tag(1, ptwc1_data), ptwc1_data, true);
+        merge_result(result.updated_ptwc1, r1);
+    }
+
+    if (update_ptwc2) {
+        auto r2 = ptw_c2_->update_entry(make_tag(2, ptwc2_data), ptwc2_data, false);
+        merge_result(result.updated_ptwc2, r2);
+    }
+
+    auto r3 = ptw_c3_->update_entry(make_tag(3, ptwc3_data), ptwc3_data, false);
+    merge_result(result.updated_ptwc3, r3);
+
+    printf("[t=%llu ns][WALKER_S2_CACHE] UPDATE done: c1=%d, c2=%d, c3=%d\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+           result.updated_ptwc1, result.updated_ptwc2, result.updated_ptwc3);
+    fflush(stdout);
+
     return result;
 }
 

@@ -53,7 +53,14 @@ else ifeq ($(TEST), seq128k_twostage)
     TEST_THREAD_SRC = rp/test_rp_seq128k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
-                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=0
+else ifeq ($(TEST), seq128k_twostage_s2on)
+    TEST_THREAD_SRC = rp/test_rp_seq128k_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1
 else ifeq ($(TEST), rand4k_twostage)
     TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \

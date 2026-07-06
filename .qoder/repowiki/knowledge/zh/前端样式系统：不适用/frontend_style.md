@@ -1,0 +1,1 @@
+该仓库是一个基于 SystemC/TLM-2.0 的 RISC-V IOMMU 架构级性能模型，属于纯后端/仿真器项目。经全面检索，仓库中不存在任何 CSS、SCSS、HTML、JavaScript、TypeScript、Vue、React 等前端相关代码或配置文件（如 tailwind.config、postcss.config、webpack.config 等）。整个项目由 C++ 源码（iommu/、ddr/、pcienoc/、slink/、rp/ 目录）、Shell 脚本、Python 分析脚本以及 Markdown 文档组成，不包含任何用户界面层。因此，`frontend_style` 类别不适用于此仓库。

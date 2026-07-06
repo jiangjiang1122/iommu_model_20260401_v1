@@ -519,3 +519,114 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
     
     return req;
 }
+
+// ============================================================
+// [S2] Convert iommu_task_t to CacheMessage for S2 Walker Cache lookup
+// 使用GPA作为查询key，标识is_s2=true
+// ============================================================
+iommu::CacheMessage task_to_s2_walker_request(iommu_task_t* task, uint64_t gpa) {
+    iommu::CacheMessage req;
+
+    req.msg_type            = iommu::CacheMsgType::WALKER_LOOKUP;
+    req.task_id             = task->task_id;
+    req.gscid               = task->GSCID;
+    req.pscid               = task->PSCID;
+    req.iova                = gpa;   // [S2] 使用GPA而非IOVA
+
+    // S2 Cache路由键: GPA不是VA, 两阶段, Sv48, x4模式
+    req.walker_addr_is_va   = false;   // GPA不是VA
+    req.walker_from_two_stage = true;  // 两阶段
+    req.walker_sv48         = true;    // G-stage使用Sv48x4 (或Sv39x4，由x4_mode区分)
+    req.walker_x4_mode      = true;    // x4模式
+    req.walker_is_s2_lookup = true;    // [S2] 标识S2查询
+
+    printf("[t=%llu ns][CONVERT] task_id=%u -> S2_WALKER_LOOKUP request (gscid=%u, pscid=%u, gpa=0x%lx)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+           task->task_id, task->GSCID, task->PSCID, gpa);
+    fflush(stdout);
+
+    return req;
+}
+
+// ============================================================
+// [S2] Convert iommu_task_t to CacheMessage for S2 Walker Cache update
+// 根据s2_walker_hit_level决定更新哪些级别
+// ============================================================
+iommu::CacheMessage task_to_s2_walker_update(iommu_task_t* task, uint64_t gpa) {
+    iommu::CacheMessage req;
+
+    req.msg_type            = iommu::CacheMsgType::WALKER_UPDATE;
+    req.task_id             = task->task_id;
+    req.gscid               = task->GSCID;
+    req.pscid               = task->PSCID;
+    req.iova                = gpa;   // [S2] 使用GPA
+
+    // S2路由键
+    req.walker_addr_is_va   = false;
+    req.walker_from_two_stage = true;
+    req.walker_sv48         = true;
+    req.walker_x4_mode      = true;
+    req.walker_is_s2_lookup = true;  // [S2] 标识S2更新
+
+    // 构造S2 WalkerData，is_s2=true
+    // 默认值: valid=false
+    req.walker_data_ptwc1 = iommu::make_walker_data(0, false, false, true, true, true, true);
+    req.walker_data_ptwc2 = iommu::make_walker_data(0, false, false, true, true, true, true);
+    req.walker_data_ptwc3 = iommu::make_walker_data(0, false, false, true, true, true, true);
+
+    // 填充实际命中的层级 (从s2_walker_cache_entries)
+    // level1 = gs_level=3 result → ptwc1
+    // level2 = gs_level=2 result → ptwc2
+    // level3 = gs_level=1 result → ptwc3
+    if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level1) {
+        req.walker_data_ptwc1 = iommu::make_walker_data(
+            task->walk_ctx.s2_walker_cache_entries.s2_ppn_level1, true,
+            false, true, true, true, true);
+    }
+    if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level2) {
+        req.walker_data_ptwc2 = iommu::make_walker_data(
+            task->walk_ctx.s2_walker_cache_entries.s2_ppn_level2, true,
+            false, true, true, true, true);
+    }
+    if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level3) {
+        req.walker_data_ptwc3 = iommu::make_walker_data(
+            task->walk_ctx.s2_walker_cache_entries.s2_ppn_level3, true,
+            false, true, true, true, true);
+    }
+
+    // 根据s2_walker_hit_level决定更新kind
+    // S2 Cache命中级别与更新策略:
+    //   s2_hit_level=3 (C1+C2+C3全命中): 不更新 (NONE)
+    //   s2_hit_level=2 (C1+C2命中, C3 miss): 更新ptwc3 (PTWC_3)
+    //   s2_hit_level=1 (C1命中, C2+C3 miss): 更新ptwc2+ptwc3 (PTWC_2_3)
+    //   s2_hit_level=0 (全miss): 更新ptwc1+ptwc2+ptwc3 (PTWC_1_2_3)
+    if (task->walk_ctx.s2_walker_hit_level == 3) {
+        req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
+    } else if (task->walk_ctx.s2_walker_hit_level == 2) {
+        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+    } else if (task->walk_ctx.s2_walker_hit_level == 1) {
+        req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+    } else {
+        // 全miss: 根据实际保存的有效层级决定
+        if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level1) {
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+        } else if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level2) {
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+        } else if (task->walk_ctx.s2_walker_cache_entries.s2_valid_level3) {
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        } else {
+            req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
+        }
+    }
+
+    printf("[CONVERT] task_id=%u -> S2_WALKER_UPDATE (gscid=%u, pscid=%u, gpa=0x%lx, s2_hit_level=%d, kind=%d, L1=%d, L2=%d, L3=%d)\n",
+           task->task_id, task->GSCID, task->PSCID, gpa,
+           task->walk_ctx.s2_walker_hit_level,
+           static_cast<int>(req.walker_update_kind),
+           task->walk_ctx.s2_walker_cache_entries.s2_valid_level1,
+           task->walk_ctx.s2_walker_cache_entries.s2_valid_level2,
+           task->walk_ctx.s2_walker_cache_entries.s2_valid_level3);
+    fflush(stdout);
+
+    return req;
+}

@@ -133,6 +133,24 @@ struct walk_context_t {
     // 0=全部miss, 3=c3 hit, 2=c2 hit, 1=c1 hit
     uint8_t walker_hit_level = 0;
 
+    // [S2] S2 Walker Cache 命中层级 (0=全miss, 3=c3 hit, 2=c2 hit, 1=c1 hit)
+    // 用于GS_EXPLICIT阶段的G-stage walker cache
+    uint8_t s2_walker_hit_level = 0;
+
+    // [S2] S2 Walker Cache 中间结果 (GS_EXPLICIT walk过程中保存，供update使用)
+    // 命名与WalkerCache ptwc1/ptwc2/ptwc3对齐:
+    //   level1 = gs_level=3的中间结果 → 存入ptwc1
+    //   level2 = gs_level=2的中间结果 → 存入ptwc2
+    //   level3 = gs_level=1的中间结果 → 存入ptwc3
+    struct {
+        uint64_t s2_ppn_level1 = 0;  // gs_level=3 result → ptwc1
+        uint64_t s2_ppn_level2 = 0;  // gs_level=2 result → ptwc2
+        uint64_t s2_ppn_level3 = 0;  // gs_level=1 result → ptwc3
+        bool s2_valid_level1 = false;
+        bool s2_valid_level2 = false;
+        bool s2_valid_level3 = false;
+    } s2_walker_cache_entries;
+
     // NEW: 预取相关
     bool      prefetch_enabled = false;     // 是否启用预取
     uint32_t  prefetch_depth = 0;           // 预取深度（页数量，默认=8）
