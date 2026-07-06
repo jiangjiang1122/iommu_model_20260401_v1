@@ -42,7 +42,20 @@ void iommu_top::ptw_req_thread() {
     while (true) {
         // Flow control: limit total PTW outstanding tasks
         while (ptw_outstanding_task_count >= PTW_MAX_OUTSTANDING_TASKS) {
+            printf("[PTW_REQ] BLOCKED: outstanding=%d >= max=%d, waiting...\n",
+                   ptw_outstanding_task_count, (int)PTW_MAX_OUTSTANDING_TASKS);
+            fflush(stdout);
+            // [DIAG] 打印当前所有group状态
+            prefetch_group_mtx.lock();
+            printf("[PTW_REQ][DIAG] prefetch_groups count=%zu:\n", prefetch_groups.size());
+            for (auto& [gid, g] : prefetch_groups) {
+                printf("  group %u: completed=%d, pending=%u, main_done=%d, total=%u\n",
+                       gid, g.completed, g.pending_tasks, g.main_task_done, g.total_tasks);
+            }
+            prefetch_group_mtx.unlock();
             wait(ptw_task_completed_event);
+            printf("[PTW_REQ] WAKE: outstanding=%d\n", ptw_outstanding_task_count);
+            fflush(stdout);
         }
 
         iommu_task_t* task = pt_cache_to_ptw_fifo.read();
@@ -1017,17 +1030,23 @@ void iommu_top::ptw_rsp_process_thread() {
                     uint32_t group_id = task->walk_ctx.prefetch_group_id;
                     uint32_t task_idx = task->walk_ctx.prefetch_idx;
                     prefetch_group_mtx.lock();
-                    auto& group = prefetch_groups[group_id];
-                    group.vs_ptes[task_idx].raw = 0;
-                    group.g_ptes[task_idx].raw = 0;
-                    group.pas[task_idx] = 0;
-                    group.page_szs[task_idx] = PAGE_SIZE_4KB;
-                    group.pending_tasks--;
-                    // [FIX] 必须等待主任务也完成(main_task_done=true)才能触发monitor
-                    // 否则monitor会在主任务GS_EXPLICIT完成之前就处理组，导致PA=0
-                    if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
-                        group.completed = true;
-                        prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                    auto g_it = prefetch_groups.find(group_id);
+                    if (g_it != prefetch_groups.end()) {
+                        auto& group = g_it->second;
+                        group.vs_ptes[task_idx].raw = 0;
+                        group.g_ptes[task_idx].raw = 0;
+                        group.pas[task_idx] = 0;
+                        group.page_szs[task_idx] = PAGE_SIZE_4KB;
+                        // [FIX-V3] 防止下溢
+                        if (group.pending_tasks > 0) {
+                            group.pending_tasks--;
+                        }
+                        // [FIX] 必须等待主任务也完成(main_task_done=true)才能触发monitor
+                        // 否则monitor会在主任务GS_EXPLICIT完成之前就处理组，导致PA=0
+                        if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
+                            group.completed = true;
+                            prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                        }
                     }
                     prefetch_group_mtx.unlock();
                 }
@@ -1270,9 +1289,14 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
             
-            // [FIX] 仅非预取任务递减outstanding计数
-            // 预取任务不经过ptw_req_thread，未递增该计数器
-            if (!task->walk_ctx.is_prefetch_task) {
+            // [FIX-V3] outstanding计数递减逻辑（按组计数，避免双重递减）
+            // - 预取任务: 不经过ptw_req_thread，未递增，此处不减
+            // - 属于预取组的非预取任务(主任务): 由Monitor统一递减，此处不减
+            //   (主任务fault时会标记group.completed，触发Monitor处理)
+            // - 不属于预取组的非预取任务: 此处直接递减
+            if (!task->walk_ctx.is_prefetch_task
+                && task->walk_ctx.prefetch_group_id == 0
+                && !task->walk_ctx.is_two_stage_prefetch) {
                 ptw_outstanding_task_count--;
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
             }
@@ -1296,7 +1320,10 @@ void iommu_top::ptw_rsp_process_thread() {
                         group.vs_ptes[task_idx].raw = 0;
                         group.g_ptes[task_idx].raw = 0;
                         group.pas[task_idx] = 0;
-                        group.pending_tasks--;
+                        // [FIX-V3] 防止pending_tasks下溢(主任务fault时可能已设为0)
+                        if (group.pending_tasks > 0) {
+                            group.pending_tasks--;
+                        }
                         printf("[PTW_PREFETCH] Prefetch task %u fault in group %u, pending=%u\n",
                                task->task_id, group_id, group.pending_tasks);
                         if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
@@ -1323,6 +1350,21 @@ void iommu_top::ptw_rsp_process_thread() {
                         group.pending_tasks = 0;
                         group.completed = true;
                         group.has_fault = true;
+                        
+                        // [FIX-V3] 填充main_task的pt_updates[0]，供flush_dedup_buffer_by_iova使用
+                        // 主任务fault时，VS walk可能已成功但G-stage失败
+                        // 使用vs_pte.PPN计算GPA作为PA的近似值（实际应report fault）
+                        task->walk_ctx.pt_updates[0].vs_pte = task->vs_pte;
+                        task->walk_ctx.pt_updates[0].g_pte = task->g_pte;
+                        task->walk_ctx.pt_updates[0].pa = task->gpa;  // GPA作为fallback
+                        task->walk_ctx.pt_updates[0].iova = task->iova & ~PAGE_MASK_4KB;
+                        task->walk_ctx.pt_updates[0].page_sz = task->page_sz;
+                        
+                        // 同步填充group.vs_ptes[0]和group.g_ptes[0]
+                        group.vs_ptes[0] = task->vs_pte;
+                        group.g_ptes[0] = task->g_pte;
+                        group.pas[0] = task->gpa;
+                        
                         printf("[PTW_PREFETCH] Main task %u fault in group %u, marked group as faulted.\n",
                                task->task_id, group_id);
                         fflush(stdout);
@@ -1357,7 +1399,30 @@ void iommu_top::ptw_rsp_process_thread() {
                 uint32_t task_idx = task->walk_ctx.prefetch_idx;
                 
                 prefetch_group_mtx.lock();
-                auto& group = prefetch_groups[group_id];
+                
+                // [FIX-V3] 检查group是否存在(可能已被Monitor处理并删除)
+                // 如果group不存在, 说明主任务fault后Monitor已处理了该组,
+                // 预取任务只需清理active_walks即可, 不要重新创建group
+                auto git = prefetch_groups.find(group_id);
+                if (git == prefetch_groups.end()) {
+                    prefetch_group_mtx.unlock();
+                    printf("[PTW_PREFETCH] Group %u already removed by monitor, task %u skipping\n",
+                           group_id, task->task_id);
+                    fflush(stdout);
+                    // 预取任务: 清理active_walks后跳过
+                    if (task->walk_ctx.is_prefetch_task) {
+                        ptw_walks_mtx.lock();
+                        ptw_active_walks.erase(rsp.task_id);
+                        ptw_walks_mtx.unlock();
+                        goto skip_walk_cleanup;
+                    }
+                    // 主任务: 也跳过(已由monitor处理)
+                    ptw_walks_mtx.lock();
+                    ptw_active_walks.erase(rsp.task_id);
+                    ptw_walks_mtx.unlock();
+                    goto skip_walk_cleanup;
+                }
+                auto& group = git->second;
                 
                 // 保存当前walk结果
                 group.vs_ptes[task_idx] = task->vs_pte;
@@ -1385,8 +1450,12 @@ void iommu_top::ptw_rsp_process_thread() {
                 
                 // 仅预取任务递减pending计数(主任务由monitor线程单独处理)
                 if (task->walk_ctx.is_prefetch_task) {
-                    // 减少pending计数
-                    group.pending_tasks--;
+                    // [FIX-V3] 防止pending_tasks下溢:
+                    // 当主任务fault时, pending_tasks被设为0, 此后预取任务完成时
+                    // 不应再递减(否则0-1=UINT32_MAX, 导致group永远无法completed)
+                    if (group.pending_tasks > 0) {
+                        group.pending_tasks--;
+                    }
                     
                     printf("[PTW_PREFETCH] Walk completed: group=%u, idx=%u, pending=%u\n",
                            group_id, task_idx, group.pending_tasks);
@@ -1590,7 +1659,7 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // [early spawn] 主任务已通过early spawn初始化预取组，
-            // 跳过normal cleanup路径，由monitor线程统一处理outstanding递减
+            // 跳过normal Cleanup路径，由monitor线程统一处理outstanding递减
             // [FIX] 只有当walk_complete=true时才跳转，need_next_ddr时应继续发送DDR请求
             if (task->walk_ctx.is_two_stage_prefetch && walk_complete) {
                 ptw_walks_mtx.lock();
@@ -1598,7 +1667,28 @@ void iommu_top::ptw_rsp_process_thread() {
                 ptw_walks_mtx.unlock();
                 goto skip_walk_cleanup;
             }
-            
+                        
+            // [FIX-V3] non-early-spawn两阶段预取主任务: 也需跳过normal cleanup
+            // 该主任务在walk_complete_handler中已通过prefetch_group_id分支(line 1364)
+            // 收集结果并设置main_task_done，预取组由monitor线程统一处理。
+            // 若不跳过，会导致:
+            //   1) ptw_outstanding_task_count 双重递减(normal cleanup + monitor)
+            //   2) task 双重转发到 pt_cache_to_fwd_fifo(normal cleanup + monitor flush)
+            //   3) PT Cache 双重更新
+            // 注意: early-spawn路径已在上方(line 1605)处理，此处仅捕获non-early-spawn
+            if (walk_complete
+                && task->walk_ctx.prefetch_group_id != 0
+                && !task->walk_ctx.is_prefetch_task
+                && !task->walk_ctx.is_two_stage_prefetch) {
+                printf("[PTW_RSP] task_id=%u -> non-early-spawn main task, skip normal cleanup (monitor will handle)\n",
+                       task->task_id);
+                fflush(stdout);
+                ptw_walks_mtx.lock();
+                ptw_active_walks.erase(rsp.task_id);
+                ptw_walks_mtx.unlock();
+                goto skip_walk_cleanup;
+            }
+                        
             // =====================================================================
             // NEW: Burst预取方案 (v2.0)
             // 利用L0页表连续性,1次Burst读代替D次独立walk
@@ -1977,6 +2067,7 @@ void iommu_top::prefetch_group_monitor_thread() {
             iommu::TransStage stage;
             bool sv48;
             bool gstage_x4;
+            bool has_fault;
             std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
             // [FIX-V2] 保存flush参数, 在无锁阶段执行
             std::vector<uint64_t> group_iovas;
@@ -2028,6 +2119,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                 pgu.stage = stage;
                 pgu.sv48 = sv48;
                 pgu.gstage_x4 = gstage_x4;
+                pgu.has_fault = group.has_fault;
                 
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     uint64_t iova = group.group_iovas[i];
@@ -2126,6 +2218,9 @@ void iommu_top::prefetch_group_monitor_thread() {
             fflush(stdout);
             
             // Step 2: 异步更新PT Cache（无锁状态下写入FIFO）
+            // [FIX-V3] 即使faulted组也需要更新PT Cache（替换placeholder CL）
+            // 否则后续任务不断命中placeholder，分配buffer entry，导致buffer满死锁
+            // 对faulted的主任务IOVA，PA可能不精确，但至少释放了buffer entry
             for (const auto& [iova, pt_data] : pgu.batch_updates) {
                 iommu::CacheMessage update_msg;
                 update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
@@ -2144,6 +2239,27 @@ void iommu_top::prefetch_group_monitor_thread() {
             printf("[PTW_PREFETCH_MONITOR] Group %u: sent %zu async PT Cache updates via FIFO\n",
                    pgu.group_id, pgu.batch_updates.size());
             fflush(stdout);
+        }
+        
+        // ========== [FIX-V3] 防止event丢失导致Monitor永久阻塞 ==========
+        // sc_event是edge-triggered: 在Monitor处理期间(持锁收集+无锁flush/PT Cache更新),
+        // 其他group完成时的notify会丢失(Monitor不在wait状态).
+        // 处理完当前batch后, 检查是否还有completed group遗留, 如有则重新notify.
+        {
+            bool has_completed = false;
+            prefetch_group_mtx.lock();
+            for (auto& [gid, g] : prefetch_groups) {
+                if (g.completed && g.pending_tasks == 0) {
+                    has_completed = true;
+                    break;
+                }
+            }
+            prefetch_group_mtx.unlock();
+            if (has_completed) {
+                printf("[PTW_PREFETCH_MONITOR] Re-notify: completed groups still pending\n");
+                fflush(stdout);
+                prefetch_group_completed_event.notify(SC_ZERO_TIME);
+            }
         }
     }
 }
