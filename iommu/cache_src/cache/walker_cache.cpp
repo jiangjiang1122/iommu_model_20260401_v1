@@ -395,8 +395,7 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
                          sc_time& latency) {
     latency = SC_ZERO_TIME;
     hit_level = 0;
-
-    // [串行全查] 查询所有三级 Cache，模拟并行查询的统计效果
+    vs_lookup_count_++;
     // 每级都查询，不提前退出，最后仲裁返回最高级命中结果
     
     WalkerData data_c3, data_c2, data_c1;
@@ -458,17 +457,21 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         out_data = data_c3;
         hit_level = 3;
         latency = lat_c3;  // 只计最高级的延时
+        vs_hit_c3_count_++;
     } else if (hit_c2) {
         out_data = data_c2;
         hit_level = 2;
         latency = lat_c2;
+        vs_hit_c2_count_++;
     } else if (hit_c1) {
         out_data = data_c1;
         hit_level = 1;
         latency = lat_c1;
+        vs_hit_c1_count_++;
     } else {
         // 全未命中：延时累加
         latency = lat_c3 + lat_c2 + lat_c1;
+        vs_miss_count_++;
     }
     
     return (hit_c3 || hit_c2 || hit_c1);

@@ -158,10 +158,12 @@ void iommu_top::reorder_output_thread() {
             if (steady_start_ns == 0.0 && steady_start_count > 0 &&
                 iommu_total_completed >= steady_start_count) {
                 steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
+                ptw_steady_start_completed = ptw_total_completed;
             }
             if (steady_end_ns == 0.0 && steady_end_count > 0 &&
                 iommu_total_completed >= steady_end_count) {
                 steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
+                ptw_steady_end_completed = ptw_total_completed;
             }
 
             // ===== Bandwidth control: master_0 port (翻译输出) =====

@@ -245,6 +245,8 @@ public:
     double   steady_end_ns;               // 稳态结束时刻(ns)
     uint64_t steady_start_count;          // 稳态开始时的完成数
     uint64_t steady_end_count;            // 稳态结束时的完成数
+    uint64_t ptw_steady_start_completed;  // 稳态开始时PTW完成数
+    uint64_t ptw_steady_end_completed;    // 稳态结束时PTW完成数
 
     // ===================== Walker Active Walks =====================
     std::map<uint32_t, iommu_task_t*> xdtw_active_walks;
@@ -451,7 +453,9 @@ public:
         steady_start_ns(0.0),
         steady_end_ns(0.0),
         steady_start_count(0),
-        steady_end_count(0)
+        steady_end_count(0),
+        ptw_steady_start_completed(0),
+        ptw_steady_end_completed(0)
     {
         iommu_inst.top = this;
 

@@ -616,6 +616,35 @@ void iommu_top::print_cache_statistics() {
     }
     printf("======================================================\n\n");
 
+    // [VS] VS-stage Walker Cache Statistics
+    printf("========== VS-stage Walker Cache Statistics ==========\n");
+    {
+        uint64_t vs_lookup = cache_sub.walker_cache().get_vs_lookup_count();
+        uint64_t vs_hit_c3 = cache_sub.walker_cache().get_vs_hit_c3_count();
+        uint64_t vs_hit_c2 = cache_sub.walker_cache().get_vs_hit_c2_count();
+        uint64_t vs_hit_c1 = cache_sub.walker_cache().get_vs_hit_c1_count();
+        uint64_t vs_miss   = cache_sub.walker_cache().get_vs_miss_count();
+        uint64_t vs_total_hit = vs_hit_c3 + vs_hit_c2 + vs_hit_c1;
+        printf("  VS Lookups:          %lu\n", (unsigned long)vs_lookup);
+        printf("  VS Hits (total):     %lu\n", (unsigned long)vs_total_hit);
+        printf("    C3 hit (1 DDR):    %lu\n", (unsigned long)vs_hit_c3);
+        printf("    C2 hit (2 DDR):    %lu\n", (unsigned long)vs_hit_c2);
+        printf("    C1 hit (3 DDR):    %lu\n", (unsigned long)vs_hit_c1);
+        printf("  VS Miss (4 DDR):     %lu\n", (unsigned long)vs_miss);
+        if (vs_lookup > 0) {
+            printf("  VS Hit Rate:         %.1f%%\n", 100.0 * vs_total_hit / vs_lookup);
+            printf("  VS Hit Distribution:\n");
+            printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%  Miss: %.1f%%\n",
+                   100.0 * vs_hit_c3 / vs_lookup,
+                   100.0 * vs_hit_c2 / vs_lookup,
+                   100.0 * vs_hit_c1 / vs_lookup,
+                   100.0 * vs_miss / vs_lookup);
+            uint64_t ddr_saved = vs_hit_c3 * 3 + vs_hit_c2 * 2 + vs_hit_c1 * 1;
+            printf("  DDR Walks Saved:     %lu  (vs baseline 4 reads/lookup)\n", (unsigned long)ddr_saved);
+        }
+    }
+    printf("==========================================================\n\n");
+
     // [S2] S2 Walker Cache Statistics
     printf("========== S2 Walker Cache Statistics ==========\n");
     printf("  S2 Cache Enabled:    %s\n", PTW_WALKER_S2_CACHE_ENABLED ? "YES" : "NO");
@@ -702,6 +731,19 @@ void iommu_top::print_cache_statistics() {
             printf("  Theory peak:          %.2f M trans/s  (%.0f GB/s / 512B)\n",
                    theory_iops, AXI_SLAVE_0_BANDWIDTH_MBPS / 8000.0);
             printf("  Efficiency:           %.1f%%\n", steady_iops / theory_iops * 100.0);
+
+            // PTW Steady IOPS
+            if (ptw_steady_end_completed > ptw_steady_start_completed && steady_duration_ns > 0) {
+                uint64_t ptw_steady_tasks = ptw_steady_end_completed - ptw_steady_start_completed;
+                double ptw_steady_iops = (double)ptw_steady_tasks / steady_duration_ns * 1e3;
+                printf("  ---\n");
+                printf("  PTW Steady IOPS:      %.2f M tasks/s  (window: #%lu ~ #%lu, %lu tasks)\n",
+                       ptw_steady_iops,
+                       (unsigned long)steady_start_count, (unsigned long)steady_end_count,
+                       (unsigned long)ptw_steady_tasks);
+                printf("  PTW Theory peak:      %.2f M tasks/s  (4 concurrent / 742ns avg)\n",
+                       4.0 / 742.0 * 1e3);
+            }
         }
     }
     printf("====================================================\n\n");

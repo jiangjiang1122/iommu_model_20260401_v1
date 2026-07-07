@@ -103,6 +103,13 @@ public:
     uint64_t get_s2_hit_c1_count() const { return s2_hit_c1_count_; }
     uint64_t get_s2_miss_count() const { return s2_miss_count_; }
 
+    // [VS] VS-stage Walker Cache统计接口
+    uint64_t get_vs_lookup_count() const { return vs_lookup_count_; }
+    uint64_t get_vs_hit_c3_count() const { return vs_hit_c3_count_; }
+    uint64_t get_vs_hit_c2_count() const { return vs_hit_c2_count_; }
+    uint64_t get_vs_hit_c1_count() const { return vs_hit_c1_count_; }
+    uint64_t get_vs_miss_count() const { return vs_miss_count_; }
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -128,6 +135,13 @@ private:
     uint64_t s2_hit_c2_count_ = 0;
     uint64_t s2_hit_c1_count_ = 0;
     uint64_t s2_miss_count_ = 0;
+
+    // [VS] VS-stage Walker Cache统计
+    uint64_t vs_lookup_count_ = 0;
+    uint64_t vs_hit_c3_count_ = 0;
+    uint64_t vs_hit_c2_count_ = 0;
+    uint64_t vs_hit_c1_count_ = 0;
+    uint64_t vs_miss_count_ = 0;
 
 };
 

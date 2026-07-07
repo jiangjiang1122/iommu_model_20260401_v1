@@ -246,8 +246,8 @@ void RP_Module::send_translation_request_1_thread()
         // Reset counters for the full run
         response_count = 0;
         iommu_ptr->next_task_id = 2;  // single packet used task_id 1
-        iommu_ptr->steady_start_count = NUM_REQUESTS * STEADY_STATE_START_PERCENT / 100;
-        iommu_ptr->steady_end_count   = NUM_REQUESTS * STEADY_STATE_END_PERCENT / 100;
+        iommu_ptr->steady_start_count = 256;
+        iommu_ptr->steady_end_count   = NUM_REQUESTS - 256;
 
         tlm_generic_payload* trans_array[NUM_REQUESTS];
         PayloadExtention* ext_array[NUM_REQUESTS];
