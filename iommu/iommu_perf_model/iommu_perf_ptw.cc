@@ -105,6 +105,38 @@ void iommu_top::ptw_req_process_thread() {
                 // Need G-stage explicit translation
                 init_gstage_walk(task, task->gpa);
                 task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+
+                // [S2] S2 Walker Cache lookup BEFORE any DDR request (Bare mode path)
+                bool s2_cache_hit = false;
+                if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED) {
+                    iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                    cache_sub.walker_request_fifo.write(s2_req);
+                    iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+
+                    if (s2_resp.hit) {
+                        s2_cache_hit = true;
+                        task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                        uint8_t GS_LEVELS = 0;
+                        uint16_t gs_vpn[5] = {0};
+                        extract_gs_vpn(task->gpa, task->iohgatp.MODE, gs_vpn, &GS_LEVELS);
+                        for (int k = 0; k < 5; k++) task->walk_ctx.gs_vpn[k] = gs_vpn[k];
+                        uint8_t gs_start_level = GS_LEVELS - 1 - s2_resp.walker_level;
+                        task->walk_ctx.gs_level = gs_start_level;
+                        task->walk_ctx.gs_base_addr = s2_resp.walker_data.next_ppn * PAGESIZE;
+                        uint64_t gs_pte_addr = task->walk_ctx.gs_base_addr +
+                            task->walk_ctx.gs_vpn[gs_start_level] * 8;
+                        task->walk_ctx.read_addr = gs_pte_addr;
+                        task->walk_ctx.read_size = 8;
+                        printf("[PTW_REQ] task_id=%u, Bare S2 Cache HIT level=%d -> GS_EXPLICIT from level=%d, addr=0x%lx\n",
+                               task->task_id, s2_resp.walker_level, gs_start_level, gs_pte_addr);
+                        fflush(stdout);
+                    } else {
+                        task->walk_ctx.s2_walker_hit_level = 0;
+                        printf("[PTW_REQ] task_id=%u, Bare S2 Cache MISS -> normal GS_EXPLICIT\n", task->task_id);
+                        fflush(stdout);
+                    }
+                }
+
                 task->walk_ctx.ddr_read_count = 1;
                 // [STAT] DDR access log
                 if (task->walk_ctx.ddr_log_count < 8) {
@@ -125,8 +157,8 @@ void iommu_top::ptw_req_process_thread() {
                 req.size = task->walk_ctx.read_size;
                 req.is_write = false;
                 req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT] 记录DDR请求提交时间
-                printf("[PTW_REQ] task_id=%u, Bare mode -> GS_EXPLICIT, addr=0x%lx, read_count=1 -> ddr_req\n",
-                       task->task_id, req.addr);
+                printf("[PTW_REQ] task_id=%u, Bare mode -> GS_EXPLICIT%s, addr=0x%lx, read_count=1 -> ddr_req\n",
+                       task->task_id, s2_cache_hit ? " (S2 HIT)" : "", req.addr);
                 fflush(stdout);
                 ptw_req_ddr_fifo.write(req);
                 continue;
@@ -141,6 +173,7 @@ void iommu_top::ptw_req_process_thread() {
                 task->g_pte.PBMT = PMA;
                 task->state = TASK_PTW_DONE;
                 ptw_outstanding_task_count--;
+                assert(ptw_outstanding_task_count >= 0);  // [FIX-第10条] 防止下溢
                 ptw_total_completed++;  // [STAT]
                 // [STAT] 累加PTW完成统计（Bare直通路径）
                 ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
@@ -207,6 +240,7 @@ void iommu_top::ptw_req_process_thread() {
                 task->cause = (task->is_exec ? 12 : task->is_read ? 13 : 15);
                 task->state = TASK_FAULT;
                 ptw_outstanding_task_count--;
+                assert(ptw_outstanding_task_count >= 0);  // [FIX-第10条] 防止下溢
                 ptw_total_completed++;  // [STAT]
                 // [STAT] 累加PTW完成统计（canonical fault）
                 ptw_total_ddr_reads += task->walk_ctx.ddr_read_count;
@@ -1254,6 +1288,37 @@ void iommu_top::ptw_rsp_process_thread() {
             if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
                 init_gstage_walk(task, task->gpa);
                 task->walk_ctx.walk_phase = PTW_GS_EXPLICIT;
+
+                // [S2] S2 Walker Cache lookup before GS_EXPLICIT (AD_UPDATE path)
+                if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                    && task->iosatp.MODE != IOSATP_Bare) {
+                    iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                    cache_sub.walker_request_fifo.write(s2_req);
+                    iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+
+                    if (s2_resp.hit) {
+                        task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                        uint8_t GS_LEVELS = 0;
+                        uint16_t gs_vpn[5] = {0};
+                        extract_gs_vpn(task->gpa, task->iohgatp.MODE, gs_vpn, &GS_LEVELS);
+                        for (int k = 0; k < 5; k++) task->walk_ctx.gs_vpn[k] = gs_vpn[k];
+                        uint8_t gs_start_level = GS_LEVELS - 1 - s2_resp.walker_level;
+                        task->walk_ctx.gs_level = gs_start_level;
+                        task->walk_ctx.gs_base_addr = s2_resp.walker_data.next_ppn * PAGESIZE;
+                        uint64_t gs_pte_addr = task->walk_ctx.gs_base_addr +
+                            task->walk_ctx.gs_vpn[gs_start_level] * 8;
+                        task->walk_ctx.read_addr = gs_pte_addr;
+                        task->walk_ctx.read_size = 8;
+                        printf("[PTW_RSP] task_id=%u, AD_UPDATE S2 Cache HIT level=%d -> GS_EXPLICIT from level=%d\n",
+                               task->task_id, s2_resp.walker_level, gs_start_level);
+                        fflush(stdout);
+                    } else {
+                        task->walk_ctx.s2_walker_hit_level = 0;
+                        printf("[PTW_RSP] task_id=%u, AD_UPDATE S2 Cache MISS -> normal GS_EXPLICIT\n", task->task_id);
+                        fflush(stdout);
+                    }
+                }
+
                 task->walk_ctx.ddr_read_count++;
                 need_next_ddr = true;
                 printf("[PTW_RSP] task_id=%u, AD_UPDATE -> GS_EXPLICIT (read_count=%u)\n",
@@ -1298,6 +1363,7 @@ void iommu_top::ptw_rsp_process_thread() {
                 && task->walk_ctx.prefetch_group_id == 0
                 && !task->walk_ctx.is_two_stage_prefetch) {
                 ptw_outstanding_task_count--;
+                assert(ptw_outstanding_task_count >= 0);  // [FIX-第10条] 防止下溢
                 ptw_task_completed_event.notify(SC_ZERO_TIME);
             }
             ptw_total_completed++;  // [STAT]
@@ -1476,6 +1542,20 @@ void iommu_top::ptw_rsp_process_thread() {
                 
                 // [FIX] 预取任务处理
                 if (task->walk_ctx.is_prefetch_task) {
+                    // [S2] 预取任务也需要更新S2 Walker Cache
+                    if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                        && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                        && task->iosatp.MODE != IOSATP_Bare) {
+                        iommu::CacheMessage s2_req = task_to_s2_walker_update(task, task->gpa);
+                        if (s2_req.walker_update_kind != iommu::WalkerUpdateKind::NONE) {
+                            cache_sub.walker_update_fifo.write(s2_req);
+                            printf("[t=%llu ns][PTW_PREFETCH] task_id=%u -> S2 Walker Cache UPDATE (prefetch task, gpa=0x%lx, kind=%d)\n",
+                                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                                   task->task_id, task->gpa,
+                                   static_cast<int>(s2_req.walker_update_kind));
+                            fflush(stdout);
+                        }
+                    }
                     // 从active_walks中移除（预取任务已完成walk）
                     ptw_walks_mtx.lock();
                     ptw_active_walks.erase(rsp.task_id);
@@ -1923,6 +2003,7 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_active_walks.erase(rsp.task_id);
             ptw_walks_mtx.unlock();
             ptw_outstanding_task_count--;
+            assert(ptw_outstanding_task_count >= 0);  // [FIX-第10条] 防止下溢
             printf("[PTW_STAT] task_id=%u completed, outstanding now=%d\n",
                    task->task_id, ptw_outstanding_task_count);
             fflush(stdout);
@@ -2169,6 +2250,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                 
                 // PTW任务统计
                 ptw_outstanding_task_count--;
+                assert(ptw_outstanding_task_count >= 0);  // [FIX-第10条] 防止下溢
                 ptw_total_completed++;
                 ptw_total_ddr_reads += main_task->walk_ctx.ddr_read_count;
                 if (main_task->walk_ctx.ddr_read_count > ptw_max_ddr_reads)
@@ -2217,27 +2299,48 @@ void iommu_top::prefetch_group_monitor_thread() {
                    pgu.group_id, flushed_iova_count);
             fflush(stdout);
             
-            // Step 2: 异步更新PT Cache（无锁状态下写入FIFO）
-            // [FIX-V3] 即使faulted组也需要更新PT Cache（替换placeholder CL）
-            // 否则后续任务不断命中placeholder，分配buffer entry，导致buffer满死锁
-            // 对faulted的主任务IOVA，PA可能不精确，但至少释放了buffer entry
-            for (const auto& [iova, pt_data] : pgu.batch_updates) {
-                iommu::CacheMessage update_msg;
-                update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
-                update_msg.task_id = pgu.main_task->task_id;
-                update_msg.gscid = pgu.main_task->GSCID;
-                update_msg.pscid = pgu.main_task->PSCID;
-                update_msg.iova = iova;
-                update_msg.stage = pgu.stage;
-                update_msg.pt_sv48 = pgu.sv48;
-                update_msg.pt_gstage_x4 = pgu.gstage_x4;
-                update_msg.pt_data = pt_data;
-                update_msg.from_prefetch = false;
-                update_msg.timestamp = sc_time_stamp();
-                cache_sub.pt_update_fifo.write(update_msg);
+            // Step 2: PT Cache处理（无锁状态下）
+            // [FIX-第9条] faulted组需要显式失效PT Cache占位条目，释放buffer任务
+            // 正常组: 更新PT Cache（替换placeholder CL）
+            // faulted组: 失效PT Cache占位条目（删除placeholder CL），防止后续命中错误的缓存
+            if (pgu.has_fault) {
+                // [FAULT路径] 显式失效PT Cache占位条目
+                for (const auto& [iova, pt_data] : pgu.batch_updates) {
+                    if (iova == 0) continue;  // 跳过空IOVA
+                    iommu::CacheMessage inv_msg;
+                    inv_msg.msg_type = iommu::CacheMsgType::PT_INVALIDATE;
+                    inv_msg.task_id = pgu.main_task->task_id;
+                    inv_msg.gscid = pgu.main_task->GSCID;
+                    inv_msg.pscid = pgu.main_task->PSCID;
+                    inv_msg.iova = iova;
+                    inv_msg.invalidate_mode = iommu::CacheInvalidateMode::PRECISE;
+                    inv_msg.timestamp = sc_time_stamp();
+                    cache_sub.pt_invalidate_fifo.write(inv_msg);
+                    printf("[PTW_PREFETCH_MONITOR][FAULT] Group %u: invalidate PT Cache placeholder iova=0x%lx\n",
+                           pgu.group_id, iova);
+                    fflush(stdout);
+                }
+            } else {
+                // [正常路径] 更新PT Cache（替换placeholder CL）
+                for (const auto& [iova, pt_data] : pgu.batch_updates) {
+                    iommu::CacheMessage update_msg;
+                    update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
+                    update_msg.task_id = pgu.main_task->task_id;
+                    update_msg.gscid = pgu.main_task->GSCID;
+                    update_msg.pscid = pgu.main_task->PSCID;
+                    update_msg.iova = iova;
+                    update_msg.stage = pgu.stage;
+                    update_msg.pt_sv48 = pgu.sv48;
+                    update_msg.pt_gstage_x4 = pgu.gstage_x4;
+                    update_msg.pt_data = pt_data;
+                    update_msg.from_prefetch = false;
+                    update_msg.timestamp = sc_time_stamp();
+                    cache_sub.pt_update_fifo.write(update_msg);
+                }
             }
-            printf("[PTW_PREFETCH_MONITOR] Group %u: sent %zu async PT Cache updates via FIFO\n",
-                   pgu.group_id, pgu.batch_updates.size());
+            printf("[PTW_PREFETCH_MONITOR] Group %u: %s PT Cache (%zu entries, has_fault=%d)\n",
+                   pgu.group_id, pgu.has_fault ? "INVALIDATE" : "UPDATE",
+                   pgu.batch_updates.size(), pgu.has_fault);
             fflush(stdout);
         }
         

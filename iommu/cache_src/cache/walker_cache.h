@@ -150,6 +150,11 @@ public:
         bool    updated = false;
         sc_time latency = SC_ZERO_TIME;
     };
+    // [S2] S2 Cache子表更新: 使用独立的s2_cache_array_
+    UpdateResult update_entry_s2(const WalkerTag& tag, const WalkerData& data);
+    // [S2] S2 Cache失效
+    uint32_t invalidate_s2_by_gscid(gscid_t gscid);
+    uint32_t invalidate_s2_global();
     UpdateResult update_entry(const WalkerTag& tag, const WalkerData& data,
                               bool direct_write);
     uint32_t invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
@@ -165,6 +170,14 @@ protected:
 
 private:
     uint8_t level_;
+
+    // [S2] 独立的S2 Cache存储阵列，与普通Walker Cache物理隔离
+    std::vector<std::vector<CacheLine<WalkerTag, WalkerData>>> s2_cache_array_;
+
+    // [S2] S2阵列初始化和失效辅助方法
+    void init_s2_cache_array();
+    uint32_t invalidate_s2_entries(
+        std::function<bool(const WalkerTag&)> predicate);
 };
 
 } // namespace iommu

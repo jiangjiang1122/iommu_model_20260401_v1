@@ -24,6 +24,13 @@ WalkerSubCache::WalkerSubCache(sc_module_name name, const CacheConfig& cfg,
     : CacheBase<WalkerTag, WalkerData>(name, cfg, stats, cache_name),
       level_(level)
 {
+    init_s2_cache_array();
+}
+
+// [S2] 初始化独立的S2 Cache阵列
+void WalkerSubCache::init_s2_cache_array() {
+    s2_cache_array_.resize(num_sets_,
+        std::vector<CacheLine<WalkerTag, WalkerData>>(num_ways_));
 }
 
 uint32_t WalkerSubCache::hash_function(const WalkerTag& tag) const {
@@ -53,23 +60,36 @@ bool WalkerSubCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
     return CacheBase<WalkerTag, WalkerData>::lookup(tag, out_data, latency);
 }
 
-// [S2] S2 Cache子表查询: tag构造时设is_s2=true, va_pa_flag=false(GPA)
+// [S2] S2 Cache子表查询: 使用独立的s2_cache_array_，与普通Walker Cache完全隔离
 bool WalkerSubCache::lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
                                bool sv48_flag, bool x4_mode_flag,
                                WalkerData& out_data, sc_time& latency) {
     WalkerTag tag;
     tag.gscid = gscid;
     tag.pscid = pscid;
-    // S2 Cache: GPA作为key，addr_is_va=false
     tag.va_segment = WalkerCache::extract_addr_segment(
         gpa, level_, false, sv48_flag, x4_mode_flag);
     tag.level = level_;
-    tag.va_pa_flag = false;   // GPA不是VA
-    tag.stage_flag = true;    // 两阶段
+    tag.va_pa_flag = false;
+    tag.stage_flag = true;
     tag.sv48_flag = sv48_flag;
     tag.x4_mode_flag = x4_mode_flag;
-    tag.is_s2 = true;         // [S2] 标识S2 Cache查询
-    return CacheBase<WalkerTag, WalkerData>::lookup(tag, out_data, latency);
+    tag.is_s2 = true;
+
+    // 在s2_cache_array_中查找
+    const uint32_t set = hash_function(tag);
+    assert(set < num_sets_);
+
+    for (uint32_t w = 0; w < num_ways_; ++w) {
+        auto& line = s2_cache_array_[set][w];
+        if (line.valid && line.tag == tag) {
+            out_data = line.data;
+            latency = SC_ZERO_TIME;
+            return true;
+        }
+    }
+    latency = SC_ZERO_TIME;
+    return false;
 }
 
 WalkerSubCache::UpdateResult
@@ -180,7 +200,10 @@ uint32_t WalkerSubCache::invalidate_vma(gscid_t gscid, pscid_t pscid,
     };
 
     if (mode == CacheInvalidateMode::GLOBAL) {
-        return invalidate_all_entries(latency);
+        uint32_t affected = invalidate_all_entries(latency);
+        // [S2] 全局失效时也失效S2阵列
+        affected += invalidate_s2_global();
+        return affected;
     }
 
     if (mode == CacheInvalidateMode::PRECISE && has_iova && has_gscid && has_pscid) {
@@ -223,10 +246,15 @@ uint32_t WalkerSubCache::invalidate_vma(gscid_t gscid, pscid_t pscid,
         return affected;
     }
 
-    return invalidate_scan_by_line(
+    uint32_t affected = invalidate_scan_by_line(
         predicate,
         [](const WalkerTag&, const WalkerData&) {},
         latency);
+    // [S2] VMA失效时也失效S2阵列中对应gscid的条目
+    if (has_gscid) {
+        affected += invalidate_s2_by_gscid(gscid);
+    }
+    return affected;
 }
 
 uint32_t WalkerSubCache::invalidate_by_gscid(gscid_t gscid, sc_time* latency) {
@@ -249,7 +277,86 @@ uint32_t WalkerSubCache::invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
 }
 
 uint32_t WalkerSubCache::invalidate_global(sc_time* latency) {
-    return invalidate_all_entries(latency);
+    uint32_t affected = invalidate_all_entries(latency);
+    // [S2] 同时失效S2阵列
+    for (auto& s : s2_cache_array_)
+        for (auto& l : s)
+            if (l.valid) { l.invalidate(); affected++; }
+    return affected;
+}
+
+// [S2] S2 Cache独立更新: 使用s2_cache_array_，不干扰普通Walker Cache
+WalkerSubCache::UpdateResult
+WalkerSubCache::update_entry_s2(const WalkerTag& tag, const WalkerData& data) {
+    UpdateResult result;
+    if (!data.reserved.valid) {
+        result.updated = false;
+        result.latency = SC_ZERO_TIME;
+        return result;
+    }
+
+    const uint32_t set = hash_function(tag);
+    assert(set < num_sets_);
+
+    // 1. 先查找是否已有匹配条目（更新已有数据）
+    for (uint32_t w = 0; w < num_ways_; ++w) {
+        if (s2_cache_array_[set][w].valid && s2_cache_array_[set][w].tag == tag) {
+            s2_cache_array_[set][w].data = data;
+            s2_cache_array_[set][w].valid = true;
+            result.updated = true;
+            result.latency = SC_ZERO_TIME;
+            return result;
+        }
+    }
+    // 2. 查找空way
+    for (uint32_t w = 0; w < num_ways_; ++w) {
+        if (!s2_cache_array_[set][w].valid) {
+            s2_cache_array_[set][w].fill(tag, data, false);
+            result.updated = true;
+            result.latency = SC_ZERO_TIME;
+            return result;
+        }
+    }
+    // 3. 全满: 使用替换策略（只在S2阵列内选择victim）
+    uint32_t victim_way = 0;
+    if (replacement_) {
+        victim_way = replacement_->find_victim(set);
+    }
+    s2_cache_array_[set][victim_way].fill(tag, data, false);
+    if (replacement_) {
+        auto* srrip = dynamic_cast<SRRIPPolicy*>(replacement_.get());
+        if (srrip) srrip->on_insert(set, victim_way);
+        else replacement_->access(set, victim_way);
+    }
+    result.updated = true;
+    result.latency = SC_ZERO_TIME;
+    return result;
+}
+
+// [S2] S2 Cache按gscid失效
+uint32_t WalkerSubCache::invalidate_s2_by_gscid(gscid_t gscid) {
+    return invalidate_s2_entries([gscid](const WalkerTag& tag) {
+        return tag.gscid == gscid;
+    });
+}
+
+// [S2] S2 Cache全局失效
+uint32_t WalkerSubCache::invalidate_s2_global() {
+    uint32_t affected = 0;
+    for (auto& s : s2_cache_array_)
+        for (auto& l : s)
+            if (l.valid) { l.invalidate(); affected++; }
+    return affected;
+}
+
+// [S2] S2 Cache通用失效扫描
+uint32_t WalkerSubCache::invalidate_s2_entries(
+    std::function<bool(const WalkerTag&)> predicate) {
+    uint32_t affected = 0;
+    for (auto& s : s2_cache_array_)
+        for (auto& l : s)
+            if (l.valid && predicate(l.tag)) { l.invalidate(); affected++; }
+    return affected;
 }
 
 // ============================================================
@@ -627,19 +734,24 @@ WalkerCache::UpdateResult WalkerCache::update_s2(gscid_t gscid, pscid_t pscid,
         if (partial.latency > result.latency) result.latency = partial.latency;
     };
 
-    // 串行更新（S2 Cache使用简单路径，不需要并行spawn）
+    // 串行更新（S2 Cache使用独立的s2_cache_array_，不干扰普通Walker Cache）
     if (update_ptwc1 && !sv39_mode_ && walker_sv48_flag(ptwc1_data)) {
-        auto r1 = ptw_c1_->update_entry(make_tag(1, ptwc1_data), ptwc1_data, true);
+        auto t1 = make_tag(1, ptwc1_data);
+        auto r1 = ptw_c1_->update_entry_s2(t1, ptwc1_data);
         merge_result(result.updated_ptwc1, r1);
     }
 
     if (update_ptwc2) {
-        auto r2 = ptw_c2_->update_entry(make_tag(2, ptwc2_data), ptwc2_data, false);
+        auto t2 = make_tag(2, ptwc2_data);
+        auto r2 = ptw_c2_->update_entry_s2(t2, ptwc2_data);
         merge_result(result.updated_ptwc2, r2);
     }
 
-    auto r3 = ptw_c3_->update_entry(make_tag(3, ptwc3_data), ptwc3_data, false);
-    merge_result(result.updated_ptwc3, r3);
+    {
+        auto t3 = make_tag(3, ptwc3_data);
+        auto r3 = ptw_c3_->update_entry_s2(t3, ptwc3_data);
+        merge_result(result.updated_ptwc3, r3);
+    }
 
     printf("[t=%llu ns][WALKER_S2_CACHE] UPDATE done: c1=%d, c2=%d, c3=%d\n",
            (unsigned long long)sc_core::sc_time_stamp().value()/1000,
@@ -654,6 +766,10 @@ uint32_t WalkerCache::invalidate_by_gscid(gscid_t gscid, sc_time* latency) {
     affected += ptw_c1_->invalidate_by_gscid(gscid, latency);
     affected += ptw_c2_->invalidate_by_gscid(gscid, latency);
     affected += ptw_c3_->invalidate_by_gscid(gscid, latency);
+    // [S2] 同时失效S2阵列
+    affected += ptw_c1_->invalidate_s2_by_gscid(gscid);
+    affected += ptw_c2_->invalidate_s2_by_gscid(gscid);
+    affected += ptw_c3_->invalidate_s2_by_gscid(gscid);
     return affected;
 }
 
@@ -663,6 +779,10 @@ uint32_t WalkerCache::invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
     affected += ptw_c1_->invalidate_by_gscid_pscid(gscid, pscid, latency);
     affected += ptw_c2_->invalidate_by_gscid_pscid(gscid, pscid, latency);
     affected += ptw_c3_->invalidate_by_gscid_pscid(gscid, pscid, latency);
+    // [S2] S2阵列也按gscid失效（S2条目不含pscid，按gscid失效即可）
+    affected += ptw_c1_->invalidate_s2_by_gscid(gscid);
+    affected += ptw_c2_->invalidate_s2_by_gscid(gscid);
+    affected += ptw_c3_->invalidate_s2_by_gscid(gscid);
     return affected;
 }
 
@@ -697,6 +817,7 @@ uint32_t WalkerCache::invalidate_global(sc_time* latency) {
     affected += ptw_c1_->invalidate_global(latency);
     affected += ptw_c2_->invalidate_global(latency);
     affected += ptw_c3_->invalidate_global(latency);
+    // invalidate_global已在WalkerSubCache内包含S2阵列失效
     return affected;
 }
 
@@ -719,7 +840,9 @@ iova_t WalkerCache::extract_addr_segment(iova_t addr, uint8_t level,
 
         const iova_t root_l2 = (root << 9) | extract_bits(addr, 38, 30);
         if (level == 2) return root_l2;
-        if (level == 3) return (root_l2 << 9) | extract_bits(addr, 29, 21);
+        if (level == 3) {
+            return (root_l2 << 9) | extract_bits(addr, 29, 21);
+        }
         return addr;
     }
 

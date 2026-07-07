@@ -489,6 +489,15 @@ void iommu_top::init_gstage_walk(iommu_task_t* task, uint64_t gpa) {
                            gs_vpn[GS_LEVELS - 1] * 8; // G-stage PTESIZE=8
     task->walk_ctx.read_addr = gs_pte_addr;
     task->walk_ctx.read_size = 8;
+
+    // [S2] 重置S2 Walker Cache中间结果，防止前一个任务的残留数据污染
+    task->walk_ctx.s2_walker_hit_level = 0;
+    task->walk_ctx.s2_walker_cache_entries.s2_ppn_level1 = 0;
+    task->walk_ctx.s2_walker_cache_entries.s2_ppn_level2 = 0;
+    task->walk_ctx.s2_walker_cache_entries.s2_ppn_level3 = 0;
+    task->walk_ctx.s2_walker_cache_entries.s2_valid_level1 = false;
+    task->walk_ctx.s2_walker_cache_entries.s2_valid_level2 = false;
+    task->walk_ctx.s2_walker_cache_entries.s2_valid_level3 = false;
 }
 
 /**********************************************/

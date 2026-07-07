@@ -52,7 +52,7 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
         const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
         const uint64_t GPA_STRIDE  = 0x200000;         // 2MB per page (GPA递增步长)
-        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests
+        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests (测试规模调整)
         // 自适应页表范围：根据NUM_REQUESTS计算所需页数，向上取整到MB
         const int PAGES_NEEDED = (NUM_REQUESTS + 1 + 7) / 8;  // +1 for Phase 1
         const uint64_t RANGE = ((uint64_t)((PAGES_NEEDED * 0x1000 + 0xFFFFF) / 0x100000) * 0x100000);
