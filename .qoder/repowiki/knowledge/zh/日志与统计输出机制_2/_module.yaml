@@ -5,10 +5,8 @@ scope: []
 source_files:
     - iommu/cache_src/common/stats_collector.h
     - iommu/cache_src/common/stats_collector.cpp
+    - iommu/iommu_top.hh
     - iommu/iommu_perf_model/iommu_perf_collector.cc
-    - iommu/iommu_perf_model/iommu_hpm.cc
-    - iommu/include/iommu_hpm.hh
-    - iommu/cache_src/cache/pt_cache.cpp
-    - iommu/cache_src/cache/walker_cache.cpp
+    - main.cpp
 depends_on: []
 related_to: []

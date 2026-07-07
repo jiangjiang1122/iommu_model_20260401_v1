@@ -1,29 +1,41 @@
-该 RISC-V IOMMU SystemC 性能仿真模型**未采用专用的日志框架**（如 spdlog、glog 等），而是通过以下三种混合方式实现日志记录与性能数据输出：
+该 RISC-V IOMMU 仿真平台未采用专用的第三方日志框架（如 spdlog、glog），而是基于 C++ 标准库和 SystemC 原生机制构建了混合式的日志与统计输出系统。其核心目标是支持硬件模型的功能调试（Debug）与性能建模（Performance Modeling）。
 
-### 1. 控制台调试日志 (Console Debug Logs)
-*   **实现方式**：直接在代码中使用 `std::cout` 和 `printf` 进行即时输出。
-*   **分布**：广泛分布于 `iommu/iommu_perf_model`（如 `iommu_perf_collector.cc`）和 `iommu/cache_src`（如 `pt_cache.cpp`, `walker_cache.cpp`）中。
-*   **格式约定**：
-    *   使用方括号标签标识模块或事件类型，例如 `[COLLECTOR]`, `[PT_CACHE]`, `[WALKER_CACHE]`, `[DDR_DISPATCH]`。
-    *   部分日志包含仿真时间戳，如 `[t=%llu ns][WALKER_CACHE] HIT: ...`。
-    *   关键路径日志通常伴随 `fflush(stdout)` 以确保实时性。
-*   **特点**：无日志级别管理（Info/Debug/Error），无运行时开关控制，主要用于开发调试和流程追踪。
+### 1. 核心组件与实现方式
 
-### 2. 结构化性能统计 (Structured Performance Statistics)
-*   **核心组件**：`iommu::StatsCollector` 类 (`iommu/cache_src/common/stats_collector.{h,cpp}`)。
-*   **功能**：
-    *   **指标收集**：针对 DC/PC/PT/MSIPT 等缓存子系统，自动统计命中率 (Hit/Miss)、驱逐数 (Evictions)、预取准确率、以及各类延迟（执行延迟、排队延迟、请求全生命周期延迟）。
-    *   **直方图支持**：内置延迟直方图记录功能 (`record_execution_latency`)。
-    *   **阶段细分**：对 PT Cache 等关键模块，区分 REQUEST 和 UPDATE 阶段的性能表现。
-*   **输出方式**：通过 `report()` 方法将格式化后的统计摘要和直方图写入指定的输出文件（默认为 `cache_sim.log`）。
+*   **即时调试日志 (Ad-hoc Debug Logging)**:
+    *   **实现**: 广泛使用 C 标准库函数 `printf` 和 C++ 标准流 `std::cout`。
+    *   **分布**: 散落在各个 SystemC 模块线程中，如 `iommu_top.cc`、`iommu_perf_collector.cc` 以及 DDR/NoC 模拟模块。
+    *   **特征**: 
+        *   通常带有明确的模块前缀，例如 `[COLLECTOR]`、`[DDR_DISPATCH]`、`[PT_CACHE_EXECUTE]`。
+        *   大量使用 `fflush(stdout)` 确保在并发仿真环境下的输出实时性。
+        *   部分详细日志通过编译宏（如 `DEBUG_TRANSLATION`、`DEBUG_MSITRANS`）进行条件编译控制，以平衡仿真速度与调试信息量。
 
-### 3. 硬件性能计数器建模 (HPM - Hardware Performance Monitor)
-*   **核心组件**：`count_events` 函数 (`iommu/iommu_perf_model/iommu_hpm.cc`) 及 `iommu_hpm.hh`。
-*   **功能**：模拟 RISC-V IOMMU 规范定义的硬件性能监控单元 (PMU)。
-*   **事件类型**：支持统计未转换请求、TLB Miss、DDT/PDT 页表遍历次数等标准硬件事件。
-*   **过滤机制**：支持基于 device_id, process_id, GSCID, PSCID 的硬件事件过滤计数。
+*   **结构化性能统计 (Structured Performance Statistics)**:
+    *   **核心类**: `iommu::StatsCollector` (`iommu/cache_src/common/stats_collector.h/.cpp`)。
+    *   **功能**: 这是一个内存中的统计聚合器，负责收集缓存子系统（DC, PC, PT, MSIPT）的命中率、延迟直方图、预取准确率等关键指标。
+    *   **输出**: 通过 `print_summary()` 生成格式化的文本报告，并支持写入指定的日志文件（默认为 `cache_sim.log`）。报告包含详细的 RAM 访问路径分解（Lookup/FillHit/FillInvalid/FillReplace）以及按阶段（REQUEST/UPDATE/MONITOR）分类的统计。
 
-### 开发者建议
-*   **调试日志**：若需增加调试信息，请沿用 `[MODULE_NAME]` 标签格式的 `printf` 或 `std::cout`。注意在高频路径上避免过多的控制台输出以免影响仿真性能。
-*   **性能分析**：应优先使用 `StatsCollector` 记录的 `cache_sim.log` 进行命中率与延迟分析，而非依赖控制台日志。
-*   **日志路由**：目前所有日志均指向 stdout 或单一文件，不支持多路路由或动态日志级别切换。
+*   **全局计数器 (Global Counters)**:
+    *   **实现**: 在 `iommu_top.hh` 中定义了大量 `extern` 全局变量（如 `g_pt_cache_hit_count`）以及类成员变量（如 `iommu_total_completed`, `peak_ptw_outstanding`）。
+    *   **用途**: 用于跨模块追踪端到端延迟、IOPS（每秒事务数）以及各流水线阶段的 Outstanding 请求峰值。
+
+### 2. 架构约定与设计决策
+
+*   **无统一日志级别管理**: 系统没有实现标准的 INFO/WARN/ERROR 级别过滤。所有 `printf` 语句默认开启，除非被特定的 `#ifdef DEBUG` 包裹。这意味着在生产级性能测试中，可能需要手动注释掉或通过重定向屏蔽大量的控制台输出。
+*   **同步输出策略**: 鉴于 SystemC 的多线程并发特性，代码中频繁调用 `fflush(stdout)` 以防止日志交错或缓冲导致的时序观察偏差。
+*   **统计与日志分离**: 
+    *   **日志**: 侧重于事件流追踪（Event Tracing），用于理解任务在流水线中的流转状态。
+    *   **统计**: 侧重于数值聚合（Metric Aggregation），由 `StatsCollector` 统一管理，确保性能数据的准确性和一致性。
+
+### 3. 开发者规范与建议
+
+*   **添加新日志**:
+    *   遵循 `[MODULE_NAME]` 前缀约定，便于使用 `grep` 进行后期分析。
+    *   对于高频触发的路径（如 Cache Lookup），应避免直接使用 `printf`，以免严重拖慢仿真速度；应改用 `StatsCollector` 记录计数或延迟。
+    *   若需保留详细调试信息，请将其包裹在现有的 `DEBUG_` 宏中。
+*   **性能数据提取**:
+    *   不要依赖解析控制台 `printf` 输出来获取性能指标。
+    *   应检查 `cache_sim.log` 或通过 `StatsCollector::report()` 生成的结构化报告。
+    *   根目录下的 `tmp/` 文件夹包含大量 Python/Bash 脚本（如 `analyze_pt_cache_access.py`），用于从日志文件中提取和可视化特定性能指标。
+*   **线程安全**:
+    *   在记录全局统计或写入共享日志流时，需注意 SystemC 的上下文切换。虽然 `StatsCollector` 内部使用了 `std::mutex`，但在自定义日志输出时仍需小心竞态条件。

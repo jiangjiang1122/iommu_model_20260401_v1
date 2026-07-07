@@ -3,41 +3,41 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-06-29T02:40:32Z"
+exported_at: "2026-07-07T03:41:29Z"
 modules:
     "":
-        dir_name: RISC-V IOMMU SystemC 性能模型与缓存仿真
-        title: RISC-V IOMMU SystemC 性能模型与缓存仿真
+        dir_name: RISC-V IOMMU SystemC_TLM-2.0 架构级性能模型
+        title: RISC-V IOMMU SystemC/TLM-2.0 架构级性能模型
         scope: []
         source_files: []
         children: []
         depends_on: []
         related_to: []
     build_system:
-        dir_name: RISC-V IOMMU SystemC 仿真构建与测试体系_2
-        title: RISC-V IOMMU SystemC 仿真构建与测试体系
+        dir_name: 基于 Makefile 的 SystemC 仿真构建与多场景测试体系
+        title: 基于 Makefile 的 SystemC 仿真构建与多场景测试体系
         scope: []
         source_files:
             - Makefile
+            - main.cpp
             - build_cpp.sh
             - compile_and_test.sh
+            - compile_wsl.sh
             - run_wsl.sh
             - compile_systemc.bat
-            - test_1000req.sh
-            - main.cpp
         children: []
         depends_on: []
         related_to: []
     configuration_system:
-        dir_name: 基于JSON的缓存子系统配置加载机制
-        title: 基于JSON的缓存子系统配置加载机制
+        dir_name: IOMMU 性能模型配置系统：JSON 驱动与编译期宏混合机制
+        title: IOMMU 性能模型配置系统：JSON 驱动与编译期宏混合机制
         scope: []
         source_files:
             - iommu/cache_config/default_config.json
             - iommu/cache_src/common/json_config.cpp
-            - iommu/cache_src/common/json_config.h
-            - iommu/cache_src/common/mini_json.h
             - iommu/cache_src/common/types.h
+            - iommu/iommu_perf_model/iommu_perf_params.hh
+            - Makefile
             - iommu/iommu_top.hh
         children: []
         depends_on: []
@@ -55,31 +55,36 @@ modules:
         depends_on: []
         related_to: []
     error_handling:
-        dir_name: 错误处理与故障报告机制
-        title: 错误处理与故障报告机制
+        dir_name: IOMMU 错误处理与故障报告机制
+        title: IOMMU 错误处理与故障报告机制
         scope: []
         source_files:
             - iommu/include/iommu_fault.hh
             - iommu/iommu_fun_model/iommu_faults.cc
+            - iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc
+            - iommu/iommu_fun_model/iommu_translate.cc
             - iommu/cache_src/common/json_config.cpp
-            - iommu/cache_src/cache/cache_base.h
-            - iommu/cache_src/subsystem/cache_subsystem.cpp
-            - iommu/cache_src/common/dedup_buffer.h
+        children: []
+        depends_on: []
+        related_to: []
+    frontend_style:
+        dir_name: 前端样式系统：不适用
+        title: 前端样式系统：不适用
+        scope: []
+        source_files: []
         children: []
         depends_on: []
         related_to: []
     logging_system:
-        dir_name: 日志与统计输出机制_2
-        title: 日志与统计输出机制
+        dir_name: 日志与统计输出系统
+        title: 日志与统计输出系统
         scope: []
         source_files:
             - iommu/cache_src/common/stats_collector.h
             - iommu/cache_src/common/stats_collector.cpp
+            - iommu/cache_src/subsystem/cache_subsystem.cpp
             - iommu/iommu_perf_model/iommu_perf_collector.cc
-            - iommu/iommu_perf_model/iommu_hpm.cc
-            - iommu/include/iommu_hpm.hh
-            - iommu/cache_src/cache/pt_cache.cpp
-            - iommu/cache_src/cache/walker_cache.cpp
+            - main.cpp
         children: []
         depends_on: []
         related_to: []
