@@ -308,28 +308,123 @@ void CacheSubsystem::pc_worker_thread() {
     }
 }
 
-// PT Cache 统一轮询调度线程
-// 合并 pt_worker_thread 和 pt_update_worker_thread，实现任务级串行
-// [FIX] UPDATE 优先处理，确保PT Cache状态最新，避免task看到旧的placeholder
+// PT Cache 乒乓调度线程
+// REQUEST 和 UPDATE 交替执行（乒乓），不再优先处理某一类
+// [STAT] 统计每32个REQUEST为一组的执行延时、排队延时、端到端延时
 void CacheSubsystem::pt_scheduler_thread() {
     uint64_t pt_req_counter = 0;  // [STAT] REQUEST区间统计计数器
     while (true) {
-        bool processed = false;
         CacheMessage req;
-        
-        // [FIX] 0. 优先排空pending UPDATE（确保PT Cache状态最新）
-        // 在处理REQUEST前先处理UPDATE，避免task命中旧的placeholder后被挂起无法唤醒
-        // 这修复了场景4(4KB随机+二阶段)中task 6408超时失败的时序问题
-        while (pt_update_fifo.num_available() > 0) {
+
+        // =============================================================
+        // 乒乓调度: 根据 pt_sched_next_is_request_ 决定本轮优先处理哪类
+        // =============================================================
+        bool has_req = (pt_request_fifo.num_available() > 0);
+        bool has_upd = (pt_update_fifo.num_available() > 0);
+
+        if (!has_req && !has_upd) {
+            // 两个FIFO都空，等待
+            wait(pt_request_fifo.data_written_event() | 
+                 pt_update_fifo.data_written_event());
+            continue;
+        }
+
+        // 决定本轮处理类型
+        bool do_request;
+        if (has_req && has_upd) {
+            do_request = pt_sched_next_is_request_;  // 两者都有，按乒乓选择
+        } else {
+            do_request = has_req;  // 只有一个可用，处理它
+        }
+
+        if (do_request) {
+            // =============================================================
+            // 处理 REQUEST
+            // =============================================================
+            req = pt_request_fifo.read();
+            const sc_time dequeue_time = sc_time_stamp();
+            const double start_ns = dequeue_time.to_seconds() * 1e9;
+
+            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
+            stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
+
+            trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
+            CacheMessage resp = execute_pt_request(req);
+            const sc_time end = sc_time_stamp();
+            const double end_ns = end.to_seconds() * 1e9;
+            double exec_ns = end_ns - start_ns;
+
+            // [STAT] 全局间隔分析
+            if (pt_sched_last_task_end_ >= 0.0) {
+                double gap_ns = start_ns - pt_sched_last_task_end_;
+                if (gap_ns > 0.0) {
+                    pt_sched_total_gap_ns_ += gap_ns;
+                    pt_sched_gap_count_++;
+                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
+                }
+            }
+            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
+            pt_sched_last_end_ns_ = end_ns;
+            pt_sched_total_exec_ns_ += exec_ns;
+            pt_sched_task_count_++;
+            pt_sched_req_count_++;
+            pt_sched_last_task_end_ = end_ns;
+
+            record_task_completion("pt_cache", dequeue_time, end);
+            stats_.record_pt_phase_timestamp("pt_cache", 0, start_ns, end_ns);
+            trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
+
+            // 区间命中率统计
+            int interval_idx = static_cast<int>(pt_req_counter / 1000);
+            if (resp.hit) stats_.record_interval_hit("pt_cache", interval_idx);
+            else           stats_.record_interval_miss("pt_cache", interval_idx);
+            pt_req_counter++;
+
+            if (resp.hit) push_fifo(pt_hit_response_fifo, resp);
+            else          push_fifo(pt_miss_response_fifo, resp);
+
+            // =============================================================
+            // [STAT] 32任务组统计 - REQUEST完成
+            // =============================================================
+            int pos = pt_group_pos_;
+            pt_group_exec_ns_[pos]   = exec_ns;
+            pt_group_e2e_ns_[pos]    = end_ns - req.timestamp.to_seconds() * 1e9;
+            pt_group_queue_ns_[pos]  = pt_group_upd_since_last_;
+            pt_group_upd_count_[pos] = pt_group_upd_cnt_since_;
+
+            pt_group_sum_exec_[pos]  += exec_ns;
+            pt_group_sum_queue_[pos] += pt_group_upd_since_last_;
+            pt_group_sum_e2e_[pos]   += (end_ns - req.timestamp.to_seconds() * 1e9);
+            pt_group_sum_upd_[pos]   += pt_group_upd_cnt_since_;
+
+            pt_group_pos_++;
+            if (pt_group_pos_ >= PT_GROUP_SIZE) {
+                pt_group_total_groups_++;
+                pt_group_pos_ = 0;
+            }
+            pt_group_upd_since_last_ = 0.0;
+            pt_group_upd_cnt_since_ = 0;
+            pt_group_last_req_end_ = end_ns;
+
+            // 乒乓切换
+            pt_sched_next_is_request_ = false;
+        } else {
+            // =============================================================
+            // 处理 UPDATE
+            // =============================================================
             req = pt_update_fifo.read();
             const sc_time upd_dequeue_time = sc_time_stamp();
             const double upd_start_ns = upd_dequeue_time.to_seconds() * 1e9;
             double upd_fifo_wait_ns = upd_start_ns - req.timestamp.to_seconds() * 1e9;
             stats_.accumulate_phase_task_wait("pt_cache", 1, upd_fifo_wait_ns);
+
             trace_task_event("begin", "pt_cache", "update", req, upd_dequeue_time);
             CacheMessage upd_resp = execute_pt_update_request(req);
             const sc_time upd_end = sc_time_stamp();
             const double upd_end_ns = upd_end.to_seconds() * 1e9;
+            double upd_exec_ns = upd_end_ns - upd_start_ns;
+
+            // [STAT] 全局间隔分析
             if (pt_sched_last_task_end_ >= 0.0) {
                 double gap_ns = upd_start_ns - pt_sched_last_task_end_;
                 if (gap_ns > 0.0) {
@@ -340,139 +435,21 @@ void CacheSubsystem::pt_scheduler_thread() {
             }
             if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = upd_start_ns;
             pt_sched_last_end_ns_ = upd_end_ns;
-            pt_sched_total_exec_ns_ += (upd_end_ns - upd_start_ns);
+            pt_sched_total_exec_ns_ += upd_exec_ns;
             pt_sched_task_count_++;
             pt_sched_upd_count_++;
             pt_sched_last_task_end_ = upd_end_ns;
+
             record_task_completion("pt_cache", upd_dequeue_time, upd_end);
             stats_.record_pt_phase_timestamp("pt_cache", 1, upd_start_ns, upd_end_ns);
             trace_task_event("end", "pt_cache", "update", req, upd_dequeue_time, &upd_resp);
-            processed = true;
-        }
 
-        // 1. 处理 REQUEST 请求
-        if (pt_request_fifo.num_available() > 0) {
-            req = pt_request_fifo.read();
-            const sc_time dequeue_time = sc_time_stamp();
-            const double start_ns = dequeue_time.to_seconds() * 1e9;
-            
-            // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
-            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
-            stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
-            
-            trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
-            CacheMessage resp = execute_pt_request(req);
-            const sc_time end = sc_time_stamp();
-            const double end_ns = end.to_seconds() * 1e9;
-            
-            // [STAT] 任务间隔分析: 计算gap = 当前start - 上一end
-            if (pt_sched_last_task_end_ >= 0.0) {
-                double gap_ns = start_ns - pt_sched_last_task_end_;
-                if (gap_ns > 0.0) {
-                    pt_sched_total_gap_ns_ += gap_ns;
-                    pt_sched_gap_count_++;
-                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
-                }
-            }
-            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
-            pt_sched_last_end_ns_ = end_ns;
-            pt_sched_total_exec_ns_ += (end_ns - start_ns);
-            pt_sched_task_count_++;
-            pt_sched_req_count_++;
-            pt_sched_last_task_end_ = end_ns;
-            
-            record_task_completion("pt_cache", dequeue_time, end);
-            stats_.record_pt_phase_timestamp("pt_cache", 0, start_ns, end_ns);
-            trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
-            
-            // [STAT] 区间命中率统计 (每1000笔REQUEST)
-            int interval_idx = static_cast<int>(pt_req_counter / 1000);
-            if (resp.hit) {
-                stats_.record_interval_hit("pt_cache", interval_idx);
-            } else {
-                stats_.record_interval_miss("pt_cache", interval_idx);
-            }
-            pt_req_counter++;
-            
-            if (resp.hit) {
-                push_fifo(pt_hit_response_fifo, resp);
-            } else {
-                push_fifo(pt_miss_response_fifo, resp);
-            }
-            processed = true;
-            
-            // [FIX] 处理完REQUEST后，排空pending UPDATEs
-            // 防止pt_update_fifo堆积导致Monitor/PTW线程阻塞
-            while (pt_update_fifo.num_available() > 0) {
-                CacheMessage upd = pt_update_fifo.read();
-                const sc_time upd_dequeue_time = sc_time_stamp();
-                const double upd_start_ns = upd_dequeue_time.to_seconds() * 1e9;
-                double upd_fifo_wait_ns = upd_start_ns - upd.timestamp.to_seconds() * 1e9;
-                stats_.accumulate_phase_task_wait("pt_cache", 1, upd_fifo_wait_ns);
-                trace_task_event("begin", "pt_cache", "update", upd, upd_dequeue_time);
-                CacheMessage upd_resp = execute_pt_update_request(upd);
-                const sc_time upd_end = sc_time_stamp();
-                const double upd_end_ns = upd_end.to_seconds() * 1e9;
-                if (pt_sched_last_task_end_ >= 0.0) {
-                    double gap_ns = upd_start_ns - pt_sched_last_task_end_;
-                    if (gap_ns > 0.0) {
-                        pt_sched_total_gap_ns_ += gap_ns;
-                        pt_sched_gap_count_++;
-                        if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
-                    }
-                }
-                if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = upd_start_ns;
-                pt_sched_last_end_ns_ = upd_end_ns;
-                pt_sched_total_exec_ns_ += (upd_end_ns - upd_start_ns);
-                pt_sched_task_count_++;
-                pt_sched_upd_count_++;
-                pt_sched_last_task_end_ = upd_end_ns;
-                record_task_completion("pt_cache", upd_dequeue_time, upd_end);
-                stats_.record_pt_phase_timestamp("pt_cache", 1, upd_start_ns, upd_end_ns);
-                trace_task_event("end", "pt_cache", "update", upd, upd_dequeue_time, &upd_resp);
-            }
-        }
-        // 2. 处理 UPDATE 请求（无REQUEST时）
-        else if (pt_update_fifo.num_available() > 0) {
-            req = pt_update_fifo.read();
-            const sc_time dequeue_time = sc_time_stamp();
-            const double start_ns = dequeue_time.to_seconds() * 1e9;
-            
-            // [STAT] 计算FIFO等待时间 = 读出时刻 - 写入时刻
-            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
-            stats_.accumulate_phase_task_wait("pt_cache", 1, fifo_wait_ns);
-            
-            trace_task_event("begin", "pt_cache", "update", req, dequeue_time);
-            CacheMessage resp = execute_pt_update_request(req);
-            const sc_time end = sc_time_stamp();
-            const double end_ns = end.to_seconds() * 1e9;
-            
-            // [STAT] 任务间隔分析: 计算gap = 当前start - 上一end
-            if (pt_sched_last_task_end_ >= 0.0) {
-                double gap_ns = start_ns - pt_sched_last_task_end_;
-                if (gap_ns > 0.0) {
-                    pt_sched_total_gap_ns_ += gap_ns;
-                    pt_sched_gap_count_++;
-                    if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
-                }
-            }
-            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
-            pt_sched_last_end_ns_ = end_ns;
-            pt_sched_total_exec_ns_ += (end_ns - start_ns);
-            pt_sched_task_count_++;
-            pt_sched_upd_count_++;
-            pt_sched_last_task_end_ = end_ns;
-            
-            record_task_completion("pt_cache", dequeue_time, end);
-            stats_.record_pt_phase_timestamp("pt_cache", 1, start_ns, end_ns);
-            trace_task_event("end", "pt_cache", "update", req, dequeue_time, &resp);
-            processed = true;
-        }
-        
-        // 如果没有处理任何请求，等待任意一个FIFO有数据
-        if (!processed) {
-            wait(pt_request_fifo.data_written_event() | 
-                 pt_update_fifo.data_written_event());
+            // [STAT] 累加到32任务组的排队统计（UPDATE执行时间计入REQUEST的排队延时）
+            pt_group_upd_since_last_ += upd_exec_ns;
+            pt_group_upd_cnt_since_++;
+
+            // 乒乓切换
+            pt_sched_next_is_request_ = true;
         }
     }
 }
@@ -518,6 +495,68 @@ void CacheSubsystem::print_pt_scheduler_gap_report() const {
     printf("    This means PTW has not yet produced UPDATE, and Collector has not\n");
     printf("    yet produced next REQUEST. The scheduler is waiting for data.\n");
     printf("=================================================\n\n");
+}
+
+// [STAT] 32任务组REQUEST排队/执行延时统计报告
+void CacheSubsystem::print_pt_group_report() const {
+    printf("\n========== PT Cache 32-Task Group Latency Report ==========\n");
+    if (pt_group_total_groups_ == 0 && pt_group_pos_ == 0) {
+        printf("  No groups completed.\n");
+        printf("=========================================================\n\n");
+        return;
+    }
+    
+    uint64_t total = pt_group_total_groups_;
+    // 如果当前组未完成但已有数据，也统计
+    int partial = pt_group_pos_;
+    
+    printf("  Completed groups:  %lu\n", (unsigned long)total);
+    if (partial > 0) printf("  Partial group:     %d / %d tasks\n", partial, PT_GROUP_SIZE);
+    printf("  ---\n");
+    
+    // 计算平均和总计
+    double sum_total_exec = 0, sum_total_queue = 0, sum_total_e2e = 0;
+    int sum_total_upd = 0;
+    
+    printf("  %-6s  %-12s  %-12s  %-12s  %-8s  %-10s\n",
+           "Pos", "ExecAvg(ns)", "QueueAvg(ns)", "E2EAvg(ns)", "UpdAvg", "RAM_Access");
+    printf("  %-6s  %-12s  %-12s  %-12s  %-8s  %-10s\n",
+           "------", "------------", "------------", "------------", "--------", "----------");
+    
+    for (int i = 0; i < PT_GROUP_SIZE; i++) {
+        if (total == 0) break;
+        double exec_avg  = pt_group_sum_exec_[i]  / total;
+        double queue_avg = pt_group_sum_queue_[i] / total;
+        double e2e_avg   = pt_group_sum_e2e_[i]   / total;
+        double upd_avg   = (double)pt_group_sum_upd_[i] / total;
+        
+        // 估算RAM访问次数: exec_avg / 4 (每次RAM访问约4ns含arbiter)
+        double ram_est = exec_avg / 4.0;
+        
+        printf("  T%-5d  %10.2f    %10.2f    %10.2f    %6.1f    %8.1f\n",
+               i + 1, exec_avg, queue_avg, e2e_avg, upd_avg, ram_est);
+        
+        sum_total_exec  += exec_avg;
+        sum_total_queue += queue_avg;
+        sum_total_e2e   += e2e_avg;
+        sum_total_upd   += pt_group_sum_upd_[i];
+    }
+    
+    if (total > 0) {
+        printf("  %-6s  %-12s  %-12s  %-12s  %-8s\n",
+               "------", "------------", "------------", "------------", "--------");
+        printf("  TOTAL  %10.2f    %10.2f    %10.2f    %6d\n",
+               sum_total_exec, sum_total_queue, sum_total_e2e, sum_total_upd);
+        printf("  ---\n");
+        printf("  Group interval:     %.2f ns  (exec + queue)\n", sum_total_exec + sum_total_queue);
+        printf("  Exec ratio:        %.1f%%\n",
+               (sum_total_exec + sum_total_queue) > 0 ?
+               sum_total_exec / (sum_total_exec + sum_total_queue) * 100.0 : 0.0);
+        printf("  Queue ratio:       %.1f%%\n",
+               (sum_total_exec + sum_total_queue) > 0 ?
+               sum_total_queue / (sum_total_exec + sum_total_queue) * 100.0 : 0.0);
+    }
+    printf("=========================================================\n\n");
 }
 
 // Walker Cache 统一轮询调度线程

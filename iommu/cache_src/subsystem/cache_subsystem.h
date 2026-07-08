@@ -91,6 +91,9 @@ public:
     // 获取配置
     const GlobalConfig& config() const { return cfg_; }
 
+    // [STAT] 打印32任务组统计报告
+    void print_pt_group_report() const;
+
 private:
     GlobalConfig cfg_;
     sc_time clock_period_;
@@ -181,6 +184,28 @@ private:
     double   pt_sched_last_task_end_  = -1.0;   // 上一笔任务结束时刻
     uint64_t pt_sched_req_count_      = 0;      // REQUEST任务数
     uint64_t pt_sched_upd_count_      = 0;      // UPDATE任务数
+
+    // [STAT] 乒乓调度状态
+    bool pt_sched_next_is_request_ = true;       // 乒乓标志: true=下一轮优先REQUEST
+
+    // [STAT] 32任务组REQUEST排队/执行延时统计
+    static constexpr int PT_GROUP_SIZE = 32;
+    double   pt_group_exec_ns_[32]   = {};       // 当前组每个REQUEST的执行延时
+    double   pt_group_queue_ns_[32]  = {};       // 当前组每个REQUEST的排队延时
+    double   pt_group_e2e_ns_[32]    = {};       // 当前组每个REQUEST的端到端延时
+    int      pt_group_upd_count_[32] = {};       // 当前组每个REQUEST间隔的UPDATE数
+    int      pt_group_pos_           = 0;        // 当前组已累积REQUEST数(0~31)
+    double   pt_group_last_req_end_  = -1.0;     // 上一个REQUEST结束时刻
+    double   pt_group_upd_since_last_ = 0.0;     // 自上个REQUEST以来的UPDATE执行时间
+    int      pt_group_upd_cnt_since_ = 0;        // 自上个REQUEST以来的UPDATE计数
+
+    // 历史汇总(稳态)
+    uint64_t pt_group_total_groups_  = 0;        // 完成的组数
+    double   pt_group_sum_exec_[32]  = {};       // 所有组position i的执行延时累加
+    double   pt_group_sum_queue_[32] = {};       // 所有组position i的排队延时累加
+    double   pt_group_sum_e2e_[32]   = {};       // 所有组position i的端到端延时累加
+    int      pt_group_sum_upd_[32]   = {};       // 所有组position i的UPDATE数累加
+
 };
 
 } // namespace iommu

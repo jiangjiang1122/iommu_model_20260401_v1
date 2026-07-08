@@ -2038,6 +2038,7 @@ void iommu_top::ptw_rsp_process_thread() {
             // [FIX] 必须先flush释放Buffer entry, 再写pt_update_fifo
             //       避免pt_update_fifo满时阻塞导致Buffer无法释放的死锁
             // =====================================================================
+            bool main_task_flushed_via_chain = false;  // [FIX] 防止主任务双重转发
             if (!task->walk_ctx.prefetch_enabled || task->walk_ctx.prefetch_depth == 0) {
                 // D=0: 没有预取组,直接flush主任务的Buffer链表
                 uint16_t head_idx = task->dedup_head_index;
@@ -2057,7 +2058,10 @@ void iommu_top::ptw_rsp_process_thread() {
                     fflush(stdout);
                     
                     // 调用flush释放Buffer entry并唤醒挂起任务
+                    // [FIX] flush_dedup_buffer_chain会将链表中所有任务(含主任务)写入pt_cache_to_fwd_fifo
+                    //       因此后续不能再写主任务到fwd_fifo，否则导致double free
                     flush_dedup_buffer_chain(head_idx, task->task_id, task, &main_iova, 1);
+                    main_task_flushed_via_chain = true;
                 }
             }
             
@@ -2102,8 +2106,14 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // Also route to forwarder after PT update
-            // TODO: 暂时禁用forwarded_task_ids，待修复崩溃问题
-            pt_cache_to_fwd_fifo.write(task);
+            // [FIX] 如果主任务已通过flush_dedup_buffer_chain转发，则跳过，避免double free
+            if (!main_task_flushed_via_chain) {
+                pt_cache_to_fwd_fifo.write(task);
+            } else {
+                printf("[PTW_FWD] task_id=%u -> skip duplicate forward (already flushed via buffer chain)\n",
+                       task->task_id);
+                fflush(stdout);
+            }
             // VA Dedup: 恢复挂起的同页任务
             va_dedup_recover(task, false);
         }
