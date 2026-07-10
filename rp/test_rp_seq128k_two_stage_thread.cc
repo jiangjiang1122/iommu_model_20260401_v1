@@ -10,12 +10,12 @@ using namespace std;
 // ============================================================
 // Test Scenario: 128KB Sequential Read + Two-Stage Address Translation
 //   iosatp = Sv48, iohgatp = Sv48x4
-//   IOVA range: 1MB (0x100000 ~ 0x1FFFFF), 256 pages
-//   GPA  = IOVA (identity mapping at 4KB page granularity)
+//   IOVA range: ~5MB (0x100000 ~ 0x5FFFFF), 1280 pages
+//   GPA pattern: 20 unique GPAs, 2MB stride, cycling reuse
 //   SPA  = GPA + 0x10000 (fixed offset)
-//   2000 sequential READ requests, each 512B
+//   10000 sequential READ requests, each 512B
 //
-//   Walker Cache and PT prefetch are DISABLED for this scenario.
+//   Walker Cache and PT prefetch are ENABLED.
 // ============================================================
 void RP_Module::send_translation_request_1_thread()
 {
@@ -47,31 +47,35 @@ void RP_Module::send_translation_request_1_thread()
 
         // ============================================================
         // 1MB VS-stage page table + G-stage mapping
-        // GPA pattern: 2MB递增 (非恒等映射)
+        // GPA pattern: 20 unique GPAs, 2MB stride, cycling reuse
         // ============================================================
-        const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
-        const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
-        const uint64_t GPA_STRIDE  = 0x200000;         // 2MB per page (GPA递增步长)
-        const int NUM_REQUESTS     = 5000;             // 5000 sequential requests (测试规模调整)
-        // 自适应页表范围：根据NUM_REQUESTS计算所需页数，向上取整到MB
-        const int PAGES_NEEDED = (NUM_REQUESTS + 1 + 7) / 8;  // +1 for Phase 1
-        const uint64_t RANGE = ((uint64_t)((PAGES_NEEDED * 0x1000 + 0xFFFFF) / 0x100000) * 0x100000);
-        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE / 0x1000);
+        const uint64_t IOVA_BASE      = 0x100000;         // 1MB aligned base
+        const uint64_t PA_OFFSET      = 0x10000;           // SPA = GPA + 0x10000
+        const uint64_t GPA_STRIDE     = 0x200000;          // 2MB per GPA step
+        const int      NUM_UNIQUE_GPAS = 20;               // 20 different GPAs
+        const int      NUM_REQUESTS    = 10000;            // 10000 sequential requests
+        // IOVA range: NUM_REQUESTS * 512B = 5MB -> 1280 pages
+        const uint64_t IOVA_RANGE      = (uint64_t)NUM_REQUESTS * 0x200;  // 5MB
+        const int      TOTAL_IOVA_PAGES = (int)(IOVA_RANGE / 0x1000);     // 1280 pages
+        // GPA range: 20 unique GPAs * 2MB = 40MB
+        const uint64_t GPA_RANGE       = (uint64_t)NUM_UNIQUE_GPAS * GPA_STRIDE; // 40MB
+        const int      TOTAL_GPA_PAGES = (int)(GPA_RANGE / 0x1000);       // 10240 G-stage pages
 
         printf("\n[TEST] Two-Stage Page Table Construction:\n");
         printf("[TEST]   IOVA range: 0x%lx ~ 0x%lx (%luMB, %d pages)\n",
-               IOVA_BASE, IOVA_BASE + RANGE, (unsigned long)(RANGE / 0x100000), TOTAL_PAGES_IN_RANGE);
-        printf("[TEST]   GPA = page_idx × 0x%lx (2MB stride), SPA = GPA + 0x%lx\n",
-               GPA_STRIDE, PA_OFFSET);
+               IOVA_BASE, IOVA_BASE + IOVA_RANGE, (unsigned long)(IOVA_RANGE / 0x100000), TOTAL_IOVA_PAGES);
+        printf("[TEST]   GPA = (page_idx %% %d) x 0x%lx (2MB stride, 20 unique GPAs cycling)\n",
+               NUM_UNIQUE_GPAS, GPA_STRIDE);
+        printf("[TEST]   SPA = GPA + 0x%lx, GPA range: 0 ~ 0x%lx (%d unique GPAs)\n",
+               PA_OFFSET, (uint64_t)(NUM_UNIQUE_GPAS - 1) * GPA_STRIDE, NUM_UNIQUE_GPAS);
 
         // ============================================================
         // 关键修复：在add_device之前将GPPN分配器偏移到测试GPA范围之上
-        // 这样add_device分配的VS root GPPN也在高位，避免与测试GPA冲突
-        // 测试GPA的GPPN范围: 0 ~ (TOTAL_PAGES_IN_RANGE-1) × (GPA_STRIDE/PAGESIZE)
-        // 例如: 767 × 0x200 = 0x5FE00
+        // 测试GPA的GPPN范围: 0 ~ (NUM_UNIQUE_GPAS-1) * GPA_STRIDE / PAGESIZE
+        // 例如: 19 * 0x200000 / 0x1000 = 19 * 512 = 9728
         // ============================================================
         extern uint64_t next_free_gpage[65536];
-        uint64_t test_max_gppn = (uint64_t)(TOTAL_PAGES_IN_RANGE - 1) * (GPA_STRIDE / PAGESIZE);
+        uint64_t test_max_gppn = (uint64_t)(NUM_UNIQUE_GPAS - 1) * (GPA_STRIDE / PAGESIZE);
         uint64_t gppn_offset = ((test_max_gppn + 0xFFFF) / 0x10000) * 0x10000;  // 向上对齐到64K
         next_free_gpage[1] = gppn_offset;  // GSCID=1, 必须在add_device之前设置!
         printf("[TEST]   GPPN offset: 0x%lx (test GPPN max=0x%lx)\n", gppn_offset, test_max_gppn);
@@ -148,22 +152,34 @@ void RP_Module::send_translation_request_1_thread()
         gpte.D = 1;
         gpte.PBMT = PMA;
 
-        // Map all pages: VS-stage (IOVA→GPA) + G-stage (GPA→SPA)
-        for (int p = 0; p < TOTAL_PAGES_IN_RANGE; p++) {
-            uint64_t iova_page = IOVA_BASE + (uint64_t)p * 0x1000;
-            uint64_t gpa_page  = (uint64_t)p * GPA_STRIDE;       // 2MB递增GPA (非identity)
-            uint64_t pa_page   = gpa_page + PA_OFFSET;           // final SPA
+        // ============================================================
+        // Map VS-stage (IOVA→GPA) + G-stage (GPA→SPA)
+        // VS-stage: 1280 IOVA pages, GPA cycles through 20 unique values
+        // G-stage: only 20 unique GPA→SPA mappings needed
+        // ============================================================
 
-            // VS-stage leaf: IOVA -> GPA
-            pte6.PPN = gpa_page / PAGESIZE;
-            add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, iova_page, pte6, 0, DC6.iohgatp, 0);
+        // First: create G-stage mappings for all 20 unique GPAs
+        for (int g = 0; g < NUM_UNIQUE_GPAS; g++) {
+            uint64_t gpa_page = (uint64_t)g * GPA_STRIDE;    // unique GPA
+            uint64_t pa_page  = gpa_page + PA_OFFSET;         // SPA
 
-            // G-stage leaf: GPA -> SPA
             gpte.PPN = pa_page / PAGESIZE;
             add_g_stage_pte(iommu_ptr, DC6.iohgatp, gpa_page, gpte, 0);
         }
-        printf("[TEST]   Mapped %d VS-stage pages and %d G-stage pages\n",
-               TOTAL_PAGES_IN_RANGE, TOTAL_PAGES_IN_RANGE);
+        printf("[TEST]   Mapped %d unique G-stage entries (GPA 0~0x%lx -> SPA)\n",
+               NUM_UNIQUE_GPAS, (uint64_t)(NUM_UNIQUE_GPAS - 1) * GPA_STRIDE);
+
+        // Then: create VS-stage mappings for all IOVA pages (GPA cycling)
+        for (int p = 0; p < TOTAL_IOVA_PAGES; p++) {
+            uint64_t iova_page = IOVA_BASE + (uint64_t)p * 0x1000;
+            int gpa_idx        = p % NUM_UNIQUE_GPAS;           // cycle through 20 GPAs
+            uint64_t gpa_page  = (uint64_t)gpa_idx * GPA_STRIDE;
+
+            pte6.PPN = gpa_page / PAGESIZE;
+            add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, iova_page, pte6, 0, DC6.iohgatp, 0);
+        }
+        printf("[TEST]   Mapped %d VS-stage pages (IOVA -> cycling 20 GPAs)\n",
+               TOTAL_IOVA_PAGES);
 
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for two-stage test...\n");
@@ -180,9 +196,10 @@ void RP_Module::send_translation_request_1_thread()
 
         response_count = 0;
         uint64_t single_iova = IOVA_BASE;
-        // Phase 1: IOVA=IOVA_BASE=0x100000, 页0, GPA=0×GPA_STRIDE=0, SPA=0+PA_OFFSET=0x10000
+        // Phase 1: IOVA=IOVA_BASE=0x100000, page 0, GPA=(0%20)*2MB=0, SPA=0+PA_OFFSET=0x10000
         uint64_t single_page_idx = (single_iova - IOVA_BASE) / 0x1000;
-        uint64_t single_expected_pa = (single_page_idx * GPA_STRIDE) + PA_OFFSET + (single_iova & 0xFFF);
+        int single_gpa_idx = single_page_idx % NUM_UNIQUE_GPAS;
+        uint64_t single_expected_pa = ((uint64_t)single_gpa_idx * GPA_STRIDE) + PA_OFFSET + (single_iova & 0xFFF);
 
         tlm_generic_payload single_trans;
         sc_time single_delay = SC_ZERO_TIME;
@@ -260,7 +277,8 @@ void RP_Module::send_translation_request_1_thread()
         for (int i = 0; i < NUM_REQUESTS; i++) {
             uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 512B stride, +1跳过Phase 1已用的IOVA
             uint64_t p2_page_idx = (iova - IOVA_BASE) / 0x1000;
-            uint64_t expected_pa = (p2_page_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
+            int p2_gpa_idx = p2_page_idx % NUM_UNIQUE_GPAS;
+            uint64_t expected_pa = ((uint64_t)p2_gpa_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
 
             trans_array[i] = new tlm_generic_payload();
             sc_time delay = SC_ZERO_TIME;
@@ -323,9 +341,10 @@ void RP_Module::send_translation_request_1_thread()
         int pass_count = 0;
         for (int i = 0; i < NUM_REQUESTS; i++) {
             uint64_t iova = IOVA_BASE + (uint64_t)(i + 1) * 0x200;  // 与注入循环保持一致
-            // GPA = page_idx × 2MB, SPA = GPA + PA_OFFSET, PA = SPA_page_base | iova_offset
+            // GPA = (page_idx % 20) × 2MB, SPA = GPA + PA_OFFSET
             uint64_t page_idx = (iova - IOVA_BASE) / 0x1000;
-            uint64_t expected_pa = (page_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
+            int gpa_idx = page_idx % NUM_UNIQUE_GPAS;
+            uint64_t expected_pa = ((uint64_t)gpa_idx * GPA_STRIDE) + PA_OFFSET + (iova & 0xFFF);
             uint64_t result_pa = trans_array[i]->get_address();
             tlm::tlm_response_status status = trans_array[i]->get_response_status();
 

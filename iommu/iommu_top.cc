@@ -186,6 +186,17 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
                task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
 
+        // [STAT] IOMMU输入端口任务间隔采样
+        if (iommu_in_last_ns > 0.0) {
+            double in_interval = ts_ns - iommu_in_last_ns;
+            iommu_in_interval_total_ns += in_interval;
+            if (in_interval > iommu_in_interval_max_ns) iommu_in_interval_max_ns = in_interval;
+            if (in_interval < iommu_in_interval_min_ns) iommu_in_interval_min_ns = in_interval;
+            iommu_in_interval_count++;
+            iommu_in_interval_values.push_back(in_interval);
+        }
+        iommu_in_last_ns = ts_ns;
+
         // 3. Push to inbound_fifo
         inbound_fifo.write(task);
 
@@ -636,14 +647,33 @@ void iommu_top::print_cache_statistics() {
         printf("  VS Miss (4 DDR):     %lu\n", (unsigned long)vs_miss);
         if (vs_lookup > 0) {
             printf("  VS Hit Rate:         %.1f%%\n", 100.0 * vs_total_hit / vs_lookup);
-            printf("  VS Hit Distribution:\n");
+            printf("  VS Hit Distribution (of lookups):\n");
             printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%  Miss: %.1f%%\n",
                    100.0 * vs_hit_c3 / vs_lookup,
                    100.0 * vs_hit_c2 / vs_lookup,
                    100.0 * vs_hit_c1 / vs_lookup,
                    100.0 * vs_miss / vs_lookup);
+            if (vs_total_hit > 0) {
+                printf("  VS Hit Distribution (of hits):\n");
+                printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%\n",
+                       100.0 * vs_hit_c3 / vs_total_hit,
+                       100.0 * vs_hit_c2 / vs_total_hit,
+                       100.0 * vs_hit_c1 / vs_total_hit);
+            }
             uint64_t ddr_saved = vs_hit_c3 * 3 + vs_hit_c2 * 2 + vs_hit_c1 * 1;
-            printf("  DDR Walks Saved:     %lu  (vs baseline 4 reads/lookup)\n", (unsigned long)ddr_saved);
+            uint64_t ddr_baseline = vs_lookup * 4;
+            uint64_t ddr_actual = vs_lookup * 4 - ddr_saved;
+            printf("  DDR Walks Saved:     %lu  (vs baseline %lu reads)\n", (unsigned long)ddr_saved, (unsigned long)ddr_baseline);
+            printf("  DDR Actual Reads:    %lu  (saved %.1f%%)\n", (unsigned long)ddr_actual, 100.0 * ddr_saved / ddr_baseline);
+            // [ANALYSIS] C1/C2/C3命中率分析
+            printf("  ---\n");
+            printf("  [Analysis] VS-stage Cache Level Hit Rate:\n");
+            printf("    C3 (leaf, 1 DDR):  %lu/%lu = %.1f%%\n", (unsigned long)vs_hit_c3, (unsigned long)vs_lookup, 100.0 * vs_hit_c3 / vs_lookup);
+            printf("    C2 (L1, 2 DDR):    %lu/%lu = %.1f%%\n", (unsigned long)vs_hit_c2, (unsigned long)vs_lookup, 100.0 * vs_hit_c2 / vs_lookup);
+            printf("    C1 (L2, 3 DDR):    %lu/%lu = %.1f%%\n", (unsigned long)vs_hit_c1, (unsigned long)vs_lookup, 100.0 * vs_hit_c1 / vs_lookup);
+            printf("    Miss (4 DDR):      %lu/%lu = %.1f%%\n", (unsigned long)vs_miss, (unsigned long)vs_lookup, 100.0 * vs_miss / vs_lookup);
+            printf("    Avg DDR/lookup:    %.2f  (baseline=4.00, saved=%.2f)\n",
+                   (double)ddr_actual / vs_lookup, (double)ddr_saved / vs_lookup);
         }
     }
     printf("==========================================================\n\n");
@@ -666,15 +696,34 @@ void iommu_top::print_cache_statistics() {
         printf("  S2 Miss (4 DDR):     %lu\n", (unsigned long)s2_miss);
         if (s2_lookup > 0) {
             printf("  S2 Hit Rate:         %.1f%%\n", 100.0 * s2_total_hit / s2_lookup);
-            printf("  S2 Hit Distribution:\n");
+            printf("  S2 Hit Distribution (of lookups):\n");
             printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%  Miss: %.1f%%\n",
                    100.0 * s2_hit_c3 / s2_lookup,
                    100.0 * s2_hit_c2 / s2_lookup,
                    100.0 * s2_hit_c1 / s2_lookup,
                    100.0 * s2_miss / s2_lookup);
+            if (s2_total_hit > 0) {
+                printf("  S2 Hit Distribution (of hits):\n");
+                printf("    C3: %.1f%%  C2: %.1f%%  C1: %.1f%%\n",
+                       100.0 * s2_hit_c3 / s2_total_hit,
+                       100.0 * s2_hit_c2 / s2_total_hit,
+                       100.0 * s2_hit_c1 / s2_total_hit);
+            }
             // DDR walk节省次数: 每次C3 hit省3次, C2 hit省2次, C1 hit省1次
             uint64_t ddr_saved = s2_hit_c3 * 3 + s2_hit_c2 * 2 + s2_hit_c1 * 1;
-            printf("  DDR Walks Saved:     %lu  (vs baseline 4 reads/lookup)\n", (unsigned long)ddr_saved);
+            uint64_t ddr_baseline = s2_lookup * 4;
+            uint64_t ddr_actual = s2_lookup * 4 - ddr_saved;
+            printf("  DDR Walks Saved:     %lu  (vs baseline %lu reads)\n", (unsigned long)ddr_saved, (unsigned long)ddr_baseline);
+            printf("  DDR Actual Reads:    %lu  (saved %.1f%%)\n", (unsigned long)ddr_actual, 100.0 * ddr_saved / ddr_baseline);
+            // [ANALYSIS] C1/C2/C3命中率分析
+            printf("  ---\n");
+            printf("  [Analysis] S2 Cache Level Hit Rate:\n");
+            printf("    C3 (leaf, 1 DDR):  %lu/%lu = %.1f%%\n", (unsigned long)s2_hit_c3, (unsigned long)s2_lookup, 100.0 * s2_hit_c3 / s2_lookup);
+            printf("    C2 (L1, 2 DDR):    %lu/%lu = %.1f%%\n", (unsigned long)s2_hit_c2, (unsigned long)s2_lookup, 100.0 * s2_hit_c2 / s2_lookup);
+            printf("    C1 (L2, 3 DDR):    %lu/%lu = %.1f%%\n", (unsigned long)s2_hit_c1, (unsigned long)s2_lookup, 100.0 * s2_hit_c1 / s2_lookup);
+            printf("    Miss (4 DDR):      %lu/%lu = %.1f%%\n", (unsigned long)s2_miss, (unsigned long)s2_lookup, 100.0 * s2_miss / s2_lookup);
+            printf("    Avg DDR/lookup:    %.2f  (baseline=4.00, saved=%.2f)\n",
+                   (double)ddr_actual / s2_lookup, (double)ddr_saved / s2_lookup);
         }
     }
     printf("================================================\n\n");
@@ -689,6 +738,8 @@ void iommu_top::print_cache_statistics() {
         printf("  IOMMU Completed:      %lu trans\n",  (unsigned long)iommu_total_completed);
         printf("  IOMMU IOPS:           %.2f M trans/s\n", iommu_iops_mps);
         printf("  PTW  Completed:       %lu tasks\n",  (unsigned long)ptw_total_completed);
+        printf("    Main tasks:         %lu\n",  (unsigned long)ptw_main_task_count);
+        printf("    Prefetch tasks:     %lu\n",  (unsigned long)ptw_prefetch_task_count);
         printf("  PTW  IOPS:            %.2f M tasks/s\n", ptw_iops_mps);
         if (ptw_total_completed > 0) {
             printf("  PTW  avg DDR reads:   %.2f reads/task\n",
@@ -713,12 +764,217 @@ void iommu_top::print_cache_statistics() {
             printf("    Min task latency:    %.1f ns  (%.3f us)\n",
                    ptw_min_task_latency_ns == 999999999.0 ? 0 : ptw_min_task_latency_ns,
                    ptw_min_task_latency_ns == 999999999.0 ? 0 : ptw_min_task_latency_ns / 1000.0);
+            // [NEW] PTW任务注入/输出间隔统计
+            printf("  ---\n");
+            printf("  PTW inject interval (pt_cache_to_ptw_fifo):\n");
+            printf("    Avg inject interval: %.2f ns\n",
+                   ptw_inject_interval_count > 0 ? ptw_inject_interval_total_ns / ptw_inject_interval_count : 0);
+            printf("    Max inject interval: %.2f ns\n", ptw_inject_interval_max_ns);
+            printf("    Min inject interval: %.2f ns\n",
+                   ptw_inject_interval_min_ns == 999999999.0 ? 0 : ptw_inject_interval_min_ns);
+            printf("    Inject count:        %lu\n", (unsigned long)ptw_inject_interval_count);
+            printf("  PTW output interval (walk_complete):\n");
+            printf("    Avg output interval: %.2f ns\n",
+                   ptw_output_interval_count > 0 ? ptw_output_interval_total_ns / ptw_output_interval_count : 0);
+            printf("    Max output interval: %.2f ns\n", ptw_output_interval_max_ns);
+            printf("    Min output interval: %.2f ns\n",
+                   ptw_output_interval_min_ns == 999999999.0 ? 0 : ptw_output_interval_min_ns);
+            printf("    Output count:        %lu\n", (unsigned long)ptw_output_interval_count);
+            printf("  PTW avg exec latency:  %.2f ns\n",
+                   ptw_total_exec_ns / ptw_total_completed);
+            
+            // [STAT] DDR访问次数分布直方图
+            printf("  ---\n");
+            printf("  PTW DDR reads distribution (ALL tasks):\n");
+            printf("    %-12s %-8s %-8s\n", "DDR_reads", "count", "percent");
+            for (auto& [ddr_cnt, cnt] : ptw_ddr_reads_distribution) {
+                printf("    %-12u %-8u %.2f%%\n",
+                       ddr_cnt, cnt, (double)cnt / ptw_total_completed * 100.0);
+            }
+            
+            // [STAT] 主任务DDR reads分布
+            printf("  ---\n");
+            printf("  PTW DDR reads distribution (MAIN tasks, count=%lu):\n",
+                   (unsigned long)ptw_main_task_count);
+            printf("    %-12s %-8s %-8s %-12s\n", "DDR_reads", "count", "percent", "avg_reads");
+            if (ptw_main_task_count > 0) {
+                printf("    %-12s %-8s %-8s %.2f\n", "-", "-", "-",
+                       (double)ptw_main_total_ddr_reads / ptw_main_task_count);
+                for (auto& [ddr_cnt, cnt] : ptw_main_ddr_reads_distribution) {
+                    printf("    %-12u %-8u %.2f%%\n",
+                           ddr_cnt, cnt, (double)cnt / ptw_main_task_count * 100.0);
+                }
+            }
+            
+            // [STAT] 预取任务DDR reads分布
+            printf("  ---\n");
+            printf("  PTW DDR reads distribution (PREFETCH tasks, count=%lu):\n",
+                   (unsigned long)ptw_prefetch_task_count);
+            printf("    %-12s %-8s %-8s %-12s\n", "DDR_reads", "count", "percent", "avg_reads");
+            if (ptw_prefetch_task_count > 0) {
+                printf("    %-12s %-8s %-8s %.2f\n", "-", "-", "-",
+                       (double)ptw_prefetch_total_ddr_reads / ptw_prefetch_task_count);
+                for (auto& [ddr_cnt, cnt] : ptw_prefetch_ddr_reads_distribution) {
+                    printf("    %-12u %-8u %.2f%%\n",
+                           ddr_cnt, cnt, (double)cnt / ptw_prefetch_task_count * 100.0);
+                }
+            }
+            
+            // [STAT] 任务执行延时分布（分桶）
+            printf("  ---\n");
+            printf("  PTW task exec latency distribution:\n");
+            // 自动分桶: 0~100ns, 100~500ns, 500~1000ns, 1000~5000ns, >5000ns
+            uint32_t lat_buckets[5] = {0};
+            const char* lat_labels[5] = {
+                "0~100ns", "100~500ns", "500~1000ns", "1000~5000ns", ">5000ns"
+            };
+            for (auto lat : ptw_task_latency_values) {
+                if (lat < 100) lat_buckets[0]++;
+                else if (lat < 500) lat_buckets[1]++;
+                else if (lat < 1000) lat_buckets[2]++;
+                else if (lat < 5000) lat_buckets[3]++;
+                else lat_buckets[4]++;
+            }
+            printf("    %-16s %-8s %-8s\n", "range", "count", "percent");
+            for (int i = 0; i < 5; i++) {
+                if (lat_buckets[i] > 0) {
+                    printf("    %-16s %-8u %.2f%%\n",
+                           lat_labels[i], lat_buckets[i],
+                           (double)lat_buckets[i] / ptw_task_latency_values.size() * 100.0);
+                }
+            }
+            
+            // [STAT] PTW任务组执行时间统计 (1主+D预取为一组)
+            if (ptw_group_exec_count > 0) {
+                uint32_t avg_pf_per_group = (uint32_t)((ptw_prefetch_task_count + ptw_group_exec_count / 2) / ptw_group_exec_count); // 四舍五入
+                printf("  ---\n");
+                printf("  PTW Task Group Execution Statistics (1 main + %u prefetch = %u tasks/group):\n",
+                       avg_pf_per_group, avg_pf_per_group + 1);
+                printf("    Completed groups:    %lu\n", (unsigned long)ptw_group_exec_count);
+                printf("    Avg exec time:       %.1f ns  (%.3f us)\n",
+                       ptw_group_exec_total_ns / ptw_group_exec_count,
+                       ptw_group_exec_total_ns / ptw_group_exec_count / 1000.0);
+                printf("    Max exec time:       %.1f ns  (%.3f us)\n",
+                       ptw_group_exec_max_ns, ptw_group_exec_max_ns / 1000.0);
+                printf("    Min exec time:       %.1f ns  (%.3f us)\n",
+                       ptw_group_exec_min_ns == 999999999.0 ? 0 : ptw_group_exec_min_ns,
+                       ptw_group_exec_min_ns == 999999999.0 ? 0 : ptw_group_exec_min_ns / 1000.0);
+                // 组执行时间分布直方图
+                uint32_t grp_buckets[5] = {0};
+                const char* grp_labels[5] = {
+                    "0~500ns", "500~1000ns", "1000~2000ns", "2000~5000ns", ">5000ns"
+                };
+                for (auto v : ptw_group_exec_values) {
+                    if (v < 500) grp_buckets[0]++;
+                    else if (v < 1000) grp_buckets[1]++;
+                    else if (v < 2000) grp_buckets[2]++;
+                    else if (v < 5000) grp_buckets[3]++;
+                    else grp_buckets[4]++;
+                }
+                printf("    Group exec time distribution:\n");
+                printf("      %-16s %-8s %-8s\n", "range", "count", "percent");
+                for (int i = 0; i < 5; i++) {
+                    if (grp_buckets[i] > 0) {
+                        printf("      %-16s %-8u %.2f%%\n",
+                               grp_labels[i], grp_buckets[i],
+                               (double)grp_buckets[i] / ptw_group_exec_values.size() * 100.0);
+                    }
+                }
+            }
+            
+            // [STAT] 导出输出间隔数据到CSV文件, 用于Python绘制波动曲线
+            {
+                FILE* fp = fopen("ptw_output_intervals.csv", "w");
+                if (fp) {
+                    fprintf(fp, "index,interval_ns\n");
+                    for (size_t i = 0; i < ptw_output_interval_values.size(); i++) {
+                        fprintf(fp, "%zu,%.2f\n", i, ptw_output_interval_values[i]);
+                    }
+                    fclose(fp);
+                    printf("  ---\n");
+                    printf("  Output interval data exported to: ptw_output_intervals.csv (%zu samples)\n",
+                           ptw_output_interval_values.size());
+                }
+            }
+            // [STAT] 导出DDR reads分布到CSV文件, 用于Python绘制柱状图
+            {
+                FILE* fp = fopen("ptw_ddr_reads_distribution.csv", "w");
+                if (fp) {
+                    fprintf(fp, "task_type,ddr_reads,count,percent\n");
+                    for (auto& [ddr_cnt, cnt] : ptw_ddr_reads_distribution) {
+                        fprintf(fp, "ALL,%u,%u,%.4f\n", ddr_cnt, cnt,
+                                (double)cnt / ptw_total_completed * 100.0);
+                    }
+                    for (auto& [ddr_cnt, cnt] : ptw_main_ddr_reads_distribution) {
+                        fprintf(fp, "MAIN,%u,%u,%.4f\n", ddr_cnt, cnt,
+                                ptw_main_task_count > 0 ? (double)cnt / ptw_main_task_count * 100.0 : 0);
+                    }
+                    for (auto& [ddr_cnt, cnt] : ptw_prefetch_ddr_reads_distribution) {
+                        fprintf(fp, "PREFETCH,%u,%u,%.4f\n", ddr_cnt, cnt,
+                                ptw_prefetch_task_count > 0 ? (double)cnt / ptw_prefetch_task_count * 100.0 : 0);
+                    }
+                    fclose(fp);
+                    printf("  DDR reads distribution exported to: ptw_ddr_reads_distribution.csv (%zu bins)\n",
+                           ptw_ddr_reads_distribution.size());
+                }
+            }
+            // [STAT] 导出任务执行延时到CSV文件, 用于Python绘制分布图
+            {
+                FILE* fp = fopen("ptw_task_latency.csv", "w");
+                if (fp) {
+                    fprintf(fp, "index,latency_ns\n");
+                    for (size_t i = 0; i < ptw_task_latency_values.size(); i++) {
+                        fprintf(fp, "%zu,%.2f\n", i, ptw_task_latency_values[i]);
+                    }
+                    fclose(fp);
+                    printf("  Task latency data exported to: ptw_task_latency.csv (%zu samples)\n",
+                           ptw_task_latency_values.size());
+                }
+            }
+            // [STAT] 导出任务组执行时间到CSV文件
+            if (ptw_group_exec_count > 0) {
+                FILE* fp = fopen("ptw_group_exec_latency.csv", "w");
+                if (fp) {
+                    fprintf(fp, "group_index,exec_time_ns\n");
+                    for (size_t i = 0; i < ptw_group_exec_values.size(); i++) {
+                        fprintf(fp, "%zu,%.2f\n", i, ptw_group_exec_values[i]);
+                    }
+                    fclose(fp);
+                    printf("  Group exec latency data exported to: ptw_group_exec_latency.csv (%zu samples)\n",
+                           ptw_group_exec_values.size());
+                }
+            }
         }
         if (iommu_total_completed > 0) {
             double avg_e2e_ns = iommu_total_e2e_latency_ns / iommu_total_completed;
             double avg_req_ns = sim_time_sec * 1e9 / iommu_total_completed;
             printf("  IO   avg e2e lat:     %.1f ns  (%.3f us)\n", avg_e2e_ns, avg_e2e_ns/1000.0);
+            printf("  IO   max e2e lat:     %.1f ns  (%.3f us)\n", iommu_e2e_max_ns, iommu_e2e_max_ns/1000.0);
+            printf("  IO   min e2e lat:     %.1f ns  (%.3f us)\n",
+                   iommu_e2e_min_ns == 999999999.0 ? 0 : iommu_e2e_min_ns,
+                   iommu_e2e_min_ns == 999999999.0 ? 0 : iommu_e2e_min_ns/1000.0);
             printf("  IO   avg req time:    %.1f ns  (%.3f us)\n", avg_req_ns, avg_req_ns/1000.0);
+            // [STAT] IOMMU e2e延时分布
+            if (!iommu_e2e_values.empty()) {
+                uint32_t e2e_buckets[6] = {0};
+                const char* e2e_labels[6] = {"0~500ns", "500~1000ns", "1000~2000ns", "2000~5000ns", "5000~10000ns", ">10000ns"};
+                for (auto v : iommu_e2e_values) {
+                    if (v < 500) e2e_buckets[0]++;
+                    else if (v < 1000) e2e_buckets[1]++;
+                    else if (v < 2000) e2e_buckets[2]++;
+                    else if (v < 5000) e2e_buckets[3]++;
+                    else if (v < 10000) e2e_buckets[4]++;
+                    else e2e_buckets[5]++;
+                }
+                printf("  IO   e2e latency distribution:\n");
+                printf("    %-16s %-8s %-8s\n", "range", "count", "percent");
+                for (int i = 0; i < 6; i++) {
+                    if (e2e_buckets[i] > 0) {
+                        printf("    %-16s %-8u %.2f%%\n", e2e_labels[i], e2e_buckets[i],
+                               (double)e2e_buckets[i] / iommu_e2e_values.size() * 100.0);
+                    }
+                }
+            }
         }
         // 稳态IOPS（跳过warmup/drain，只取中间稳定段）
         if (steady_end_ns > steady_start_ns && steady_end_count > steady_start_count) {
@@ -773,6 +1029,28 @@ void iommu_top::print_cache_statistics() {
     }
     printf("============================================\n\n");
 
+    // IOMMU Input/Output Port Interval Statistics
+    printf("========== IOMMU Port Task Interval Statistics ==========\n");
+    printf("  Input Port (slave_0, inbound_fifo):\n");
+    if (iommu_in_interval_count > 0) {
+        printf("    Avg input interval:  %.2f ns\n", iommu_in_interval_total_ns / iommu_in_interval_count);
+        printf("    Max input interval:  %.2f ns\n", iommu_in_interval_max_ns);
+        printf("    Min input interval:  %.2f ns\n", iommu_in_interval_min_ns);
+        printf("    Sample count:        %lu\n", (unsigned long)iommu_in_interval_count);
+    } else {
+        printf("    (no samples)\n");
+    }
+    printf("  Output Port (master_0, response):\n");
+    if (iommu_out_interval_count > 0) {
+        printf("    Avg output interval: %.2f ns\n", iommu_out_interval_total_ns / iommu_out_interval_count);
+        printf("    Max output interval: %.2f ns\n", iommu_out_interval_max_ns);
+        printf("    Min output interval: %.2f ns\n", iommu_out_interval_min_ns);
+        printf("    Sample count:        %lu\n", (unsigned long)iommu_out_interval_count);
+    } else {
+        printf("    (no samples)\n");
+    }
+    printf("=========================================================\n\n");
+
     // Outstanding Peak Statistics
     printf("========== Outstanding Peak Statistics ==========\n");
     printf("  %-30s peak=%4d / max=%4d\n", "IOMMU Global:",
@@ -792,6 +1070,100 @@ void iommu_top::print_cache_statistics() {
     printf("  %-30s peak=%4d / max=%4d\n", "Output (master_0):",
            peak_axi_master_0_outstanding,   (int)AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING);
     printf("=================================================\n\n");
+
+    // [MONITOR] 阻塞点监控统计报告
+    printf("========== [MONITOR] 阻塞点监控统计 ==========\n");
+    
+    // 监控点1: flush_dedup_buffer_by_iova 阻塞统计
+    printf("--- 监控点1: flush_dedup_buffer_by_iova 阻塞 ---\n");
+    printf("  flush调用总次数:          %lu\n", (unsigned long)monitor_flush_total_count);
+    printf("  flush总耗时:              %.1f ns (%.3f us)\n", monitor_flush_total_ns, monitor_flush_total_ns / 1000.0);
+    printf("  单次flush平均耗时:        %.2f ns\n", 
+           monitor_flush_total_count > 0 ? monitor_flush_total_ns / monitor_flush_total_count : 0.0);
+    printf("  单次flush最大耗时:        %.1f ns\n", monitor_flush_max_ns);
+    printf("  FIFO阻塞次数:             %lu\n", (unsigned long)monitor_flush_fifo_block_count);
+    printf("  FIFO阻塞总耗时:           %.1f ns\n", monitor_flush_fifo_block_total_ns);
+    printf("  FIFO阻塞平均耗时:         %.2f ns\n",
+           monitor_flush_fifo_block_count > 0 ? monitor_flush_fifo_block_total_ns / monitor_flush_fifo_block_count : 0.0);
+    printf("  FIFO阻塞最大耗时:         %.1f ns\n", monitor_flush_fifo_block_max_ns);
+    // [NEW] 扫描时间与FIFO阻塞时间分离
+    printf("  [分解] 纯扫描总耗时:      %.1f ns (%.3f us)\n", monitor_flush_scan_total_ns, monitor_flush_scan_total_ns / 1000.0);
+    printf("  [分解] 单次扫描平均耗时:  %.2f ns\n",
+           monitor_flush_total_count > 0 ? monitor_flush_scan_total_ns / monitor_flush_total_count : 0.0);
+    printf("  [分解] 单次扫描最大耗时:  %.1f ns\n", monitor_flush_scan_max_ns);
+    printf("  [分解] FIFO阻塞占比:      %.1f%%\n",
+           monitor_flush_total_ns > 0 ? monitor_flush_fifo_block_total_ns / monitor_flush_total_ns * 100.0 : 0.0);
+    printf("  [分解] 扫描entry总数:     %lu (每次%u entries)\n",
+           (unsigned long)monitor_flush_scanned_entries, (unsigned)PT_DEDUP_BUFFER_SIZE);
+    printf("  [分解] 匹配entry总数:     %lu (平均每次%.1f个)\n",
+           (unsigned long)monitor_flush_matched_entries,
+           monitor_flush_total_count > 0 ? (double)monitor_flush_matched_entries / monitor_flush_total_count : 0.0);
+    printf("\n");
+    
+    // 监控点2: PT Cache UPDATE 阻塞统计
+    printf("--- 监控点2: PT Cache UPDATE 阻塞 ---\n");
+    printf("  PT UPDATE写入总次数:      %lu\n", (unsigned long)monitor_pt_update_total_count);
+    printf("  PT UPDATE写入总耗时:      %.1f ns (%.3f us)\n", monitor_pt_update_total_ns, monitor_pt_update_total_ns / 1000.0);
+    printf("  单次PT UPDATE平均耗时:    %.2f ns\n",
+           monitor_pt_update_total_count > 0 ? monitor_pt_update_total_ns / monitor_pt_update_total_count : 0.0);
+    printf("  单次PT UPDATE最大耗时:    %.1f ns\n", monitor_pt_update_max_ns);
+    printf("  FIFO阻塞次数:             %lu\n", (unsigned long)monitor_pt_update_fifo_block_count);
+    printf("  FIFO阻塞总耗时:           %.1f ns\n", monitor_pt_update_fifo_block_ns);
+    // [NEW] PT UPDATE排队等待时间
+    printf("  [排队] UPDATE在FIFO中排队总时间: %.1f ns (%.3f us)\n",
+           monitor_pt_update_queue_wait_total_ns, monitor_pt_update_queue_wait_total_ns / 1000.0);
+    printf("  [排队] 有排队的UPDATE次数:       %lu\n", (unsigned long)monitor_pt_update_queue_wait_count);
+    printf("  [排队] 平均排队等待时间:         %.2f ns\n",
+           monitor_pt_update_queue_wait_count > 0 ? monitor_pt_update_queue_wait_total_ns / monitor_pt_update_queue_wait_count : 0.0);
+    printf("  [排队] 最大排队等待时间:         %.1f ns\n", monitor_pt_update_queue_wait_max_ns);
+    // [NEW] 从StatsCollector读取PT UPDATE排队等待统计(乒乓调度中的实际排队)
+    {
+        const auto& pt_stats = cache_sub.stats().get_stats("pt_cache");
+        printf("  [Stats] UPDATE任务数:          %lu\n", (unsigned long)pt_stats.upd_task_count);
+        printf("  [Stats] UPDATE FIFO排队总时间: %.1f ns (%.3f us)\n",
+               pt_stats.upd_task_wait_ns, pt_stats.upd_task_wait_ns / 1000.0);
+        printf("  [Stats] UPDATE平均排队时间:    %.2f ns\n",
+               pt_stats.upd_task_count > 0 ? pt_stats.upd_task_wait_ns / pt_stats.upd_task_count : 0.0);
+        printf("  [Stats] REQUEST FIFO排队总时间: %.1f ns (%.3f us)\n",
+               pt_stats.req_task_wait_ns, pt_stats.req_task_wait_ns / 1000.0);
+        printf("  [Stats] REQUEST任务数:          %lu\n", (unsigned long)pt_stats.req_task_count);
+        printf("  [Stats] REQUEST平均排队时间:    %.2f ns\n",
+               pt_stats.req_task_count > 0 ? pt_stats.req_task_wait_ns / pt_stats.req_task_count : 0.0);
+    }
+    printf("\n");
+    
+    // 监控点3: Monitor线程整体处理统计
+    printf("--- 监控点3: Monitor线程整体处理 ---\n");
+    printf("  处理group总数:            %lu\n", (unsigned long)monitor_group_total_count);
+    printf("  group总处理耗时:          %.1f ns (%.3f us)\n", monitor_group_total_process_ns, monitor_group_total_process_ns / 1000.0);
+    printf("  单个group平均处理耗时:    %.2f ns\n",
+           monitor_group_total_count > 0 ? monitor_group_total_process_ns / monitor_group_total_count : 0.0);
+    printf("  单个group最大处理耗时:    %.1f ns\n", monitor_group_max_process_ns);
+    printf("\n");
+    
+    // 监控点4: 重排序乱序暂存统计
+    printf("--- 监控点4: 重排序乱序暂存 ---\n");
+    printf("  乱序到达任务数:           %lu\n", (unsigned long)reorder_out_of_order_count);
+    printf("  标记ready总任务数:       %lu\n", (unsigned long)reorder_total_marked_count);
+    printf("  乱序比例:                 %.2f%%\n",
+           reorder_total_marked_count > 0 ? (double)reorder_out_of_order_count / reorder_total_marked_count * 100.0 : 0.0);
+    printf("  写请求保序阻塞次数:       %lu\n", (unsigned long)reorder_write_blocked_count);
+    printf("  写请求阻塞总耗时:         %.1f ns\n", reorder_write_blocked_total_ns);
+    printf("  写请求阻塞平均耗时:       %.2f ns\n",
+           reorder_write_blocked_count > 0 ? reorder_write_blocked_total_ns / reorder_write_blocked_count : 0.0);
+    printf("  写请求阻塞最大耗时:       %.1f ns\n", reorder_write_blocked_max_ns);
+    printf("  等待队头次数:             %lu\n", (unsigned long)reorder_wait_for_head_count);
+    // [NEW] 读请求reorder等待延时
+    printf("  [读请求] 总发送次数:       %lu\n", (unsigned long)reorder_read_total_sent_count);
+    printf("  [读请求] 有等待的次数:     %lu (比例=%.2f%%)\n",
+           (unsigned long)reorder_read_waited_count,
+           reorder_read_total_sent_count > 0 ? (double)reorder_read_waited_count / reorder_read_total_sent_count * 100.0 : 0.0);
+    printf("  [读请求] 等待总耗时:       %.1f ns (%.3f us)\n",
+           reorder_read_total_wait_ns, reorder_read_total_wait_ns / 1000.0);
+    printf("  [读请求] 平均等待耗时:     %.2f ns\n",
+           reorder_read_waited_count > 0 ? reorder_read_total_wait_ns / reorder_read_waited_count : 0.0);
+    printf("  [读请求] 最大等待耗时:     %.1f ns\n", reorder_read_max_wait_ns);
+    printf("============================================\n\n");
 
     // Serial Cache Pipeline Busy-Time Analysis [DISABLED - causes segfault after sc_stop]
     /*

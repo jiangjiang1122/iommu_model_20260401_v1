@@ -130,8 +130,8 @@ void iommu_top::flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
         return;
     }
     
-    printf("[DEDUP_FLUSH] group_id=%u -> Flushing buffer chain from head[%u]\n",
-           group_id, head_index);
+    printf("[DEDUP_FLUSH] group_id=%u -> Flushing buffer chain from head[%u] [t=%.1f ns]\n",
+           group_id, head_index, sc_time_stamp().to_seconds() * 1e9);
     fflush(stdout);
     
     // 注意: batch_update_placeholders已在Monitor中调用,此处不再重复
@@ -248,6 +248,8 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
                                             iommu_task_t* main_task,
                                             const uint64_t* group_iovas,
                                             uint32_t total_tasks) {
+    // [MONITOR] 记录flush开始时间
+    const double flush_start_ns = sc_time_stamp().to_seconds() * 1e9;
     uint64_t target_iova_aligned = target_iova & ~0xFFFULL;  // 4KB对齐
     
     printf("[DEDUP_FLUSH_IOVA] group_id=%u -> Scanning buffer for iova=0x%lx\n",
@@ -263,6 +265,8 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
     
     uint32_t flushed_count = 0;
     uint32_t skipped_count = 0;
+    uint32_t matched_count = 0;  // [MONITOR] 匹配的entry数
+    double   local_fifo_block_ns = 0.0;  // [MONITOR] 本次flush中FIFO阻塞累计时间
     
     // 扫描整个Buffer
     for (uint32_t idx = 0; idx < PT_DEDUP_BUFFER_SIZE; idx++) {
@@ -273,6 +277,8 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
         uint64_t entry_iova_aligned = entry.iova & ~0xFFFULL;
         if (entry_iova_aligned != target_iova_aligned) continue;
         
+        // [MONITOR] 匹配成功
+        matched_count++;
         // 匹配的entry: 处理挂起任务
         iommu_task_t* pending_task = entry.task_ptr;
         uint64_t entry_iova = entry.iova;  // 保存iova（free_entry会清空）
@@ -338,12 +344,45 @@ void iommu_top::flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_
         
         // 发送到forwarder（仅普通挂起任务）
         if (pending_task != nullptr) {
+            // [MONITOR] 测量FIFO写入阻塞时间
+            const double fifo_write_start_ns = sc_time_stamp().to_seconds() * 1e9;
+            const int fifo_avail_before = pt_cache_to_fwd_fifo.num_available();
             pt_cache_to_fwd_fifo.write(pending_task);
+            const double fifo_write_end_ns = sc_time_stamp().to_seconds() * 1e9;
+            const double fifo_write_delay_ns = fifo_write_end_ns - fifo_write_start_ns;
+            
+            // 如果写入耗时>0，说明FIFO满导致阻塞
+            if (fifo_write_delay_ns > 0.0) {
+                monitor_flush_fifo_block_count++;
+                monitor_flush_fifo_block_total_ns += fifo_write_delay_ns;
+                if (fifo_write_delay_ns > monitor_flush_fifo_block_max_ns)
+                    monitor_flush_fifo_block_max_ns = fifo_write_delay_ns;
+                local_fifo_block_ns += fifo_write_delay_ns;
+                printf("[MONITOR_FL] FIFO BLOCK: iova=0x%lx, task_id=%u, delay=%.1f ns, fifo_avail_before=%d\n",
+                       target_iova_aligned, pending_task->task_id, fifo_write_delay_ns, fifo_avail_before);
+                fflush(stdout);
+            }
         }
     }
     
-    printf("[DEDUP_FLUSH_IOVA] group_id=%u -> IOVA scan completed (%u flushed, %u skipped for iova=0x%lx)\n",
-           group_id, flushed_count, skipped_count, target_iova_aligned);
+    // [MONITOR] 记录flush结束时间并更新统计
+    const double flush_end_ns = sc_time_stamp().to_seconds() * 1e9;
+    const double flush_duration_ns = flush_end_ns - flush_start_ns;
+    const double scan_duration_ns = flush_duration_ns - local_fifo_block_ns;  // 纯扫描时间 = 总时间 - FIFO阻塞时间
+    monitor_flush_total_count++;
+    monitor_flush_total_ns += flush_duration_ns;
+    if (flush_duration_ns > monitor_flush_max_ns)
+        monitor_flush_max_ns = flush_duration_ns;
+    // [MONITOR] 扫描时间分离统计
+    monitor_flush_scan_total_ns += scan_duration_ns;
+    if (scan_duration_ns > monitor_flush_scan_max_ns)
+        monitor_flush_scan_max_ns = scan_duration_ns;
+    monitor_flush_matched_entries += matched_count;
+    monitor_flush_scanned_entries += PT_DEDUP_BUFFER_SIZE;
+    
+    printf("[DEDUP_FLUSH_IOVA] group_id=%u -> IOVA scan completed (%u flushed, %u matched, %u skipped for iova=0x%lx) [total=%.1f ns, scan=%.1f ns, fifo_block=%.1f ns]\n",
+           group_id, flushed_count, matched_count, skipped_count, target_iova_aligned,
+           flush_duration_ns, scan_duration_ns, local_fifo_block_ns);
     fflush(stdout);
 }
 

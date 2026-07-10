@@ -189,6 +189,7 @@ public:
         bool     completed = false;           // 组完成标志
         bool     main_task_done = false;      // 主任务walk完成标志(pt_updates[0]已填充)
         bool     has_fault = false;           // 组中有任务fault
+        double   group_start_ns = 0.0;        // [STAT] 组起始时间(主任务进入PTW时刻, ns)
         
         // 收集所有walk结果
         spte_t   vs_ptes[17];
@@ -235,9 +236,97 @@ public:
     double   ptw_max_task_latency_ns;     // 单笔任务最大延时
     double   ptw_min_task_latency_ns;     // 单笔任务最小延时
     std::map<uint32_t, double> ptw_task_start_ns; // task_id -> PTW入口时刻(ns)
+    // [NEW] PTW任务注入/输出间隔统计
+    double   ptw_last_inject_ns;          // 上一次任务注入时刻(ns)
+    double   ptw_inject_interval_total_ns; // 注入间隔总和(ns)
+    double   ptw_inject_interval_max_ns;  // 最大注入间隔(ns)
+    double   ptw_inject_interval_min_ns;  // 最小注入间隔(ns)
+    uint64_t ptw_inject_interval_count;   // 注入间隔采样次数
+    double   ptw_last_output_ns;          // 上一次任务输出时刻(ns)
+    double   ptw_output_interval_total_ns; // 输出间隔总和(ns)
+    double   ptw_output_interval_max_ns;  // 最大输出间隔(ns)
+    double   ptw_output_interval_min_ns;  // 最小输出间隔(ns)
+    uint64_t ptw_output_interval_count;   // 输出间隔采样次数
+    // [STAT] PTW DDR访问次数分布与任务分类统计
+    std::map<uint32_t, uint32_t> ptw_ddr_reads_distribution;  // DDR reads -> count (all tasks)
+    std::map<uint32_t, uint32_t> ptw_main_ddr_reads_distribution;   // 主任务DDR reads分布
+    std::map<uint32_t, uint32_t> ptw_prefetch_ddr_reads_distribution; // 预取任务DDR reads分布
+    uint64_t ptw_main_task_count;          // 主任务数(非prefetch)
+    uint64_t ptw_prefetch_task_count;      // 预取任务数
+    // [STAT] 主任务/预取任务DDR reads汇总
+    uint64_t ptw_main_total_ddr_reads;     // 主任务DDR读总数
+    uint64_t ptw_prefetch_total_ddr_reads; // 预取任务DDR读总数
+    std::vector<double> ptw_output_interval_values;  // 所有输出间隔值(ns), 用于波动曲线
+    std::vector<double> ptw_task_latency_values;     // 所有任务执行延时(ns), 用于分布统计
+    // [STAT] PTW任务组执行时间统计 (1主+D预取为一组)
+    double   ptw_group_exec_total_ns;        // 所有组执行时间总和(ns)
+    double   ptw_group_exec_max_ns;          // 单组最大执行时间(ns)
+    double   ptw_group_exec_min_ns;          // 单组最小执行时间(ns)
+    uint64_t ptw_group_exec_count;           // 完成的组数
+    std::vector<double> ptw_group_exec_values; // 每组执行时间(ns), 用于分布统计
 
     // ===================== End-to-End Latency Statistics =====================
     double   iommu_total_e2e_latency_ns;  // 所有IO端到端延时总和(ns)
+    double   iommu_e2e_max_ns;            // 单笔IO最大端到端延时(ns)
+    double   iommu_e2e_min_ns;            // 单笔IO最小端到端延时(ns)
+    std::vector<double> iommu_e2e_values; // 每笔IO端到端延时(ns), 用于分布统计
+
+    // ===================== IOMMU Input/Output Port Interval Statistics =====================
+    // 输入端口(inbound_fifo)任务间隔
+    double   iommu_in_last_ns;              // 上一次输入任务时刻(ns)
+    double   iommu_in_interval_total_ns;    // 输入间隔总和(ns)
+    double   iommu_in_interval_max_ns;      // 最大输入间隔(ns)
+    double   iommu_in_interval_min_ns;      // 最小输入间隔(ns)
+    uint64_t iommu_in_interval_count;       // 输入间隔采样次数
+    std::vector<double> iommu_in_interval_values;  // 所有输入间隔值(ns)
+    // 输出端口(master_0)任务间隔
+    double   iommu_out_last_ns;             // 上一次输出任务时刻(ns)
+    double   iommu_out_interval_total_ns;   // 输出间隔总和(ns)
+    double   iommu_out_interval_max_ns;     // 最大输出间隔(ns)
+    double   iommu_out_interval_min_ns;     // 最小输出间隔(ns)
+    uint64_t iommu_out_interval_count;      // 输出间隔采样次数
+    std::vector<double> iommu_out_interval_values; // 所有输出间隔值(ns)
+
+    // ===================== [MONITOR] 阻塞点监控统计 =====================
+    // 监控点1: flush_dedup_buffer_by_iova 阻塞统计
+    uint64_t monitor_flush_total_count;           // flush调用总次数
+    double   monitor_flush_total_ns;              // flush总耗时(ns)
+    double   monitor_flush_max_ns;                // 单次flush最大耗时(ns)
+    uint64_t monitor_flush_fifo_block_count;      // FIFO阻塞次数(pt_cache_to_fwd_fifo满)
+    double   monitor_flush_fifo_block_total_ns;   // FIFO阻塞总耗时(ns)
+    double   monitor_flush_fifo_block_max_ns;     // 单次FIFO阻塞最大耗时(ns)
+    // [NEW] 监控点1增强: 扫描时间与FIFO阻塞时间分离
+    double   monitor_flush_scan_total_ns;         // 256-entry扫描总耗时(ns)(不含FIFO阻塞)
+    double   monitor_flush_scan_max_ns;           // 单次扫描最大耗时(ns)
+    uint64_t monitor_flush_matched_entries;       // 匹配的buffer entry总数
+    uint64_t monitor_flush_scanned_entries;       // 扫描的buffer entry总数(=调用次数×256)
+    // 监控点2: Monitor线程PT Cache UPDATE阻塞统计
+    uint64_t monitor_pt_update_total_count;       // PT UPDATE写入总次数
+    double   monitor_pt_update_total_ns;          // PT UPDATE写入总耗时(ns)
+    double   monitor_pt_update_max_ns;            // 单次PT UPDATE最大耗时(ns)
+    uint64_t monitor_pt_update_fifo_block_count;  // PT UPDATE FIFO阻塞次数
+    double   monitor_pt_update_fifo_block_ns;     // PT UPDATE FIFO阻塞总耗时(ns)
+    // [NEW] 监控点2增强: PT UPDATE在pt_update_fifo中的排队等待时间
+    double   monitor_pt_update_queue_wait_total_ns; // UPDATE消息在FIFO中排队等待总时间(ns)
+    double   monitor_pt_update_queue_wait_max_ns;   // UPDATE消息最大排队等待时间(ns)
+    uint64_t monitor_pt_update_queue_wait_count;    // 有排队等待的UPDATE次数
+    // 监控点3: Monitor线程整体处理统计
+    uint64_t monitor_group_total_count;           // 处理的group总数
+    double   monitor_group_total_process_ns;      // group总处理耗时(ns)(含flush+PT UPDATE)
+    double   monitor_group_max_process_ns;        // 单个group最大处理耗时(ns)
+    // 监控点4: 重排序乱序暂存统计
+    uint64_t reorder_out_of_order_count;          // 乱序到达的任务数(所有类型)
+    uint64_t reorder_total_marked_count;          // 标记ready的总任务数(用于计算乱序比例)
+    uint64_t reorder_write_blocked_count;         // 写请求因队头未ready被阻塞的次数
+    double   reorder_write_blocked_total_ns;      // 写请求阻塞总耗时(ns)
+    double   reorder_write_blocked_max_ns;        // 写请求单次最大阻塞耗时(ns)
+    uint64_t reorder_wait_for_head_count;         // reorder_output_thread等待队头的次数
+    double   reorder_wait_for_head_total_ns;      // reorder_output_thread等待队头总耗时(ns)
+    // [NEW] 监控点4增强: 读请求reorder等待延时(ready->实际发送)
+    double   reorder_read_total_wait_ns;          // 读请求等待发送总耗时(ns)
+    double   reorder_read_max_wait_ns;            // 读请求单次最大等待耗时(ns)
+    uint64_t reorder_read_waited_count;           // 读请求等待>0的次数
+    uint64_t reorder_read_total_sent_count;       // 读请求总发送次数
 
     // ===================== Steady-State IOPS Measurement =====================
     // 跳过前10%和后10%，只统计中间80%稳定段
@@ -287,6 +376,7 @@ public:
         iommu_task_t* task;
         bool ready;       // 翻译完成（含 fault），已可输出
         bool is_write;    // 1=写请求，需保序；0=读请求，可乱序
+        double ready_ns;  // [MONITOR] 标记ready的时刻(ns)，用于计算乱序等待时间
     };
     std::map<uint32_t, reorder_entry_t> reorder_buf;   // key = task_id
     std::queue<uint32_t> reorder_write_order;          // 写请求到达顺序（task_id）
@@ -449,7 +539,69 @@ public:
         ptw_ddr_latency_count(0),
         ptw_max_task_latency_ns(0.0),
         ptw_min_task_latency_ns(999999999.0),
+        ptw_last_inject_ns(0.0),
+        ptw_inject_interval_total_ns(0.0),
+        ptw_inject_interval_max_ns(0.0),
+        ptw_inject_interval_min_ns(999999999.0),
+        ptw_inject_interval_count(0),
+        ptw_last_output_ns(0.0),
+        ptw_output_interval_total_ns(0.0),
+        ptw_output_interval_max_ns(0.0),
+        ptw_output_interval_min_ns(999999999.0),
+        ptw_output_interval_count(0),
+        ptw_main_task_count(0),
+        ptw_prefetch_task_count(0),
+        ptw_main_total_ddr_reads(0),
+        ptw_prefetch_total_ddr_reads(0),
+        ptw_group_exec_total_ns(0.0),
+        ptw_group_exec_max_ns(0.0),
+        ptw_group_exec_min_ns(999999999.0),
+        ptw_group_exec_count(0),
         iommu_total_e2e_latency_ns(0.0),
+        iommu_e2e_max_ns(0.0),
+        iommu_e2e_min_ns(999999999.0),
+        iommu_in_last_ns(0.0),
+        iommu_in_interval_total_ns(0.0),
+        iommu_in_interval_max_ns(0.0),
+        iommu_in_interval_min_ns(999999999.0),
+        iommu_in_interval_count(0),
+        iommu_out_last_ns(0.0),
+        iommu_out_interval_total_ns(0.0),
+        iommu_out_interval_max_ns(0.0),
+        iommu_out_interval_min_ns(999999999.0),
+        iommu_out_interval_count(0),
+        monitor_flush_total_count(0),
+        monitor_flush_total_ns(0.0),
+        monitor_flush_max_ns(0.0),
+        monitor_flush_fifo_block_count(0),
+        monitor_flush_fifo_block_total_ns(0.0),
+        monitor_flush_fifo_block_max_ns(0.0),
+        monitor_flush_scan_total_ns(0.0),
+        monitor_flush_scan_max_ns(0.0),
+        monitor_flush_matched_entries(0),
+        monitor_flush_scanned_entries(0),
+        monitor_pt_update_total_count(0),
+        monitor_pt_update_total_ns(0.0),
+        monitor_pt_update_max_ns(0.0),
+        monitor_pt_update_fifo_block_count(0),
+        monitor_pt_update_fifo_block_ns(0.0),
+        monitor_pt_update_queue_wait_total_ns(0.0),
+        monitor_pt_update_queue_wait_max_ns(0.0),
+        monitor_pt_update_queue_wait_count(0),
+        monitor_group_total_count(0),
+        monitor_group_total_process_ns(0.0),
+        monitor_group_max_process_ns(0.0),
+        reorder_out_of_order_count(0),
+        reorder_total_marked_count(0),
+        reorder_write_blocked_count(0),
+        reorder_write_blocked_total_ns(0.0),
+        reorder_write_blocked_max_ns(0.0),
+        reorder_wait_for_head_count(0),
+        reorder_wait_for_head_total_ns(0.0),
+        reorder_read_total_wait_ns(0.0),
+        reorder_read_max_wait_ns(0.0),
+        reorder_read_waited_count(0),
+        reorder_read_total_sent_count(0),
         steady_start_ns(0.0),
         steady_end_ns(0.0),
         steady_start_count(0),

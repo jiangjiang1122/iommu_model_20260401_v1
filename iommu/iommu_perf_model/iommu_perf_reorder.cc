@@ -71,7 +71,29 @@ void iommu_top::reorder_mark_ready(iommu_task_t* task) {
         return;
     }
     it->second.ready = true;
+    it->second.ready_ns = sc_time_stamp().to_seconds() * 1e9;  // [MONITOR] 记录ready时刻
+    reorder_total_marked_count++;  // [MONITOR] 总标记计数
+    
+    // [MONITOR] 乱序检测：检查是否有更早的task_id还未ready
+    bool is_out_of_order = false;
+    uint32_t blocked_by_task_id = 0;
+    for (auto& [tid, entry] : reorder_buf) {
+        if (tid < task->task_id && !entry.ready) {
+            // 有更早的task_id还未ready，当前任务是乱序到达
+            is_out_of_order = true;
+            blocked_by_task_id = tid;
+            break;
+        }
+    }
     reorder_mtx.unlock();
+
+    if (is_out_of_order) {
+        reorder_out_of_order_count++;
+        printf("[REORDER_OOO] task_id=%u arrived out-of-order (blocked_by task_id=%u, %s)\n",
+               task->task_id, blocked_by_task_id,
+               it->second.is_write ? "WRITE" : "READ");
+        fflush(stdout);
+    }
 
     printf("[REORDER] mark_ready task_id=%u, %s\n",
            task->task_id,
@@ -91,14 +113,15 @@ void iommu_top::reorder_mark_ready(iommu_task_t* task) {
 void iommu_top::reorder_output_thread() {
     while (true) {
         // 收集本轮可输出的 task（在锁内）
-        std::vector<iommu_task_t*> to_send;
+        // [MONITOR] 使用pair保存(task*, ready_ns)，用于计算reorder等待时间
+        std::vector<std::pair<iommu_task_t*, double>> to_send;
 
         reorder_mtx.lock();
 
         // 1) 读请求：所有 ready 的读请求即可输出
         for (auto it = reorder_buf.begin(); it != reorder_buf.end(); ) {
             if (it->second.ready && !it->second.is_write) {
-                to_send.push_back(it->second.task);
+                to_send.push_back({it->second.task, it->second.ready_ns});
                 it = reorder_buf.erase(it);
             } else {
                 ++it;
@@ -117,11 +140,13 @@ void iommu_top::reorder_output_thread() {
                 continue;
             }
             if (it->second.ready) {
-                to_send.push_back(it->second.task);
+                to_send.push_back({it->second.task, it->second.ready_ns});
                 reorder_buf.erase(it);
                 reorder_write_order.pop();
             } else {
                 // 队头未 ready，必须等待，不可越过（写保序）
+                // [MONITOR] 记录等待队头的次数
+                reorder_wait_for_head_count++;
                 break;
             }
         }
@@ -129,8 +154,43 @@ void iommu_top::reorder_output_thread() {
         reorder_mtx.unlock();
 
         // 出锁后真实下发响应
-        for (iommu_task_t* task : to_send) {
+        for (auto& [task, ready_ns] : to_send) {
             if (!task) continue;
+
+            // [MONITOR] 计算在reorder中的等待时间(ready -> 实际发送)
+            double reorder_wait_ns = 0.0;
+            if (ready_ns > 0.0) {
+                const double current_ns = sc_time_stamp().to_seconds() * 1e9;
+                reorder_wait_ns = current_ns - ready_ns;
+                
+                // 对于写请求，记录保序等待延时
+                if (task->read_writeAMO == WRITE && reorder_wait_ns > 0.0) {
+                    reorder_write_blocked_count++;
+                    reorder_write_blocked_total_ns += reorder_wait_ns;
+                    if (reorder_wait_ns > reorder_write_blocked_max_ns)
+                        reorder_write_blocked_max_ns = reorder_wait_ns;
+                    if (reorder_wait_ns > 1.0) {  // 只打印等待>1ns的
+                        printf("[MONITOR_REORDER] WRITE wait: task_id=%u, reorder_wait=%.1f ns\n",
+                               task->task_id, reorder_wait_ns);
+                        fflush(stdout);
+                    }
+                }
+                // [MONITOR] 对于读请求，记录等待延时(ready->发送)
+                if (task->read_writeAMO == READ) {
+                    reorder_read_total_sent_count++;
+                    if (reorder_wait_ns > 0.0) {
+                        reorder_read_total_wait_ns += reorder_wait_ns;
+                        reorder_read_waited_count++;
+                        if (reorder_wait_ns > reorder_read_max_wait_ns)
+                            reorder_read_max_wait_ns = reorder_wait_ns;
+                        if (reorder_wait_ns > 1.0) {  // 只打印等待>1ns的
+                            printf("[MONITOR_REORDER] READ wait: task_id=%u, reorder_wait=%.1f ns\n",
+                                   task->task_id, reorder_wait_ns);
+                            fflush(stdout);
+                        }
+                    }
+                }
+            }
 
             // axi_master_0 端口并发流控：等待slot释放
             while (axi_master_0_to_pcie_noc_outstanding >= (int)AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING) {
@@ -153,6 +213,24 @@ void iommu_top::reorder_output_thread() {
             // [STAT] 累加端到端延时 (parser入口 -> reorder出口)
             double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
             iommu_total_e2e_latency_ns += e2e_ns;
+            // [STAT] IOMMU e2e延时最大最小值追踪
+            if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
+            if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
+            iommu_e2e_values.push_back(e2e_ns);
+
+            // [STAT] IOMMU输出端口任务间隔采样
+            {
+                double out_ts_ns = sc_time_stamp().to_seconds() * 1e9;
+                if (iommu_out_last_ns > 0.0) {
+                    double out_interval = out_ts_ns - iommu_out_last_ns;
+                    iommu_out_interval_total_ns += out_interval;
+                    if (out_interval > iommu_out_interval_max_ns) iommu_out_interval_max_ns = out_interval;
+                    if (out_interval < iommu_out_interval_min_ns) iommu_out_interval_min_ns = out_interval;
+                    iommu_out_interval_count++;
+                    iommu_out_interval_values.push_back(out_interval);
+                }
+                iommu_out_last_ns = out_ts_ns;
+            }
 
             // [STAT] 稳态IOPS采样：记录稳态开始/结束时刻
             if (steady_start_ns == 0.0 && steady_start_count > 0 &&

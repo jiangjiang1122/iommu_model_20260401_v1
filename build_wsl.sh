@@ -28,7 +28,7 @@ echo "[2/4] Compiling in WSL native filesystem (TEST=${TEST_SCENARIO})..."
 cd ${WSL_BUILD_DIR}
 make clean > /dev/null 2>&1
 BUILD_START=$(date +%s)
-make TEST=${TEST_SCENARIO} 2>&1
+make TEST=${TEST_SCENARIO} DEBUG=0 2>&1
 BUILD_RESULT=$?
 BUILD_END=$(date +%s)
 BUILD_TIME=$((BUILD_END - BUILD_START))

@@ -21,8 +21,8 @@ public:
     static const int DDR_INTERNAL_LATENCY_NS   = 100;  // ns, 内部固定访问延时
     static const int DDR_WRITE_MAX_OUTSTANDING = 64;
 
-    // Simulated DDR memory - 16MB storage space (expanded for 2MB GPA stride page tables)
-    static const size_t DDR_MEMORY_SIZE = 16 * 1024 * 1024;
+    // Simulated DDR memory - 32MB storage space
+    static const size_t DDR_MEMORY_SIZE = 32 * 1024 * 1024;
     unsigned char* memory;
 
 public:

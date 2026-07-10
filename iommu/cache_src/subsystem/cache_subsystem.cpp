@@ -348,6 +348,11 @@ void CacheSubsystem::pt_scheduler_thread() {
             double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
             stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
 
+            // [DEBUG] 打印pt_request_fifo dequeue时间戳
+            printf("[PT_SCHED] task_id=%u -> dequeue from pt_request_fifo [entry=%.1f ns, dequeue=%.1f ns, fifo_wait=%.2f ns]\n",
+                   req.task_id, req.timestamp.to_seconds() * 1e9, start_ns, fifo_wait_ns);
+            fflush(stdout);
+
             trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
             CacheMessage resp = execute_pt_request(req);
             const sc_time end = sc_time_stamp();
