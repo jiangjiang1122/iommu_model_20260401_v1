@@ -2142,38 +2142,33 @@ void iommu_top::ptw_rsp_process_thread() {
             ptw_task_completed_event.notify(SC_ZERO_TIME);
             
             // =====================================================================
-            // [D=0] 无预取场景: 直接flush Buffer链表并释放entry
-            // [FIX] 必须先flush释放Buffer entry, 再写pt_update_fifo
-            //       避免pt_update_fifo满时阻塞导致Buffer无法释放的死锁
+            // [D=0] 无预取场景: 写 dedup_update_fifo 清除 dedup 占位并刷新 Buffer(转发本任务)
+            // [重构] 不再直接调用 flush_dedup_buffer_chain; 改为经 dedup_scheduler_thread 处理
+            // 降级任务(dedup_bypass): dedup_cache 无占位, 不写 dedup_update, 由下方直接转发
             // =====================================================================
             bool main_task_flushed_via_chain = false;  // [FIX] 防止主任务双重转发
-            if (!task->walk_ctx.prefetch_enabled || task->walk_ctx.prefetch_depth == 0) {
-                // D=0: 没有预取组,直接flush主任务的Buffer链表
-                uint16_t head_idx = task->dedup_head_index;
-                if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
-                    // 保存PTE数据到pt_updates[0]（flush_dedup_buffer_chain需要）
-                    task->walk_ctx.pt_updates[0].vs_pte = task->vs_pte;
-                    task->walk_ctx.pt_updates[0].g_pte = task->g_pte;
-                    task->walk_ctx.pt_updates[0].pa = task->pa;
-                    task->walk_ctx.pt_updates[0].iova = task->iova & ~PAGE_MASK_4KB;
-                    task->walk_ctx.pt_updates[0].page_sz = task->page_sz;
-                    
-                    // 构造单任务IOVA列表
-                    uint64_t main_iova = task->iova & ~PAGE_MASK_4KB;
-                    
-                    printf("[PTW_NO_PREFETCH] task_id=%u -> Direct flush buffer chain (head=%u, iova=0x%lx)\n",
-                           task->task_id, head_idx, main_iova);
-                    fflush(stdout);
-                    
-                    // 调用flush释放Buffer entry并唤醒挂起任务
-                    // [FIX] flush_dedup_buffer_chain会将链表中所有任务(含主任务)写入pt_cache_to_fwd_fifo
-                    //       因此后续不能再写主任务到fwd_fifo，否则导致double free
-                    flush_dedup_buffer_chain(head_idx, task->task_id, task, &main_iova, 1);
-                    main_task_flushed_via_chain = true;
-                }
+            if ((!task->walk_ctx.prefetch_enabled || task->walk_ctx.prefetch_depth == 0)
+                && !task->walk_ctx.dedup_bypass) {
+                // D=0 且非降级: 写 dedup_update_fifo, 由 dedup_scheduler 查 dedup_cache 并刷新 Buffer
+                uint64_t main_iova = task->iova & ~PAGE_MASK_4KB;
+                iommu::CacheMessage dedup_upd;
+                dedup_upd.msg_type = iommu::CacheMsgType::PT_UPDATE;
+                dedup_upd.task_id = task->task_id;
+                dedup_upd.gscid = task->GSCID;
+                dedup_upd.pscid = task->PSCID;
+                dedup_upd.iova = main_iova;
+                dedup_upd.dedup_pa_base = task->pa & ~0xFFFULL;
+                dedup_upd.pt_data.vs_pte.raw = task->vs_pte.raw;
+                dedup_upd.pt_data.g_pte.raw = task->g_pte.raw;
+                dedup_upd.timestamp = sc_time_stamp();
+                cache_sub.dedup_update_fifo.write(dedup_upd);
+                main_task_flushed_via_chain = true;  // 任务将由 dedup flush 回调转发
+                printf("[PTW_NO_PREFETCH] task_id=%u -> dedup_update enqueued (iova=0x%lx, pa_base=0x%lx)\n",
+                       task->task_id, main_iova, dedup_upd.dedup_pa_base);
+                fflush(stdout);
             }
             
-            // [FIX] PT Cache更新放在flush之后, 确保Buffer entry已释放
+            // [FIX] PT Cache更新(填常规CL)
             iommu::CacheMessage pt_update_req = task_to_pt_update(task);
             pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
             cache_sub.pt_update_fifo.write(pt_update_req);
@@ -2338,7 +2333,6 @@ void iommu_top::prefetch_group_monitor_thread() {
                     pt_data.reserved.iova_is_va = 1;
                     pt_data.reserved.sv48 = sv48 ? 1U : 0U;
                     pt_data.reserved.gstage_x4 = gstage_x4 ? 1U : 0U;
-                    pt_data.reserved.is_ph = 0;
                     pgu.batch_updates.push_back({iova, pt_data});
                     
                     printf("[PTW_PREFETCH_MONITOR] Batch update[%u]: iova=0x%lx, vs_ppn=0x%lx, g_ppn=0x%lx\n",
@@ -2452,43 +2446,32 @@ void iommu_top::prefetch_group_monitor_thread() {
             // [MONITOR] 记录单个group处理开始时间
             const double group_process_start_ns = sc_time_stamp().to_seconds() * 1e9;
             
-            // Step 1: 扫描Buffer刷新entry（无锁状态, FIFO满时阻塞不会死锁）
-            uint32_t flushed_iova_count = 0;
-            for (uint32_t i = 0; i < pgu.total_tasks; i++) {
-                uint64_t iova = pgu.group_iovas[i];
+            // [重构] 统一处理: 每个 iova 写 dedup_update_fifo(刷 Buffer + 清 dedup 占位),
+            //        正常组额外写 pt_update_fifo(填 PT Cache 常规 CL)。
+            //        fault 组仅写 dedup_update_fifo(释放挂起任务, 不填 PT Cache)。
+            //        (PT Cache 现为纯常规缓存, 无占位CL, 无需 PT_INVALIDATE)
+            uint32_t processed_iova_count = 0;
+            for (uint32_t i = 0; i < pgu.total_tasks && i < pgu.batch_updates.size(); i++) {
+                uint64_t iova = pgu.batch_updates[i].first;
+                const iommu::PTData& pt_data = pgu.batch_updates[i].second;
                 if (iova == 0) continue;
-                flush_dedup_buffer_by_iova(iova, pgu.group_id, pgu.main_task,
-                                          pgu.group_iovas.data(), pgu.total_tasks);
-                flushed_iova_count++;
-            }
-            printf("[PTW_PREFETCH_MONITOR] Group %u completed, scanned %u IOVAs for buffer flush.\n",
-                   pgu.group_id, flushed_iova_count);
-            fflush(stdout);
-            
-            // Step 2: PT Cache处理（无锁状态下）
-            // [FIX-第9条] faulted组需要显式失效PT Cache占位条目，释放buffer任务
-            // 正常组: 更新PT Cache（替换placeholder CL）
-            // faulted组: 失效PT Cache占位条目（删除placeholder CL），防止后续命中错误的缓存
-            if (pgu.has_fault) {
-                // [FAULT路径] 显式失效PT Cache占位条目
-                for (const auto& [iova, pt_data] : pgu.batch_updates) {
-                    if (iova == 0) continue;  // 跳过空IOVA
-                    iommu::CacheMessage inv_msg;
-                    inv_msg.msg_type = iommu::CacheMsgType::PT_INVALIDATE;
-                    inv_msg.task_id = pgu.main_task->task_id;
-                    inv_msg.gscid = pgu.main_task->GSCID;
-                    inv_msg.pscid = pgu.main_task->PSCID;
-                    inv_msg.iova = iova;
-                    inv_msg.invalidate_mode = iommu::CacheInvalidateMode::PRECISE;
-                    inv_msg.timestamp = sc_time_stamp();
-                    cache_sub.pt_invalidate_fifo.write(inv_msg);
-                    printf("[PTW_PREFETCH_MONITOR][FAULT] Group %u: invalidate PT Cache placeholder iova=0x%lx\n",
-                           pgu.group_id, iova);
-                    fflush(stdout);
-                }
-            } else {
-                // [正常路径] 更新PT Cache（替换placeholder CL）
-                for (const auto& [iova, pt_data] : pgu.batch_updates) {
+
+                uint64_t pa_base = pgu.main_task->walk_ctx.pt_updates[i].pa & ~0xFFFULL;
+
+                // (a) 写 dedup_update_fifo: 由 dedup_scheduler 查 dedup_cache + 刷 Buffer + 清占位
+                iommu::CacheMessage dedup_upd;
+                dedup_upd.msg_type = iommu::CacheMsgType::PT_UPDATE;
+                dedup_upd.task_id = pgu.main_task->task_id;
+                dedup_upd.gscid = pgu.main_task->GSCID;
+                dedup_upd.pscid = pgu.main_task->PSCID;
+                dedup_upd.iova = iova;
+                dedup_upd.dedup_pa_base = pa_base;
+                dedup_upd.pt_data = pt_data;
+                dedup_upd.timestamp = sc_time_stamp();
+                cache_sub.dedup_update_fifo.write(dedup_upd);
+
+                // (b) 正常组: 写 pt_update_fifo 填 PT Cache 常规 CL(fault 组跳过)
+                if (!pgu.has_fault) {
                     iommu::CacheMessage update_msg;
                     update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
                     update_msg.task_id = pgu.main_task->task_id;
@@ -2501,19 +2484,16 @@ void iommu_top::prefetch_group_monitor_thread() {
                     update_msg.pt_data = pt_data;
                     update_msg.from_prefetch = false;
                     update_msg.timestamp = sc_time_stamp();
-                    
-                    // [MONITOR] 测量PT UPDATE FIFO写入阻塞时间
+
                     const double pt_upd_start_ns = sc_time_stamp().to_seconds() * 1e9;
                     const int pt_fifo_avail = cache_sub.pt_update_fifo.num_available();
                     cache_sub.pt_update_fifo.write(update_msg);
                     const double pt_upd_end_ns = sc_time_stamp().to_seconds() * 1e9;
                     const double pt_upd_delay_ns = pt_upd_end_ns - pt_upd_start_ns;
-                    
                     monitor_pt_update_total_count++;
                     monitor_pt_update_total_ns += pt_upd_delay_ns;
                     if (pt_upd_delay_ns > monitor_pt_update_max_ns)
                         monitor_pt_update_max_ns = pt_upd_delay_ns;
-                    
                     if (pt_upd_delay_ns > 0.0) {
                         monitor_pt_update_fifo_block_count++;
                         monitor_pt_update_fifo_block_ns += pt_upd_delay_ns;
@@ -2522,10 +2502,11 @@ void iommu_top::prefetch_group_monitor_thread() {
                         fflush(stdout);
                     }
                 }
+                processed_iova_count++;
             }
-            printf("[PTW_PREFETCH_MONITOR] Group %u: %s PT Cache (%zu entries, has_fault=%d)\n",
-                   pgu.group_id, pgu.has_fault ? "INVALIDATE" : "UPDATE",
-                   pgu.batch_updates.size(), pgu.has_fault);
+            printf("[PTW_PREFETCH_MONITOR] Group %u: %s (%u iovas, has_fault=%d)\n",
+                   pgu.group_id, pgu.has_fault ? "FLUSH-only(fault)" : "FLUSH+PT_UPDATE",
+                   processed_iova_count, pgu.has_fault);
             fflush(stdout);
             
             // [MONITOR] 记录单个group处理结束时间

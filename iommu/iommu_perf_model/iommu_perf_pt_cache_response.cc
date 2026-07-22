@@ -34,24 +34,25 @@ void iommu_top::collector_pt_response_thread() {
                 pt_cache_pending_tasks.erase(resp.task_id);
                 pt_cache_mtx.unlock();
 
-                // Convert CacheMessage response to task
-                pt_hit_response_to_task(resp, task);
-
-                bool is_placeholder = (resp.pt_data.reserved.is_ph == 1);
-                
+                // [重构] 区分两类 pt_hit_response:
+                //   dedup_suspended=false: PT Cache 常规CL HIT -> 转换并转发 Forwarder
+                //   dedup_suspended=true : dedup 占位CL HIT -> 任务已挂 dedup Buffer, 不转发
+                bool is_placeholder = resp.dedup_suspended;
+            
                 if (!is_placeholder) {
-                    // 常规CL HIT: 直接转发到Forwarder
+                    // 常规CL HIT: 转换响应并直接转发到Forwarder
+                    pt_hit_response_to_task(resp, task);
                     printf("[PT_CACHE] task_id=%u -> HIT regular CL, routing to fwd_fifo (pa=0x%lx)\n",
                            task->task_id, task->pa);
                     fflush(stdout);
                     pt_cache_to_fwd_fifo.write(task);
                 } else {
-                    // 占位CL HIT: 任务已在execute_pt_request中挂接到Buffer
-                    // 不发PTW,等待Monitor处理
-                    printf("[PT_CACHE] task_id=%u -> HIT placeholder CL (is_ph=1), task suspended in Buffer (no PTW)\n",
+                    // dedup 占位CL HIT: 任务已在 execute_dedup_request 中挂接到 dedup Buffer
+                    // 不发PTW, 等待 dedup_update 刷新 Buffer 时转发
+                    printf("[PT_CACHE] task_id=%u -> HIT dedup placeholder, task suspended in Buffer (no PTW)\n",
                            task->task_id);
                     fflush(stdout);
-                    // 注意：不能delete task，Monitor会flush Buffer并转发任务
+                    // 注意：不能delete task, dedup flush回调会转发任务
                 }
             } else {
                 pt_cache_mtx.unlock();

@@ -107,6 +107,8 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       pt_request_fifo(16),
       walker_request_fifo(1),
       msi_request_fifo(1),
+      dedup_request_fifo(16),
+      dedup_update_fifo(16),
       dc_response_fifo(16),
       pc_response_fifo(16),
       pt_hit_response_fifo(16),
@@ -156,6 +158,7 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     SC_THREAD(dc_worker_thread);
     SC_THREAD(pc_worker_thread);
     SC_THREAD(pt_scheduler_thread);  // [NEW] 统一的PT Cache轮询调度线程
+    SC_THREAD(dedup_scheduler_thread);  // [重构] 去重 Cache 乒乓调度线程
     SC_THREAD(walker_scheduler_thread);  // 统一的walker cache轮询调度线程
     SC_THREAD(msi_worker_thread);
     SC_THREAD(dc_update_worker_thread);
@@ -170,7 +173,10 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     // [NEW] 初始化PT Cache去重功能
     dedup_buffer_ = new DedupBuffer();
     pt_dedup_enabled_ = true;
-    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer created\n");
+    // [重构] 创建独立 dedup_cache (几何复用 pt_cache 配置)
+    dedup_cache_ = std::make_unique<DedupCache>(cfg.pt_cache.num_sets, cfg.pt_cache.num_ways);
+    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u)\n",
+           cfg.pt_cache.num_sets, cfg.pt_cache.num_ways);
     fflush(stdout);
 }
 
@@ -385,8 +391,15 @@ void CacheSubsystem::pt_scheduler_thread() {
             else           stats_.record_interval_miss("pt_cache", interval_idx);
             pt_req_counter++;
 
-            if (resp.hit) push_fifo(pt_hit_response_fifo, resp);
-            else          push_fifo(pt_miss_response_fifo, resp);
+            if (resp.hit) {
+                // HIT 常规CL: 直接返回
+                push_fifo(pt_hit_response_fifo, resp);
+            } else {
+                // [重构] MISS: 转发到 dedup_request_fifo (携带原请求上下文与预取参数)
+                CacheMessage dedup_req = req;
+                dedup_req.timestamp = sc_time_stamp();
+                push_fifo(dedup_request_fifo, dedup_req);
+            }
 
             // =============================================================
             // [STAT] 32任务组统计 - REQUEST完成
@@ -455,6 +468,73 @@ void CacheSubsystem::pt_scheduler_thread() {
 
             // 乒乓切换
             pt_sched_next_is_request_ = true;
+        }
+    }
+}
+
+// ============================================================
+// [重构] dedup_scheduler_thread - 去重 Cache 乒乓调度线程
+// 乒乓处理 dedup_request_fifo / dedup_update_fifo:
+//   - REQUEST: execute_dedup_request + 精确流水线时序 (原子段串行, 每任务 n*5cyc)
+//   - UPDATE : execute_dedup_update (dedup_cache 查表+清除, 触发 Buffer 刷新回调)
+// hash 建模为与前一任务原子段完全重叠(隐藏); 仅当流水线空闲时计一次 hash 填充。
+// ============================================================
+void CacheSubsystem::dedup_scheduler_thread() {
+    while (true) {
+        bool has_req = (dedup_request_fifo.num_available() > 0);
+        bool has_upd = (dedup_update_fifo.num_available() > 0);
+
+        bool pipeline_idle = false;
+        if (!has_req && !has_upd) {
+            pipeline_idle = true;
+            wait(dedup_request_fifo.data_written_event() |
+                 dedup_update_fifo.data_written_event());
+            (void)pipeline_idle;
+            continue;
+        }
+
+        bool do_request;
+        if (has_req && has_upd) {
+            do_request = dedup_sched_next_is_request_;  // 两者都有, 按乒乓选择
+        } else {
+            do_request = has_req;  // 只有一个可用, 处理它
+        }
+
+        if (do_request) {
+            // ============ 处理 REQUEST ============
+            CacheMessage req = dedup_request_fifo.read();
+            const sc_time dequeue_time = sc_time_stamp();
+
+            trace_task_event("begin", "dedup_cache", "lookup", req, dequeue_time);
+            CacheMessage resp = execute_dedup_request(req);
+
+            // [重构] 精确流水线时序: 每任务消耗 n_atomic 个原子段(5cyc), 单线程天然串行
+            uint32_t n_atomic = last_dedup_atomic_ops_;
+            wait(clock_period_ * static_cast<int>(n_atomic * DEDUP_ATOMIC_CYCLES));
+
+            record_task_completion("dedup_cache", dequeue_time, sc_time_stamp());
+            trace_task_event("end", "dedup_cache", "lookup", req, dequeue_time, &resp);
+
+            // [重构] 路由响应:
+            //   dedup_suspended: 任务已挂 Buffer -> 推 pt_hit_response_fifo(collector 识别后挂起)
+            //   否则(MISS/降级): 推 pt_miss_response_fifo -> collector -> PTW
+            if (resp.dedup_suspended) {
+                push_fifo(pt_hit_response_fifo, resp);
+            } else {
+                push_fifo(pt_miss_response_fifo, resp);
+            }
+
+            dedup_sched_next_is_request_ = false;
+        } else {
+            // ============ 处理 UPDATE ============
+            CacheMessage upd = dedup_update_fifo.read();
+            const sc_time dequeue_time = sc_time_stamp();
+            trace_task_event("begin", "dedup_cache", "update", upd, dequeue_time);
+            execute_dedup_update(upd);
+            // dedup_cache 查表+清除 计一个原子段; Buffer 刷新的 FIFO 转发阻塞已在回调内推进时间
+            wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
+            record_task_completion("dedup_cache", dequeue_time, sc_time_stamp());
+            dedup_sched_next_is_request_ = true;
         }
     }
 }
@@ -751,141 +831,134 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
     resp.msg_type = CacheMsgType::CACHE_RESPONSE;
     resp.task_id = req.task_id;
     resp.iova = req.iova;  // FIX: 复制IOVA到响应
+    resp.gscid = req.gscid;
+    resp.pscid = req.pscid;
+
     PTData data;
     resp.hit = pt_cache_->lookup_pt(req.gscid, req.pscid, req.iova, req.stage,
                                     req.pt_sv48,
                                     req.pt_gstage_x4,
                                     data, resp.latency);
-    resp.gscid = req.gscid;
-    resp.pscid = req.pscid;
-    
+
     if (resp.hit) {
+        // [重构] HIT 常规 CL: 直接返回 PTE, 任务立即完成
         resp.stage = pt_stage(data);
         resp.from_prefetch = pt_from_prefetch(data);
         resp.pt_data = data;
-        
-        // [NEW] 检查是否为占位CL HIT
-        if (data.reserved.is_ph == 1 && pt_dedup_enabled_ && dedup_buffer_ != nullptr) {
-            uint8_t is_req = data.reserved.is_req;
-            
-            // [V3.0] 分支3 - 预取占位CL (is_req=0),首次有任务访问
-            if (is_req == 0) {
-                printf("[PT_CACHE_EXECUTE] task_id=%u -> HIT prefetch placeholder (is_req=0)\n",
-                       req.task_id);
+    }
+    // [重构] MISS: 不在此处处理去重/预取, 由 pt_scheduler_thread 转发到 dedup_request_fifo
+    return resp;
+}
+
+// ============================================================
+// [重构] execute_dedup_request - 去重 Cache 查询流程 (含 Buffer 交互)
+// 运行于 dedup_scheduler_thread (进程上下文, 允许 wait 反压)
+// 分支:
+//   HIT 主占位(is_req=1)   -> 挂 Buffer 链尾, 任务挂起(dedup_suspended)
+//   HIT 预取占位(is_req=0) -> 分配 Buffer, 升级 is_req=1, 任务挂起
+//   MISS                   -> 插主占位 + D 个预取占位, 返回 MISS -> PTW
+//   降级(insert 失败)       -> 释放 Buffer, dedup_bypass, 返回 MISS -> PTW
+// 设置 last_dedup_atomic_ops_ (原子段个数, 供调度线程计时)
+// ============================================================
+CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
+    CacheMessage resp;
+    resp.msg_type = CacheMsgType::CACHE_RESPONSE;
+    resp.task_id = req.task_id;
+    resp.iova = req.iova;
+    resp.gscid = req.gscid;
+    resp.pscid = req.pscid;
+    resp.stage = req.stage;
+    resp.prefetch_enabled = req.prefetch_enabled;
+    resp.prefetch_depth = req.prefetch_depth;
+
+    last_dedup_atomic_ops_ = 1;  // 默认 1 个原子段
+
+    uint64_t page_iova = req.iova & ~0xFFFULL;
+    DedupCacheLine* line = dedup_cache_->lookup(req.gscid, req.pscid, page_iova);
+
+    if (line != nullptr) {
+        // ============ HIT 占位CL ============
+        if (line->is_req) {
+            // -------- 分支1: 主占位CL (is_req=1) 挂 Buffer 链尾 --------
+            uint16_t head_idx = line->head_index;
+            uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
+
+            uint16_t new_idx = dedup_buffer_->allocate_entry();
+            if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
+                printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (main placeholder HIT), blocking...\n", (unsigned)req.task_id);
                 fflush(stdout);
-                
-                // [P3] 分配新Buffer Entry（Buffer满时阻塞等待）
-                uint16_t new_idx = dedup_buffer_->allocate_entry();
-                if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                    printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (prefetch HIT), blocking...\n",
-                           req.task_id);
-                    fflush(stdout);
-                    wait(dedup_buffer_->free_event);
-                    new_idx = dedup_buffer_->allocate_entry();
-                }
-                
-                if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
-                    // 填充新Entry (V3.0: next=0xFF, tail=0xFF, 仅链头)
-                    auto& entry = dedup_buffer_->entries[new_idx];
-                    entry.gscid = req.gscid;
-                    entry.pscid = req.pscid;
-                    entry.iova = req.iova;
-                    entry.stage = req.stage;
-                    entry.sv48 = req.pt_sv48;
-                    entry.gstage_x4 = req.pt_gstage_x4;
-                    entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
-                    entry.next_index = DEDUP_BUFFER_INVALID_IDX;
-                    entry.tail_index = new_idx;  // [V3.0][FIX] 链头自引用,后续branch2才能正确读取tail并追加
-                    
-                    // [V3.0] 更新PT Cache: head=new_idx, is_req=1 (不写tail_index)
-                    // [OPT] 使用update_placeholder_with_data，跳过内部冗余lookup
-                    // data已通过上方lookup_pt获取，包含完整占位CL信息
-                    pt_cache_->update_placeholder_with_data(
-                        req.gscid, req.pscid, req.iova,
-                        req.stage, req.pt_sv48, req.pt_gstage_x4,
-                        data, new_idx, true  // is_req=1
-                    );
-                    
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch placeholder HIT, allocated new entry (idx=%u), updated PT Cache (is_req=1)\n",
-                           req.task_id, new_idx);
-                    fflush(stdout);
-                    
-                    // 返回响应
-                    resp.dedup_head_index = new_idx;
-                    resp.dedup_new_index = new_idx;
-                }
+                wait(dedup_buffer_->free_event);
+                new_idx = dedup_buffer_->allocate_entry();
             }
-            // 分支2 - 主任务占位CL (is_req=1),已有任务
-            // 新任务链式追加到已有Buffer链尾部,Monitor通过head_index刷新整条链
-            else {
-                // 占位CL HIT：需要分配新Buffer Entry、填充task_ptr、挂接到链表
-                uint16_t head_idx = data.reserved.head_index;
-                
-                // 从Buffer链头entry读取tail_index
-                uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
-                
-                // [P3] 分配新Entry（Buffer满时阻塞等待）
-                uint16_t new_idx = dedup_buffer_->allocate_entry();
-                if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                    printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (placeholder HIT), blocking...\n",
-                           req.task_id);
-                    fflush(stdout);
-                    wait(dedup_buffer_->free_event);
-                    new_idx = dedup_buffer_->allocate_entry();
-                }
-                
-                if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
-                    // 填充新Entry (next=0xFFFF, tail=0xFFFF, 非链头)
-                    auto& new_entry = dedup_buffer_->entries[new_idx];
-                    new_entry.gscid = req.gscid;
-                    new_entry.pscid = req.pscid;
-                    new_entry.iova = req.iova;
-                    new_entry.stage = req.stage;
-                    new_entry.sv48 = req.pt_sv48;
-                    new_entry.gstage_x4 = req.pt_gstage_x4;
-                    new_entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
-                    new_entry.next_index = DEDUP_BUFFER_INVALID_IDX;
-                    new_entry.tail_index = DEDUP_BUFFER_INVALID_IDX;  // 非链头
-                    
-                    // 挂接到链表尾部: Buffer[tail_idx].next -> new_idx
-                    auto& tail_entry = dedup_buffer_->entries[tail_idx];
-                    tail_entry.next_index = new_idx;
-                    
-                    // 更新Buffer链头的tail_index (仅写Buffer, 不写PT Cache)
-                    dedup_buffer_->entries[head_idx].tail_index = new_idx;
-                    
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Placeholder HIT, allocated+linked (head=%u, old_tail=%u, new_tail=%u)\n",
-                           req.task_id, head_idx, tail_idx, new_idx);
-                    fflush(stdout);
-                    
-                    // 返回响应
-                    resp.dedup_head_index = head_idx;
-                    resp.dedup_new_index = new_idx;
-                }
+            if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
+                auto& new_entry = dedup_buffer_->entries[new_idx];
+                new_entry.gscid = req.gscid;
+                new_entry.pscid = req.pscid;
+                new_entry.iova = req.iova;
+                new_entry.stage = req.stage;
+                new_entry.sv48 = req.pt_sv48;
+                new_entry.gstage_x4 = req.pt_gstage_x4;
+                new_entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
+                new_entry.next_index = DEDUP_BUFFER_INVALID_IDX;
+                new_entry.tail_index = DEDUP_BUFFER_INVALID_IDX;  // 非链头
+
+                dedup_buffer_->entries[tail_idx].next_index = new_idx;
+                dedup_buffer_->entries[head_idx].tail_index = new_idx;  // 仅写 Buffer
+
+                resp.dedup_head_index = head_idx;
+                resp.dedup_new_index = new_idx;
+                printf("[DEDUP_CACHE] task_id=%u -> HIT main placeholder, linked to buffer tail (head=%u, old_tail=%u, new=%u)\n",
+                       (unsigned)req.task_id, head_idx, tail_idx, new_idx);
+                fflush(stdout);
             }
+            resp.hit = true;
+            resp.dedup_suspended = true;  // 任务挂入 Buffer, 无需转发
+        } else {
+            // -------- 分支2: 预取占位CL (is_req=0) 升级为主占位 --------
+            uint16_t new_idx = dedup_buffer_->allocate_entry();
+            if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
+                printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (prefetch placeholder HIT), blocking...\n", (unsigned)req.task_id);
+                fflush(stdout);
+                wait(dedup_buffer_->free_event);
+                new_idx = dedup_buffer_->allocate_entry();
+            }
+            if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
+                auto& entry = dedup_buffer_->entries[new_idx];
+                entry.gscid = req.gscid;
+                entry.pscid = req.pscid;
+                entry.iova = req.iova;
+                entry.stage = req.stage;
+                entry.sv48 = req.pt_sv48;
+                entry.gstage_x4 = req.pt_gstage_x4;
+                entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
+                entry.next_index = DEDUP_BUFFER_INVALID_IDX;
+                entry.tail_index = new_idx;  // 链头自引用
+
+                // 升级 dedup_cache 该 line 为主占位
+                line->head_index = new_idx;
+                line->is_req = true;
+
+                resp.dedup_head_index = new_idx;
+                resp.dedup_new_index = new_idx;
+                printf("[DEDUP_CACHE] task_id=%u -> HIT prefetch placeholder, upgraded to main (new=%u)\n",
+                       (unsigned)req.task_id, new_idx);
+                fflush(stdout);
+            }
+            resp.hit = true;
+            resp.dedup_suspended = true;
         }
-    } else if (pt_dedup_enabled_ && dedup_buffer_ != nullptr) {
-        // [NEW] MISS + 去重使能：自动插入占位CL（lookup+insert原子操作）
-        uint64_t page_iova = req.iova & ~0xFFFULL;  // 4KB对齐
-        
-        // [P3] 步骤1: 分配Buffer Entry（Buffer满时阻塞等待反压释放）
-        // 设计文档Section 3/8.4: Buffer满时阻塞等待，不降级
+    } else {
+        // ============ MISS ============
         uint16_t head_idx = dedup_buffer_->allocate_entry();
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
-            // Buffer满，阻塞等待free_event（由flush_dedup_buffer_chain中的free_entry触发）
-            printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (%u/%u), blocking...\n",
-                   req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE);
+            printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (%u/%u), blocking...\n",
+                   (unsigned)req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE);
             fflush(stdout);
             wait(dedup_buffer_->free_event);
-            // 唤醒后重新尝试分配
             head_idx = dedup_buffer_->allocate_entry();
-            printf("[PT_CACHE_BACKPRESSURE] task_id=%u -> Woke up, retry allocate -> idx=%u\n",
-                   req.task_id, head_idx);
-            fflush(stdout);
         }
-        
+
         if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
-            // 步骤2: 填充Buffer Entry (V3.0: 单entry链, tail=head)
             auto& entry = dedup_buffer_->entries[head_idx];
             entry.gscid = req.gscid;
             entry.pscid = req.pscid;
@@ -895,115 +968,90 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
             entry.gstage_x4 = req.pt_gstage_x4;
             entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
             entry.next_index = DEDUP_BUFFER_INVALID_IDX;
-            entry.tail_index = head_idx;  // [V3.0] 单entry时tail指向自己
-            
-            // 步骤3: 插入主占位CL到PT Cache (V3.0: 不传tail_index)
-            sc_time insert_latency;
-            bool insert_success = pt_cache_->insert_placeholder(
-                req.gscid, req.pscid, page_iova,
-                req.stage, req.pt_sv48, req.pt_gstage_x4,
-                head_idx,
-                true,  // is_req = 1（主任务）
-                &insert_latency
-            );
-            
+            entry.tail_index = head_idx;  // 单 entry, tail=head
+
+            bool insert_success = dedup_cache_->insert(
+                req.gscid, req.pscid, page_iova, head_idx, true /*is_req*/);
+
             if (insert_success) {
-                // 步骤4: 返回MISS（占位CL已插入，后续HIT该占位CL的任务只挂Buffer）
                 resp.hit = false;
                 resp.dedup_head_index = head_idx;
-                resp.latency += insert_latency;
-                
-                resp.pt_data.reserved.is_ph = 1;
-                resp.pt_data.reserved.head_index = head_idx;
-                resp.pt_data.reserved.is_req = 1;
-                resp.pt_data.reserved.valid = 1;
-                
-                // [P3] 传递预取参数到resp（供pt_miss_response_to_task复制到task）
                 resp.prefetch_enabled = req.prefetch_enabled;
                 resp.prefetch_depth = req.prefetch_depth;
-                
-                // 步骤5: 检查预取参数,插入D个预取占位CL
+
+                // 插入 D 个预取占位CL(页表页边界内)
                 if (req.prefetch_enabled && req.prefetch_depth > 0) {
                     uint32_t D = req.prefetch_depth;
-                    
-                    // [FIX] 页表页边界检查: 预取占位CL的IOVA范围必须与PTW实际处理的范围一致
-                    // PTW的L0叶子PTE在页表页中的位置由VPN[0]决定
-                    // 预取不能跨越4KB页表页边界(512个PTE条目)
-                    // 这与iommu_perf_ptw.cc中PTW的边界检查逻辑保持一致
-                    uint32_t vpn0_in_page = (page_iova >> 12) & 0x1FF;  // VPN[0]在页表页内的位置(0~511)
-                    uint32_t max_D = 511 - vpn0_in_page;  // 页表页内剩余PTE数
-                    if (D > max_D) {
-                        printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch D truncated: %u -> %u (page table boundary, vpn0_in_page=%u)\n",
-                               req.task_id, D, max_D, vpn0_in_page);
-                        fflush(stdout);
-                        D = max_D;
-                    }
-                    
-                    printf("[PT_CACHE_EXECUTE] task_id=%u -> Prefetch ENABLED (D=%u), inserting %u prefetch placeholders\n",
-                           req.task_id, req.prefetch_depth, D);
-                    fflush(stdout);
-                    
+                    uint32_t vpn0_in_page = (page_iova >> 12) & 0x1FF;
+                    uint32_t max_D = 511 - vpn0_in_page;
+                    if (D > max_D) D = max_D;
+                    last_dedup_atomic_ops_ = 1 + D;  // 主任务 + D 个预取, 各一个原子段
+
                     for (uint32_t d = 1; d <= D; d++) {
-                        uint64_t prefetch_iova = page_iova + (d * 0x1000);
-                        
-                        // [V4.1] 先检查该IOVA是否已存在占位CL，避免覆盖主任务占位CL
-                        PTData existing_data;
-                        sc_time check_latency;
-                        bool already_exists = pt_cache_->lookup_pt(
-                            req.gscid, req.pscid, prefetch_iova,
-                            req.stage, req.pt_sv48, req.pt_gstage_x4,
-                            existing_data, check_latency);
-                        
-                        if (already_exists) {
-                            // 已存在占位CL或常规CL，跳过预取插入
-                            printf("[PT_CACHE_EXECUTE]   -> Skip prefetch at iova=0x%lx (already exists, is_ph=%d)\n",
-                                   prefetch_iova, existing_data.reserved.is_ph);
-                            continue;
+                        uint64_t prefetch_iova = page_iova + (d * 0x1000ULL);
+                        if (dedup_cache_->lookup(req.gscid, req.pscid, prefetch_iova) != nullptr) {
+                            continue;  // 已存在占位/常规CL, 跳过
                         }
-                        
-                        sc_time prefetch_latency;
-                        bool prefetch_success = pt_cache_->insert_placeholder(
-                            req.gscid, req.pscid, prefetch_iova,
-                            req.stage, req.pt_sv48, req.pt_gstage_x4,
-                            0xFFFF,     // head_index = 0xFFFF (预取占位CL无关联Buffer)
-                            false,      // is_req = 0 (预取占位CL)
-                            &prefetch_latency
-                        );
-                        
-                        if (prefetch_success) {
-                            printf("[PT_CACHE_EXECUTE]   -> Inserted prefetch placeholder at iova=0x%lx (is_req=0)\n",
-                                   prefetch_iova);
-                        } else {
-                            // 设计文档4.3: 预取占位CL插入失败→直接丢弃
-                            printf("[PT_CACHE_EXECUTE]   -> Failed to insert prefetch placeholder at iova=0x%lx (discarded)\n",
-                                   prefetch_iova);
-                        }
+                        dedup_cache_->insert(req.gscid, req.pscid, prefetch_iova,
+                                             0xFFFF, false /*is_req=0 预取占位*/);
                     }
                 }
-                
-                printf("[PT_CACHE_EXECUTE] task_id=%u -> MISS, inserted placeholder (head_idx=%u, iova=0x%lx)\n",
-                       req.task_id, head_idx, page_iova);
+                printf("[DEDUP_CACHE] task_id=%u -> MISS, inserted main placeholder (head=%u, iova=0x%lx), atomic_ops=%u\n",
+                       (unsigned)req.task_id, head_idx, (unsigned long)page_iova, last_dedup_atomic_ops_);
                 fflush(stdout);
             } else {
-                // [P3] 降级场景: Buffer未满，但PT Cache无可用cacheline（全是is_req=1占位CL）
-                // 设计文档4.3: 不申请Buffer，不占位PT Cache，直接转发给PTW
+                // 降级: dedup_cache set 全部为 is_req=1 受保护 -> 直接转发 PTW
                 dedup_buffer_->free_entry(head_idx);
                 resp.hit = false;
-                resp.prefetch_enabled = false;  // 禁用预取
+                resp.dedup_bypass = true;
+                resp.prefetch_enabled = false;
                 resp.prefetch_depth = 0;
-                printf("[PT_CACHE_FALLBACK] task_id=%u -> Placeholder insert FAILED (all ways protected), fallback to direct PTW (no dedup/prefetch)\n",
-                       req.task_id);
+                printf("[DEDUP_CACHE_FALLBACK] task_id=%u -> insert FAILED (all ways protected), fallback to direct PTW\n",
+                       (unsigned)req.task_id);
                 fflush(stdout);
             }
         } else {
-            // 不应到达此处（阻塞后重试应成功）
             resp.hit = false;
-            printf("[PT_CACHE_EXECUTE] task_id=%u -> ERROR: Buffer allocate failed after backpressure wakeup!\n", req.task_id);
+            resp.dedup_bypass = true;
+            printf("[DEDUP_CACHE] task_id=%u -> ERROR: Buffer allocate failed after backpressure wakeup!\n", (unsigned)req.task_id);
             fflush(stdout);
         }
     }
-    
+
     return resp;
+}
+
+// ============================================================
+// [重构] execute_dedup_update - PTW 完成后刷新 (由 Monitor 写 dedup_update_fifo 触发)
+// 任务1: 查 dedup_cache -> 取 head_index/is_req -> (is_req时)刷 Buffer -> 置 V=0
+// 任务2(Buffer 刷新): 通过 dedup_flush_cb_ (iommu_top 实现) 遍历链、算PA、转发
+// ============================================================
+void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
+    uint64_t page_iova = upd.iova & ~0xFFFULL;
+    DedupCacheLine* line = dedup_cache_->lookup(upd.gscid, upd.pscid, page_iova);
+    if (line == nullptr) {
+        // 无占位(降级任务/无等待任务的预取): 无操作
+        return;
+    }
+    uint16_t head_index = line->head_index;
+    bool is_req = line->is_req;
+
+    if (!is_req) {
+        // 预取占位, Buffer 未记录实际任务 -> 直接清除
+        dedup_cache_->clear_line(line);
+        printf("[DEDUP_UPDATE] iova=0x%lx -> prefetch placeholder cleared (no waiting task)\n", (unsigned long)page_iova);
+        fflush(stdout);
+        return;
+    }
+
+    // 主占位: 先刷 Buffer 链(回调), 完成后再清除 dedup_cache line
+    if (dedup_flush_cb_) {
+        dedup_flush_cb_(head_index, upd);
+    }
+    dedup_cache_->clear_line(line);
+    printf("[DEDUP_UPDATE] iova=0x%lx -> main placeholder flushed (head=%u) and cleared\n",
+           (unsigned long)page_iova, head_index);
+    fflush(stdout);
 }
 
 CacheMessage CacheSubsystem::execute_walker_request(const CacheMessage& req) {

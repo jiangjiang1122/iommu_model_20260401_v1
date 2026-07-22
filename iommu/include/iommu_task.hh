@@ -158,6 +158,10 @@ struct walk_context_t {
     uint32_t  prefetch_count = 0;           // 已预取的页数量
     uint64_t  prefetch_iovas[16];           // 预取的IOVA列表（最大16页）
 
+    // [重构] dedup 降级标志: dedup_cache 插入失败, 任务直接转发 PTW,
+    // PTW 完成后不写 dedup_update_fifo(dedup_cache 无占位), 由 PTW 路径直接转发
+    bool      dedup_bypass = false;
+
     // NEW: 主任务特有: 预取组状态追踪
     struct {
         uint32_t completed_count = 0;       // 已完成的walk数

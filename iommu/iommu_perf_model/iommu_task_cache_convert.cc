@@ -247,6 +247,9 @@ void pt_miss_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
     // [P3] 复制预取参数（降级场景: resp.prefetch_enabled=false, depth=0）
     task->walk_ctx.prefetch_enabled = resp.prefetch_enabled;
     task->walk_ctx.prefetch_depth = resp.prefetch_depth;
+
+    // [重构] 复制 dedup 降级标志: 降级任务 PTW 完成后不写 dedup_update_fifo
+    task->walk_ctx.dedup_bypass = resp.dedup_bypass;
     
     printf("[CONVERT] task_id=%u <- PT_LOOKUP response (MISS, dedup_head=%u, prefetch=%d, depth=%u)\n",
            task->task_id, resp.dedup_head_index, resp.prefetch_enabled, resp.prefetch_depth);

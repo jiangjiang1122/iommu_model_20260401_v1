@@ -221,11 +221,10 @@ union pt_reserved_t {
         uint32_t iova_is_va:1;
         uint32_t sv48:1;
         uint32_t gstage_x4:1;
-        uint32_t is_ph:1;              // 占位标志（1=占位，0=常规）
-        uint32_t head_index:16;        // 链表头Buffer编号（创建后永久不变，支持512 entries）
-        uint32_t is_req:1;             // 1=主任务(有实际请求), 0=预取占位
         uint32_t replacement_info:2;
-        uint32_t reserved:2;           // [V3.0] 原tail_index已移至Buffer entry
+        // [重构] 去重+预取占位字段(is_ph/head_index/is_req)已迁移至独立的
+        // dedup_cache(DedupCacheLine)。PT Cache现为纯常规缓存。
+        uint32_t reserved:20;
     };
     uint32_t raw = 0;
 };
@@ -550,6 +549,11 @@ struct CacheMessage {
     uint16_t        dedup_head_index = 0xFFFF;
     // [V3.0] dedup_tail_index已移除: tail_index仅在Buffer entry中
     uint16_t        dedup_new_index = 0xFFFF;   // 新分配的Entry索引
+
+    // [重构] dedup_cache 拆分相关标志/载荷
+    bool            dedup_suspended = false;    // 命中占位CL, 任务已挂入Buffer(等待PTW), 无需转发
+    bool            dedup_bypass = false;       // 降级: dedup_cache插入失败, 直接转发PTW, PTW完成不刷Buffer
+    uint64_t        dedup_pa_base = 0;          // dedup_update携带: 该iova已解析的最终PA页基址(用于Buffer刷新算PA)
     
     // Task指针（用于在execute_pt_request中传递task，避免在collector中操作Buffer）
     void*           task_ptr = nullptr;  // iommu_task_t* 类型

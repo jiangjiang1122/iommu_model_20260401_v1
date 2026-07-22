@@ -399,55 +399,9 @@ void CacheBase<TagT, DataT>::fill_with_hash_tag(const TagT& hash_tag,
         stats_.record_phase_fill_replace(cache_name_, phase_tracker_);
         uint32_t victim_way = 0;
         if (replacement_) {
-            // [PT Cache去重+预取] 特殊处理: 保护is_req=1的占位CL不被替换
-            // 策略: 先用替换算法建议victim，若受保护则扫描所有way找可替换的
-            uint32_t suggested_way = replacement_->find_victim(set);
-            
-            // 检查建议的victim是否受保护
-            bool suggested_protected = false;
-            if constexpr (std::is_same_v<DataT, PTData>) {
-                if (cache_array_[set][suggested_way].valid && 
-                    cache_array_[set][suggested_way].data.reserved.is_ph == 1 &&
-                    cache_array_[set][suggested_way].data.reserved.is_req == 1) {
-                    suggested_protected = true;
-                }
-            }
-            
-            if (!suggested_protected) {
-                // 替换算法建议的victim不受保护，直接使用
-                victim_way = suggested_way;
-            } else {
-                // 建议的victim受保护(is_req=1占位CL)，扫描所有way找可替换的
-                std::cout << "[PT_CACHE_PROTECT] Set " << set << " Way " << suggested_way 
-                          << " is protected (is_req=1 placeholder), scanning all ways..." << std::endl;
-                bool found_safe_victim = false;
-                for (uint32_t w = 0; w < num_ways_; w++) {
-                    if (w == suggested_way) continue;  // 已检查过，跳过
-                    
-                    bool is_protected = false;
-                    if constexpr (std::is_same_v<DataT, PTData>) {
-                        if (cache_array_[set][w].valid && 
-                            cache_array_[set][w].data.reserved.is_ph == 1 &&
-                            cache_array_[set][w].data.reserved.is_req == 1) {
-                            is_protected = true;
-                        }
-                    }
-                    
-                    if (!is_protected) {
-                        victim_way = w;
-                        found_safe_victim = true;
-                        break;
-                    }
-                }
-                
-                if (!found_safe_victim) {
-                    // 所有way都是受保护的is_req=1占位CL，无法替换
-                    std::cout << "[PT_CACHE_WARN] Set " << set << " full, all ways protected! Insertion skipped." << std::endl;
-                    stats_.record_latency(cache_name_, latency.to_seconds() * 1e9);
-                    consume_delay(access_latency);
-                    return;  // 放弃插入
-                }
-            }
+            // [重构] PT Cache 已为纯常规缓存(去重/预取占位已移至 dedup_cache),
+            // 不再需要保护 is_req=1 占位CL, 直接使用替换算法建议的 victim。
+            victim_way = replacement_->find_victim(set);
         }
 
         // 统计淘汰

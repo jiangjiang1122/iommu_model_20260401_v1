@@ -139,6 +139,18 @@ static const uint32_t PT_DEDUP_PREFETCH_DEPTH = TEST_CFG_PT_DEDUP_PREFETCH_DEPTH
 #endif
 static const uint16_t DEDUP_BUFFER_INVALID_IDX = 0xFFFF;     // 无效索引标记（支持512 entries）
 
+// ===================== dedup_cache 流水线时序参数 =====================
+// dedup_cache 查询流水线: Hash -> [get set -> get free line -> write line](原子段)
+// 原子段在同一调度线程内天然串行; hash建模为与前一任务原子段完全重叠(流水填充)。
+// 稳态吐吐 ≈ 原子段 = 5cyc/任务; MISS+预取(D) 消耗 (1+D) 个原子段。
+static const uint32_t DEDUP_HASH_CYCLES        = 1;   // hash (与前任务原子段重叠, 仅流水填充时计)
+static const uint32_t DEDUP_GET_SET_CYCLES     = 2;   // get cache set (稳态口径, 见需求书注2/3)
+static const uint32_t DEDUP_GET_FREE_LINE_CYCLES = 2; // hit? get free cache line
+static const uint32_t DEDUP_WRITE_LINE_CYCLES  = 1;   // write cache line
+// 原子段总周期 = get_set + get_free_line + write_line = 5cyc
+static const uint32_t DEDUP_ATOMIC_CYCLES =
+    DEDUP_GET_SET_CYCLES + DEDUP_GET_FREE_LINE_CYCLES + DEDUP_WRITE_LINE_CYCLES;
+
 // ===================== Walk上下文读缓冲区大小 =====================
 // 必须同时满足：
 //   1) DC/PC读取：最大 EXT_FORMAT_DC_SIZE = 64 字节

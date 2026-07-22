@@ -53,7 +53,7 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t PA_OFFSET      = 0x10000;           // SPA = GPA + 0x10000
         const uint64_t GPA_STRIDE     = 0x200000;          // 2MB per GPA step
         const int      NUM_UNIQUE_GPAS = 20;               // 20 different GPAs
-        const int      NUM_REQUESTS    = 10000;            // 10000 sequential requests
+        const int      NUM_REQUESTS    = 10000;              // [验证] 10000包测试
         // IOVA range: NUM_REQUESTS * 512B = 5MB -> 1280 pages
         const uint64_t IOVA_RANGE      = (uint64_t)NUM_REQUESTS * 0x200;  // 5MB
         const int      TOTAL_IOVA_PAGES = (int)(IOVA_RANGE / 0x1000);     // 1280 pages

@@ -148,34 +148,11 @@ public:
     // ===================== NEW: Dedup Buffer for PT Cache =====================
     iommu::DedupBuffer pt_dedup_buffer;  // Buffer for deduplication (256 entries)
     sc_mutex pt_dedup_buffer_mtx;  // Mutex for Buffer concurrent access protection
-    
-    // NEW: Flush Dedup Buffer chain (唤醒挂起任务、计算PA、释放Entry)
-    // [FIX] 使用main_task->walk_ctx.pt_updates访问PTE数据,避免指针算术错误
-    void flush_dedup_buffer_chain(uint16_t head_index, uint32_t group_id,
-                                  iommu_task_t* main_task,
-                                  const uint64_t* group_iovas,
-                                  uint32_t total_tasks);
-    
-    // [方案A] 扫描Buffer按IOVA匹配刷新所有entry（不依赖PT Cache状态）
-    void flush_dedup_buffer_by_iova(uint64_t target_iova, uint32_t group_id,
-                                    iommu_task_t* main_task,
-                                    const uint64_t* group_iovas,
-                                    uint32_t total_tasks);
-    
-    // [方案A] 已转发任务ID集合，防止PTW路径和Monitor flush路径重复转发
-    // TODO: 暂时禁用，待修复崩溃问题
-    // std::set<uint32_t> forwarded_task_ids;
-    
-    // [新增] Flush单个PT Cache条目 (占位CL → 常规CL)
-    void flush_single_pt_cache(uint64_t iova,
-                               const iommu::PTData& pt_data,
-                               uint64_t page_size,
-                               iommu::gscid_t gscid,
-                               iommu::pscid_t pscid,
-                               iommu::TransStage stage,
-                               bool sv48,
-                               bool gstage_x4);
-    
+
+    // [重构] dedup Buffer 刷新回调: 由 CacheSubsystem::execute_dedup_update 触发
+    // 遍历 head_index 链, 算 PA, 转发挂起任务到 pt_cache_to_fwd_fifo
+    void dedup_flush_chain_cb(uint16_t head_index, const iommu::CacheMessage& upd);
+
     // ===================== NEW: PTW Response FIFO (顺序处理) =====================
     // [重构] 使用FIFO替代prefetch_groups map,保证响应顺序处理
     sc_fifo<iommu_task_t*> ptw_response_fifo;  // PTW完成响应FIFO
@@ -649,6 +626,14 @@ public:
         SC_THREAD(fault_cq_proc_thread);
         SC_THREAD(ddr_arbiter_thread);
         SC_THREAD(reorder_output_thread);   // 出口重排序线程
+
+        // [重构] 绑定去重模块回调: 转发 FIFO + Buffer 刷新回调
+        // dedup_scheduler_thread 处理 dedup_update 时经此回调刷新 Buffer 并转发任务
+        cache_sub.set_forward_fifo(&pt_cache_to_fwd_fifo);
+        cache_sub.set_dedup_flush_callback(
+            [this](uint16_t head_index, const iommu::CacheMessage& upd) {
+                this->dedup_flush_chain_cb(head_index, upd);
+            });
 
         memset(ctrl_path_rsp_buf, 0, sizeof(ctrl_path_rsp_buf));
     }

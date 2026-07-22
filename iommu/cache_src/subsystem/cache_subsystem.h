@@ -10,9 +10,11 @@
 #include "cache/pc_cache.h"
 #include "cache/msipt_cache.h"
 #include "cache/pt_cache.h"
+#include "cache/dedup_cache.h"
 #include "cache/walker_cache.h"
 
 #include <memory>
+#include <functional>
 
 namespace iommu {
 
@@ -37,6 +39,11 @@ public:
     sc_fifo<CacheMessage> pt_request_fifo;
     sc_fifo<CacheMessage> walker_request_fifo;
     sc_fifo<CacheMessage> msi_request_fifo;
+
+    // [重构] 去重 Cache 请求/更新入口: PT Cache MISS 转发至 dedup_request_fifo;
+    // PTW 完成后 Monitor 写 dedup_update_fifo 驱动 dedup_cache 清除 + Buffer 刷新。
+    sc_fifo<CacheMessage> dedup_request_fifo;
+    sc_fifo<CacheMessage> dedup_update_fifo;
 
     // lookup 响应出口：各 cache 独立返回，避免共用一个 depth=1 FIFO 造成串行化。
     sc_fifo<CacheMessage> dc_response_fifo;
@@ -80,6 +87,13 @@ public:
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     void set_pt_dedup_enabled(bool enabled) { pt_dedup_enabled_ = enabled; }
 
+    // [重构] 绑定转发 FIFO(iommu_top::pt_cache_to_fwd_fifo), 供 dedup_update 刷新 Buffer 时转发任务
+    void set_forward_fifo(sc_fifo<iommu_task_t*>* fifo) { forward_fifo_ = fifo; }
+    // [重构] 绑定 Buffer 刷新回调(由 iommu_top 实现: 遍历链、算PA、转发)
+    // 参数: (head_index, dedup_update消息) - 消息携带已解析PTE与dedup_pa_base
+    using DedupFlushCallback = std::function<void(uint16_t, const CacheMessage&)>;
+    void set_dedup_flush_callback(DedupFlushCallback cb) { dedup_flush_cb_ = std::move(cb); }
+
     // [STAT] PT Scheduler任务间隔分析报告
     void print_pt_scheduler_gap_report() const;
 
@@ -122,6 +136,7 @@ private:
     void dc_worker_thread();
     void pc_worker_thread();
     void pt_scheduler_thread();  // [NEW] 合并pt_worker_thread和pt_update_worker_thread
+    void dedup_scheduler_thread();  // [重构] 去重 Cache 乒乓调度(dedup_request/update)
     void msi_worker_thread();
     void dc_update_worker_thread();
     void pc_update_worker_thread();
@@ -144,6 +159,8 @@ private:
     CacheMessage execute_dc_request(const CacheMessage& req);
     CacheMessage execute_pc_request(const CacheMessage& req);
     CacheMessage execute_pt_request(const CacheMessage& req);
+    CacheMessage execute_dedup_request(const CacheMessage& req);
+    void         execute_dedup_update(const CacheMessage& upd);
     CacheMessage execute_walker_request(const CacheMessage& req);
     CacheMessage execute_msi_request(const CacheMessage& req);
     CacheMessage execute_dc_update_request(const CacheMessage& req);
@@ -172,6 +189,15 @@ private:
     // NEW: PT Cache去重相关成员
     DedupBuffer* dedup_buffer_ = nullptr;
     bool pt_dedup_enabled_ = false;
+
+    // [重构] 独立 dedup_cache 实例(几何默认复用 pt_cache)
+    std::unique_ptr<DedupCache> dedup_cache_;
+    // [重构] 转发 FIFO 句柄 + Buffer 刷新回调(由 iommu_top 绑定)
+    sc_fifo<iommu_task_t*>* forward_fifo_ = nullptr;
+    DedupFlushCallback      dedup_flush_cb_;
+    // [重构] dedup 乒乓调度状态 + 流水线时序: 每任务消耗的原子段个数
+    bool     dedup_sched_next_is_request_ = true;
+    uint32_t last_dedup_atomic_ops_ = 1;  // execute_dedup_request 设置, 调度线程读取用于计时
 
     // [STAT] PT Scheduler任务间隔分析 (gap = 当前任务start - 上一任务end)
     double   pt_sched_first_start_ns_ = -1.0;   // 第一笔任务开始时刻

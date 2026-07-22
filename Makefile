@@ -106,6 +106,7 @@ CXX_SOURCES = \
     iommu/cache_src/cache/dc_cache.cpp \
     iommu/cache_src/cache/pc_cache.cpp \
     iommu/cache_src/cache/pt_cache.cpp \
+    iommu/cache_src/cache/dedup_cache.cpp \
     iommu/cache_src/cache/walker_cache.cpp \
     iommu/cache_src/cache/msipt_cache.cpp \
     iommu/cache_src/replacement/plru_policy.cpp \
