@@ -504,6 +504,12 @@ void CacheSubsystem::dedup_scheduler_thread() {
             // ============ 处理 REQUEST ============
             CacheMessage req = dedup_request_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
+            const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
+
+            // [STAT] 记录第一笔任务开始时刻
+            if (dedup_first_start_ns_ < 0) {
+                dedup_first_start_ns_ = dequeue_ns;
+            }
 
             trace_task_event("begin", "dedup_cache", "lookup", req, dequeue_time);
             CacheMessage resp = execute_dedup_request(req);
@@ -512,7 +518,18 @@ void CacheSubsystem::dedup_scheduler_thread() {
             uint32_t n_atomic = last_dedup_atomic_ops_;
             wait(clock_period_ * static_cast<int>(n_atomic * DEDUP_ATOMIC_CYCLES));
 
-            record_task_completion("dedup_cache", dequeue_time, sc_time_stamp());
+            const sc_time end_time = sc_time_stamp();
+            const double end_ns = end_time.to_seconds() * 1e9;
+            const double exec_ns = end_ns - dequeue_ns;
+
+            // [STAT] 更新 REQUEST 统计
+            dedup_req_count_++;
+            dedup_req_total_exec_ns_ += exec_ns;
+            if (exec_ns > dedup_req_max_exec_ns_) dedup_req_max_exec_ns_ = exec_ns;
+            if (exec_ns < dedup_req_min_exec_ns_) dedup_req_min_exec_ns_ = exec_ns;
+            dedup_last_end_ns_ = end_ns;
+
+            record_task_completion("dedup_cache", dequeue_time, end_time);
             trace_task_event("end", "dedup_cache", "lookup", req, dequeue_time, &resp);
 
             // [重构] 路由响应:
@@ -529,11 +546,30 @@ void CacheSubsystem::dedup_scheduler_thread() {
             // ============ 处理 UPDATE ============
             CacheMessage upd = dedup_update_fifo.read();
             const sc_time dequeue_time = sc_time_stamp();
+            const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
+
+            // [STAT] 记录第一笔任务开始时刻
+            if (dedup_first_start_ns_ < 0) {
+                dedup_first_start_ns_ = dequeue_ns;
+            }
+
             trace_task_event("begin", "dedup_cache", "update", upd, dequeue_time);
             execute_dedup_update(upd);
             // dedup_cache 查表+清除 计一个原子段; Buffer 刷新的 FIFO 转发阻塞已在回调内推进时间
             wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
-            record_task_completion("dedup_cache", dequeue_time, sc_time_stamp());
+
+            const sc_time end_time = sc_time_stamp();
+            const double end_ns = end_time.to_seconds() * 1e9;
+            const double exec_ns = end_ns - dequeue_ns;
+
+            // [STAT] 更新 UPDATE 统计
+            dedup_upd_count_++;
+            dedup_upd_total_exec_ns_ += exec_ns;
+            if (exec_ns > dedup_upd_max_exec_ns_) dedup_upd_max_exec_ns_ = exec_ns;
+            if (exec_ns < dedup_upd_min_exec_ns_) dedup_upd_min_exec_ns_ = exec_ns;
+            dedup_last_end_ns_ = end_ns;
+
+            record_task_completion("dedup_cache", dequeue_time, end_time);
             dedup_sched_next_is_request_ = true;
         }
     }
@@ -642,6 +678,71 @@ void CacheSubsystem::print_pt_group_report() const {
                sum_total_queue / (sum_total_exec + sum_total_queue) * 100.0 : 0.0);
     }
     printf("=========================================================\n\n");
+}
+
+// [STAT] Dedup Scheduler 执行延时统计报告
+void CacheSubsystem::print_dedup_scheduler_report() const {
+    printf("\n========== Dedup Scheduler Execution Latency Report ==========\n");
+    
+    uint64_t total_count = dedup_req_count_ + dedup_upd_count_;
+    if (total_count == 0) {
+        printf("  No tasks processed.\n");
+        printf("============================================================\n\n");
+        return;
+    }
+    
+    double window_ns = dedup_last_end_ns_ - dedup_first_start_ns_;
+    double total_exec_ns = dedup_req_total_exec_ns_ + dedup_upd_total_exec_ns_;
+    
+    printf("  First task start:     %.1f ns\n", dedup_first_start_ns_);
+    printf("  Last task end:        %.1f ns\n", dedup_last_end_ns_);
+    printf("  Window (first~last):  %.1f ns  (%.3f us)\n", window_ns, window_ns / 1000.0);
+    printf("  ---\n");
+    printf("  Total tasks:          %lu  (REQUEST=%lu, UPDATE=%lu)\n",
+           (unsigned long)total_count,
+           (unsigned long)dedup_req_count_,
+           (unsigned long)dedup_upd_count_);
+    printf("  Total exec time:      %.1f ns  (%.3f us)\n",
+           total_exec_ns, total_exec_ns / 1000.0);
+    printf("  Avg exec per task:    %.3f ns\n",
+           total_count > 0 ? total_exec_ns / total_count : 0.0);
+    printf("  ---\n");
+    
+    // REQUEST 统计
+    if (dedup_req_count_ > 0) {
+        double req_avg = dedup_req_total_exec_ns_ / dedup_req_count_;
+        printf("  [REQUEST]\n");
+        printf("    Count:              %lu\n", (unsigned long)dedup_req_count_);
+        printf("    Total exec time:    %.1f ns  (%.3f us)\n",
+               dedup_req_total_exec_ns_, dedup_req_total_exec_ns_ / 1000.0);
+        printf("    Avg exec latency:   %.3f ns\n", req_avg);
+        printf("    Max exec latency:   %.1f ns\n", dedup_req_max_exec_ns_);
+        printf("    Min exec latency:   %.1f ns\n",
+               dedup_req_min_exec_ns_ < 999999999.0 ? dedup_req_min_exec_ns_ : 0.0);
+        printf("    ---\n");
+    }
+    
+    // UPDATE 统计
+    if (dedup_upd_count_ > 0) {
+        double upd_avg = dedup_upd_total_exec_ns_ / dedup_upd_count_;
+        printf("  [UPDATE]\n");
+        printf("    Count:              %lu\n", (unsigned long)dedup_upd_count_);
+        printf("    Total exec time:    %.1f ns  (%.3f us)\n",
+               dedup_upd_total_exec_ns_, dedup_upd_total_exec_ns_ / 1000.0);
+        printf("    Avg exec latency:   %.3f ns\n", upd_avg);
+        printf("    Max exec latency:   %.1f ns\n", dedup_upd_max_exec_ns_);
+        printf("    Min exec latency:   %.1f ns\n",
+               dedup_upd_min_exec_ns_ < 999999999.0 ? dedup_upd_min_exec_ns_ : 0.0);
+        printf("    ---\n");
+    }
+    
+    // 利用率统计
+    printf("  [Utilization]\n");
+    printf("    Exec ratio:         %.2f%%  (exec / window)\n",
+           window_ns > 0 ? total_exec_ns / window_ns * 100.0 : 0.0);
+    printf("    Idle ratio:         %.2f%%  (gap / window)\n",
+           window_ns > 0 ? (window_ns - total_exec_ns) / window_ns * 100.0 : 0.0);
+    printf("============================================================\n\n");
 }
 
 // Walker Cache 统一轮询调度线程

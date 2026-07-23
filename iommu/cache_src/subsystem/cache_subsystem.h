@@ -232,6 +232,21 @@ private:
     double   pt_group_sum_e2e_[32]   = {};       // 所有组position i的端到端延时累加
     int      pt_group_sum_upd_[32]   = {};       // 所有组position i的UPDATE数累加
 
+    // [STAT] Dedup Scheduler 执行延时统计
+    uint64_t dedup_req_count_        = 0;        // REQUEST 任务数
+    uint64_t dedup_upd_count_        = 0;        // UPDATE 任务数
+    double   dedup_req_total_exec_ns_ = 0.0;     // REQUEST 总执行时间
+    double   dedup_upd_total_exec_ns_ = 0.0;     // UPDATE 总执行时间
+    double   dedup_req_max_exec_ns_   = 0.0;     // REQUEST 最大执行时间
+    double   dedup_upd_max_exec_ns_   = 0.0;     // UPDATE 最大执行时间
+    double   dedup_req_min_exec_ns_   = 999999999.0; // REQUEST 最小执行时间
+    double   dedup_upd_min_exec_ns_   = 999999999.0; // UPDATE 最小执行时间
+    double   dedup_first_start_ns_    = -1.0;    // 第一笔任务开始时刻
+    double   dedup_last_end_ns_       = 0.0;     // 最后一笔任务结束时刻
+
+public:
+    void print_dedup_scheduler_report() const;   // 打印 dedup scheduler 统计报告
+
 };
 
 } // namespace iommu

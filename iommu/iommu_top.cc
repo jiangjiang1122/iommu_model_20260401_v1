@@ -590,6 +590,9 @@ void iommu_top::print_cache_statistics() {
     // [STAT] 32任务组REQUEST排队/执行延时统计
     cache_sub.print_pt_group_report();
 
+    // [STAT] Dedup Scheduler 执行延时统计
+    cache_sub.print_dedup_scheduler_report();
+
     // VA Dedup Statistics
     printf("========== VA Dedup Statistics ==========\n");
     printf("  VA Dedup Enabled:  %s\n", PT_CACHE_VA_DEDUP_ENABLED ? "YES" : "NO");
