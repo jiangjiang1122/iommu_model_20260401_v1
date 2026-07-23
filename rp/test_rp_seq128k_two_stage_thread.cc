@@ -54,9 +54,10 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t GPA_STRIDE     = 0x200000;          // 2MB per GPA step
         const int      NUM_UNIQUE_GPAS = 20;               // 20 different GPAs
         const int      NUM_REQUESTS    = 10000;              // [验证] 10000包测试
-        // IOVA range: NUM_REQUESTS * 512B = 5MB -> 1280 pages
-        const uint64_t IOVA_RANGE      = (uint64_t)NUM_REQUESTS * 0x200;  // 5MB
-        const int      TOTAL_IOVA_PAGES = (int)(IOVA_RANGE / 0x1000);     // 1280 pages
+        // IOVA range: Phase 2 starts at IOVA_BASE+0x200, last IOVA = IOVA_BASE + NUM_REQUESTS*0x200
+        // Max page_idx = (NUM_REQUESTS * 0x200) / 0x1000 = 1250, need 1251 pages (0..1250)
+        const uint64_t IOVA_RANGE      = (uint64_t)NUM_REQUESTS * 0x200 + 0x200;  // +0x200 for Phase 1 skip
+        const int      TOTAL_IOVA_PAGES = (int)((IOVA_RANGE + 0xFFF) / 0x1000);   // ceiling division
         // GPA range: 20 unique GPAs * 2MB = 40MB
         const uint64_t GPA_RANGE       = (uint64_t)NUM_UNIQUE_GPAS * GPA_STRIDE; // 40MB
         const int      TOTAL_GPA_PAGES = (int)(GPA_RANGE / 0x1000);       // 10240 G-stage pages
@@ -170,16 +171,24 @@ void RP_Module::send_translation_request_1_thread()
                NUM_UNIQUE_GPAS, (uint64_t)(NUM_UNIQUE_GPAS - 1) * GPA_STRIDE);
 
         // Then: create VS-stage mappings for all IOVA pages (GPA cycling)
+        int vs_pte_fail_count = 0;
         for (int p = 0; p < TOTAL_IOVA_PAGES; p++) {
             uint64_t iova_page = IOVA_BASE + (uint64_t)p * 0x1000;
             int gpa_idx        = p % NUM_UNIQUE_GPAS;           // cycle through 20 GPAs
             uint64_t gpa_page  = (uint64_t)gpa_idx * GPA_STRIDE;
 
             pte6.PPN = gpa_page / PAGESIZE;
-            add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, iova_page, pte6, 0, DC6.iohgatp, 0);
+            int64_t ret = add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, iova_page, pte6, 0, DC6.iohgatp, 0);
+            if (ret < 0) {
+                if (vs_pte_fail_count < 10) {
+                    printf("[TEST] WARNING: add_vs_stage_pte FAILED for p=%d, IOVA=0x%lx, gpa_idx=%d\n",
+                           p, iova_page, gpa_idx);
+                }
+                vs_pte_fail_count++;
+            }
         }
-        printf("[TEST]   Mapped %d VS-stage pages (IOVA -> cycling 20 GPAs)\n",
-               TOTAL_IOVA_PAGES);
+        printf("[TEST]   Mapped %d VS-stage pages (IOVA -> cycling 20 GPAs), fail_count=%d\n",
+               TOTAL_IOVA_PAGES, vs_pte_fail_count);
 
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for two-stage test...\n");

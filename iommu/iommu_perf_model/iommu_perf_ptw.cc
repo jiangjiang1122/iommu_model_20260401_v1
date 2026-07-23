@@ -388,7 +388,22 @@ void iommu_top::ptw_req_process_thread() {
                                    task->task_id, D, vs_l0_spa_ppn, main_vpn0);
                             fflush(stdout);
 
+                            uint32_t actual_spawned = 0;  // 实际spawn的预取任务数
+                            // [FIX] 提取主任务vpn[1]用于L0页表页边界检查
+                            // Sv48: vpn[1] = bits[29:21] of IOVA, 每个L0页表页覆盖vpn[0]=0..511
+                            // 当vpn[1]变化时, L1条目不同, 对应不同的L0页表页
+                            uint16_t main_vpn1 = (task->iova >> 21) & 0x1FF;
                             for (uint32_t d = 0; d < D; d++) {
+                                // [FIX] L0页表页边界检查: 预取IOVA的vpn[1]必须与主任务相同
+                                // 当vpn[1]变化时, 预取PTE位于不同的L0页表页, 无法用当前L0页SPA计算
+                                uint64_t pf_iova_check = (task->iova & ~PAGE_MASK_4KB) + (d + 1) * PAGE_SIZE_4KB;
+                                uint16_t pf_vpn1_check = (pf_iova_check >> 21) & 0x1FF;
+                                if (pf_vpn1_check != main_vpn1) {
+                                    printf("[PTW_REQ_EARLY_PF] task_id=%u -> L0 page boundary at d=%u (pf_vpn1=%u != main_vpn1=%u), stop spawn (spawned=%u/%u)\n",
+                                           task->task_id, d, pf_vpn1_check, main_vpn1, actual_spawned, D);
+                                    break;
+                                }
+
                                 iommu_task_t* pf_task = new iommu_task_t();
                                 task_id_mtx.lock();
                                 pf_task->task_id = next_task_id++;
@@ -453,6 +468,20 @@ void iommu_top::ptw_req_process_thread() {
                                 fflush(stdout);
                                 // [STAT] 记录预取任务起始时刻(用于延时计算)
                                 ptw_task_start_ns[pf_task->task_id] = sc_time_stamp().to_seconds() * 1e9;
+                                actual_spawned++;
+                            }
+
+                            // [FIX] 如果实际spawn数少于D, 更新组的计数
+                            if (actual_spawned < D) {
+                                prefetch_group_mtx.lock();
+                                auto& grp = prefetch_groups[group_id];
+                                grp.pending_tasks = actual_spawned;
+                                grp.total_tasks = 1 + actual_spawned;
+                                prefetch_group_mtx.unlock();
+                                task->walk_ctx.prefetch_total = 1 + actual_spawned;
+                                task->walk_ctx.prefetch_depth = actual_spawned;
+                                printf("[PTW_REQ_EARLY_PF] task_id=%u -> Reduced group: actual_spawned=%u (was D=%u)\n",
+                                       task->task_id, actual_spawned, D);
                             }
                         }
                     }
@@ -1721,7 +1750,19 @@ void iommu_top::ptw_rsp_process_thread() {
                        vs_l0_spa_ppn, vs_l0_gpa_base, main_vpn0);
                 fflush(stdout);
                 
+                uint32_t actual_spawned2 = 0;  // 实际spawn的预取任务数
+                // [FIX] 提取主任务vpn[1]用于L0页表页边界检查
+                uint16_t main_vpn1_2 = (task->iova >> 21) & 0x1FF;
                 for (uint32_t d = 0; d < D; d++) {
+                    // [FIX] L0页表页边界检查: 预取IOVA的vpn[1]必须与主任务相同
+                    uint64_t pf_iova_check2 = (task->iova & ~PAGE_MASK_4KB) + (d + 1) * PAGE_SIZE_4KB;
+                    uint16_t pf_vpn1_check2 = (pf_iova_check2 >> 21) & 0x1FF;
+                    if (pf_vpn1_check2 != main_vpn1_2) {
+                        printf("[PTW_2STAGE_PF] task_id=%u -> L0 page boundary at d=%u (pf_vpn1=%u != main_vpn1=%u), stop spawn (spawned=%u/%u)\n",
+                               task->task_id, d, pf_vpn1_check2, main_vpn1_2, actual_spawned2, D);
+                        break;
+                    }
+
                     iommu_task_t* pf_task = new iommu_task_t();
                     task_id_mtx.lock();
                     pf_task->task_id = next_task_id++;
@@ -1787,9 +1828,20 @@ void iommu_top::ptw_rsp_process_thread() {
                     printf("[PTW_2STAGE_PF] Spawned prefetch task_id=%u, idx=%u, vs_l0_pte_spa=0x%lx, pf_vpn0=%u, pf_iova=0x%lx\n",
                            pf_task->task_id, d + 1, vs_l0_pte_spa, pf_vpn0, pf_iova);
                     fflush(stdout);
+                    actual_spawned2++;
                 }
                 
-                task->walk_ctx.pt_update_count = 1 + D;
+                // [FIX] 如果实际spawn数少于D, 更新组的计数
+                if (actual_spawned2 < D) {
+                    group.pending_tasks = actual_spawned2;
+                    group.total_tasks = 1 + actual_spawned2;
+                    task->walk_ctx.prefetch_total = 1 + actual_spawned2;
+                    task->walk_ctx.prefetch_depth = actual_spawned2;
+                    printf("[PTW_2STAGE_PF] task_id=%u -> Reduced group: actual_spawned=%u (was D=%u)\n",
+                           task->task_id, actual_spawned2, D);
+                }
+                
+                task->walk_ctx.pt_update_count = 1 + actual_spawned2;
                 task->walk_ctx.prefetch_group.group_iovas[0] = task->iova & ~PAGE_MASK_4KB;
                 
                 // [FIX] 非early-spawn路径: 填充pt_updates[0]和设置main_task_done
