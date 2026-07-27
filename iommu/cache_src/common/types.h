@@ -596,6 +596,10 @@ struct CacheConfig {
     uint32_t    num_ways    = 4;
     std::string replacement = "plru";
     uint32_t    srrip_m_bits = 2;
+    // [多RAM] RAM分组数(2的幂,需整除num_sets); 1=单RAM(默认,旧行为)
+    uint32_t    num_rams = 1;
+    // [多RAM] 每组RAM前置FIFO深度
+    uint32_t    ram_fifo_depth = 8;
     uint32_t    arbiter_latency_cycles = 0;
     uint32_t    hash_latency_cycles = 1;
     uint32_t    read_set_latency_cycles = 1;

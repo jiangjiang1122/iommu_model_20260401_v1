@@ -157,7 +157,23 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
 
     SC_THREAD(dc_worker_thread);
     SC_THREAD(pc_worker_thread);
-    SC_THREAD(pt_scheduler_thread);  // [NEW] 统一的PT Cache轮询调度线程
+    // [多RAM] PT Cache 多 RAM 改造: Hash单元线程 + 每组RAM独立worker(sc_spawn)
+    pt_num_rams_ = pt_cache_->num_rams();
+    assert(pt_num_rams_ >= 1 && pt_num_rams_ <= PT_MAX_RAMS);
+    {
+        const int fifo_depth = static_cast<int>(pt_cache_->ram_fifo_depth());
+        for (uint32_t i = 0; i < pt_num_rams_; ++i) {
+            char fname[32];
+            snprintf(fname, sizeof(fname), "pt_ram_fifo_%u", i);
+            pt_ram_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, fifo_depth));
+        }
+        for (uint32_t i = 0; i < pt_num_rams_; ++i) {
+            sc_spawn(sc_bind(&CacheSubsystem::pt_ram_worker_thread, this,
+                             static_cast<int>(i)));
+        }
+    }
+    SC_THREAD(pt_hash_thread);
     SC_THREAD(dedup_scheduler_thread);  // [重构] 去重 Cache 乒乓调度线程
     SC_THREAD(walker_scheduler_thread);  // 统一的walker cache轮询调度线程
     SC_THREAD(msi_worker_thread);
@@ -314,28 +330,26 @@ void CacheSubsystem::pc_worker_thread() {
     }
 }
 
-// PT Cache 乒乓调度线程
-// REQUEST 和 UPDATE 交替执行（乒乓），不再优先处理某一类
-// [STAT] 统计每32个REQUEST为一组的执行延时、排队延时、端到端延时
-void CacheSubsystem::pt_scheduler_thread() {
-    uint64_t pt_req_counter = 0;  // [STAT] REQUEST区间统计计数器
+// ============================================================
+// [多RAM] pt_hash_thread - PT Cache Hash 单元线程
+// 乒乓读 pt_request_fifo/pt_update_fifo(仲裁策略不变);
+// 与旧 pt_scheduler_thread 的关键差异: Hash 单元空闲即读下一任务,
+// 不再等待整个任务执行完成; RAM 原子段由 pt_ram_worker_thread 并发消耗。
+// Hash 流程: 读任务 -> wait(hash 1拍) -> ram_id = raw_hash & (num_rams-1)
+//          -> 写入 pt_ram_fifo_[ram_id] (满则阻塞, Hash保持忙, 反压上游FIFO)
+// ============================================================
+void CacheSubsystem::pt_hash_thread() {
     while (true) {
-        CacheMessage req;
-
-        // =============================================================
         // 乒乓调度: 根据 pt_sched_next_is_request_ 决定本轮优先处理哪类
-        // =============================================================
         bool has_req = (pt_request_fifo.num_available() > 0);
         bool has_upd = (pt_update_fifo.num_available() > 0);
 
         if (!has_req && !has_upd) {
-            // 两个FIFO都空，等待
-            wait(pt_request_fifo.data_written_event() | 
+            wait(pt_request_fifo.data_written_event() |
                  pt_update_fifo.data_written_event());
             continue;
         }
 
-        // 决定本轮处理类型
         bool do_request;
         if (has_req && has_upd) {
             do_request = pt_sched_next_is_request_;  // 两者都有，按乒乓选择
@@ -343,29 +357,106 @@ void CacheSubsystem::pt_scheduler_thread() {
             do_request = has_req;  // 只有一个可用，处理它
         }
 
+        CacheMessage req;
         if (do_request) {
-            // =============================================================
-            // 处理 REQUEST
-            // =============================================================
             req = pt_request_fifo.read();
-            const sc_time dequeue_time = sc_time_stamp();
-            const double start_ns = dequeue_time.to_seconds() * 1e9;
+            pt_sched_next_is_request_ = false;
+        } else {
+            req = pt_update_fifo.read();
+            pt_sched_next_is_request_ = true;
+        }
 
-            double fifo_wait_ns = start_ns - req.timestamp.to_seconds() * 1e9;
-            stats_.accumulate_phase_task_wait("pt_cache", 0, fifo_wait_ns);
+        const sc_time dequeue_time = sc_time_stamp();
+        const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
+        double fifo_wait_ns = dequeue_ns - req.timestamp.to_seconds() * 1e9;
+        stats_.accumulate_phase_task_wait("pt_cache", do_request ? 0 : 1, fifo_wait_ns);
 
-            // [DEBUG] 打印pt_request_fifo dequeue时间戳
+        if (do_request) {
+            // [DEBUG] 保留原[PT_SCHED]日志口径(供现有分析脚本使用)
             printf("[PT_SCHED] task_id=%u -> dequeue from pt_request_fifo [entry=%.1f ns, dequeue=%.1f ns, fifo_wait=%.2f ns]\n",
-                   req.task_id, req.timestamp.to_seconds() * 1e9, start_ns, fifo_wait_ns);
+                   (unsigned)req.task_id, req.timestamp.to_seconds() * 1e9, dequeue_ns, fifo_wait_ns);
             fflush(stdout);
+        }
 
+        // Hash 单元执行 1 拍 (忙)
+        wait(pt_cache_->hash_stage_latency());
+
+        uint32_t ram_id = pt_cache_->compute_ram_id(req.gscid, req.pscid, req.iova);
+
+        // 写目标 RAM FIFO: 满则阻塞(Hash保持忙, 反压 pt_request/pt_update)
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (pt_ram_fifo_[ram_id]->num_free() == 0) {
+            pt_hash_backpressure_cnt_++;
+            printf("[PT_HASH_BP] task_id=%u -> RAM%u FIFO full, hash unit blocked\n",
+                   (unsigned)req.task_id, ram_id);
+            fflush(stdout);
+        }
+        pt_ram_fifo_[ram_id]->write(req);  // 阻塞写 = 反压
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        pt_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+
+        // [STAT] FIFO占用峰值与Hash单元统计
+        int occ = pt_ram_fifo_[ram_id]->num_available();
+        if (occ > pt_ram_fifo_peak_[ram_id]) pt_ram_fifo_peak_[ram_id] = occ;
+        pt_hash_task_count_++;
+        pt_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
+    }
+}
+
+// ============================================================
+// [多RAM] pt_ram_worker_thread - 每组 RAM 独立 worker
+// 同一 RAM FIFO 内任务串行(单线程天然保证原子段不可分割);
+// 不同 RAM 组并发, 稳态下理想情况接近每周期输出一个查询结果。
+// RAM 原子段: LOOKUP = read_set+compare; FILL = read_set+compute+write (不含hash)
+// RAM i 独占 set 区间 [i*sets_per_ram, (i+1)*sets_per_ram), 无数据竞争。
+// [STAT] 原 pt_scheduler_thread 的任务级统计(间隔/32组/区间命中率)迁移至此,
+//        多worker并发下gap统计语义变为"全RAM聚合间隙", 仅供参考。
+// ============================================================
+void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
+    sc_fifo<CacheMessage>& my_fifo = *pt_ram_fifo_[ram_id];
+    uint64_t pt_req_counter = 0;  // [STAT] 本RAM的REQUEST区间统计计数(区间号全局另算)
+    (void)pt_req_counter;
+    while (true) {
+        CacheMessage req = my_fifo.read();
+        const sc_time dequeue_time = sc_time_stamp();
+        const double start_ns = dequeue_time.to_seconds() * 1e9;
+        const bool is_update = (req.msg_type == CacheMsgType::PT_UPDATE);
+
+        if (!is_update) {
+            // =============================================================
+            // 处理 REQUEST (LOOKUP)
+            // =============================================================
             trace_task_event("begin", "pt_cache", "lookup", req, dequeue_time);
-            CacheMessage resp = execute_pt_request(req);
+            pt_cache_->set_current_phase(0);
+
+            CacheMessage resp;
+            resp.msg_type = CacheMsgType::CACHE_RESPONSE;
+            resp.task_id = req.task_id;
+            resp.iova = req.iova;  // FIX: 复制IOVA到响应
+            resp.gscid = req.gscid;
+            resp.pscid = req.pscid;
+
+            PTData data;
+            sc_time ram_latency = SC_ZERO_TIME;
+            resp.hit = pt_cache_->lookup_pt_ram(req.gscid, req.pscid, req.iova,
+                                                req.stage, req.pt_sv48,
+                                                req.pt_gstage_x4,
+                                                data, ram_latency);
+            if (resp.hit) {
+                resp.stage = pt_stage(data);
+                resp.from_prefetch = pt_from_prefetch(data);
+                resp.pt_data = data;
+            }
+            resp.latency = pt_cache_->hash_stage_latency() + ram_latency;
+
+            // RAM 原子段延时(同RAM串行, 跨RAM并发)
+            wait(ram_latency);
+
             const sc_time end = sc_time_stamp();
             const double end_ns = end.to_seconds() * 1e9;
             double exec_ns = end_ns - start_ns;
 
-            // [STAT] 全局间隔分析
+            // [STAT] 全局间隔分析(多RAM下为聚合口径)
             if (pt_sched_last_task_end_ >= 0.0) {
                 double gap_ns = start_ns - pt_sched_last_task_end_;
                 if (gap_ns > 0.0) {
@@ -385,11 +476,10 @@ void CacheSubsystem::pt_scheduler_thread() {
             stats_.record_pt_phase_timestamp("pt_cache", 0, start_ns, end_ns);
             trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
 
-            // 区间命中率统计
-            int interval_idx = static_cast<int>(pt_req_counter / 1000);
+            // 区间命中率统计(全局REQUEST序号)
+            int interval_idx = static_cast<int>(pt_sched_req_count_ / 1000);
             if (resp.hit) stats_.record_interval_hit("pt_cache", interval_idx);
             else           stats_.record_interval_miss("pt_cache", interval_idx);
-            pt_req_counter++;
 
             if (resp.hit) {
                 // HIT 常规CL: 直接返回
@@ -402,7 +492,7 @@ void CacheSubsystem::pt_scheduler_thread() {
             }
 
             // =============================================================
-            // [STAT] 32任务组统计 - REQUEST完成
+            // [STAT] 32任务组统计 - REQUEST完成(跨RAM共享, 协作式调度下安全)
             // =============================================================
             int pos = pt_group_pos_;
             pt_group_exec_ns_[pos]   = exec_ns;
@@ -424,51 +514,64 @@ void CacheSubsystem::pt_scheduler_thread() {
             pt_group_upd_cnt_since_ = 0;
             pt_group_last_req_end_ = end_ns;
 
-            // 乒乓切换
-            pt_sched_next_is_request_ = false;
+            // [STAT] 本RAM统计
+            pt_ram_lookup_count_[ram_id]++;
         } else {
             // =============================================================
-            // 处理 UPDATE
+            // 处理 UPDATE (FILL)
             // =============================================================
-            req = pt_update_fifo.read();
-            const sc_time upd_dequeue_time = sc_time_stamp();
-            const double upd_start_ns = upd_dequeue_time.to_seconds() * 1e9;
-            double upd_fifo_wait_ns = upd_start_ns - req.timestamp.to_seconds() * 1e9;
-            stats_.accumulate_phase_task_wait("pt_cache", 1, upd_fifo_wait_ns);
+            trace_task_event("begin", "pt_cache", "update", req, dequeue_time);
+            pt_cache_->set_current_phase(1);
 
-            trace_task_event("begin", "pt_cache", "update", req, upd_dequeue_time);
-            CacheMessage upd_resp = execute_pt_update_request(req);
+            sc_time ram_latency = SC_ZERO_TIME;
+            pt_cache_->fill_pt_ram(req.gscid, req.pscid, req.iova, req.stage,
+                                   req.pt_data, req.from_prefetch, ram_latency);
+
+            CacheMessage upd_resp;
+            upd_resp.msg_type = CacheMsgType::CACHE_UPDATE_RESPONSE;
+            upd_resp.task_id = req.task_id;
+
+            // RAM 原子段延时
+            wait(ram_latency);
+
             const sc_time upd_end = sc_time_stamp();
             const double upd_end_ns = upd_end.to_seconds() * 1e9;
-            double upd_exec_ns = upd_end_ns - upd_start_ns;
+            double upd_exec_ns = upd_end_ns - start_ns;
 
             // [STAT] 全局间隔分析
             if (pt_sched_last_task_end_ >= 0.0) {
-                double gap_ns = upd_start_ns - pt_sched_last_task_end_;
+                double gap_ns = start_ns - pt_sched_last_task_end_;
                 if (gap_ns > 0.0) {
                     pt_sched_total_gap_ns_ += gap_ns;
                     pt_sched_gap_count_++;
                     if (gap_ns > pt_sched_max_gap_ns_) pt_sched_max_gap_ns_ = gap_ns;
                 }
             }
-            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = upd_start_ns;
+            if (pt_sched_first_start_ns_ < 0.0) pt_sched_first_start_ns_ = start_ns;
             pt_sched_last_end_ns_ = upd_end_ns;
             pt_sched_total_exec_ns_ += upd_exec_ns;
             pt_sched_task_count_++;
             pt_sched_upd_count_++;
             pt_sched_last_task_end_ = upd_end_ns;
 
-            record_task_completion("pt_cache", upd_dequeue_time, upd_end);
-            stats_.record_pt_phase_timestamp("pt_cache", 1, upd_start_ns, upd_end_ns);
-            trace_task_event("end", "pt_cache", "update", req, upd_dequeue_time, &upd_resp);
+            record_task_completion("pt_cache", dequeue_time, upd_end);
+            stats_.record_pt_phase_timestamp("pt_cache", 1, start_ns, upd_end_ns);
+            trace_task_event("end", "pt_cache", "update", req, dequeue_time, &upd_resp);
 
             // [STAT] 累加到32任务组的排队统计（UPDATE执行时间计入REQUEST的排队延时）
             pt_group_upd_since_last_ += upd_exec_ns;
             pt_group_upd_cnt_since_++;
 
-            // 乒乓切换
-            pt_sched_next_is_request_ = true;
+            // [STAT] 本RAM统计
+            pt_ram_update_count_[ram_id]++;
         }
+
+        // [STAT] 本RAM公共统计
+        const double task_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        pt_ram_task_count_[ram_id]++;
+        pt_ram_busy_ns_[ram_id] += (task_end_ns - start_ns);
+        if (pt_ram_first_start_ns_ < 0.0) pt_ram_first_start_ns_ = start_ns;
+        if (task_end_ns > pt_ram_last_end_ns_) pt_ram_last_end_ns_ = task_end_ns;
     }
 }
 
@@ -743,6 +846,58 @@ void CacheSubsystem::print_dedup_scheduler_report() const {
     printf("    Idle ratio:         %.2f%%  (gap / window)\n",
            window_ns > 0 ? (window_ns - total_exec_ns) / window_ns * 100.0 : 0.0);
     printf("============================================================\n\n");
+}
+
+// [多RAM] 多 RAM 统计报告: Hash单元/每组RAM利用率/FIFO峰值/吞吐
+void CacheSubsystem::print_pt_multi_ram_report() const {
+    printf("\n========== PT Cache Multi-RAM Report ==========\n");
+    printf("  Config:               num_rams=%u, ram_fifo_depth=%u\n",
+           pt_num_rams_, pt_cache_->ram_fifo_depth());
+
+    if (pt_hash_task_count_ == 0) {
+        printf("  No tasks processed.\n");
+        printf("===============================================\n\n");
+        return;
+    }
+
+    // Hash 单元
+    printf("  [Hash Unit]\n");
+    printf("    Tasks hashed:        %lu\n", (unsigned long)pt_hash_task_count_);
+    printf("    Busy time:           %.1f ns\n", pt_hash_busy_ns_);
+    printf("    Backpressure count:  %lu\n", (unsigned long)pt_hash_backpressure_cnt_);
+    printf("    Backpressure time:   %.1f ns (write-block on full RAM FIFO)\n",
+           pt_hash_backpressure_ns_);
+
+    // 每组 RAM
+    double window_ns = pt_ram_last_end_ns_ - pt_ram_first_start_ns_;
+    printf("  [Per-RAM Workers]  (window=%.1f ns)\n", window_ns);
+    printf("    %-5s %-10s %-10s %-10s %-12s %-9s %-10s\n",
+           "RAM", "Tasks", "Lookups", "Updates", "Busy(ns)", "Util(%)", "FIFO_Peak");
+    uint64_t total_tasks = 0;
+    double total_busy = 0.0;
+    for (uint32_t i = 0; i < pt_num_rams_; ++i) {
+        double util = (window_ns > 0) ? pt_ram_busy_ns_[i] / window_ns * 100.0 : 0.0;
+        printf("    %-5u %-10lu %-10lu %-10lu %-12.1f %-9.2f %-10d\n",
+               i,
+               (unsigned long)pt_ram_task_count_[i],
+               (unsigned long)pt_ram_lookup_count_[i],
+               (unsigned long)pt_ram_update_count_[i],
+               pt_ram_busy_ns_[i], util, pt_ram_fifo_peak_[i]);
+        total_tasks += pt_ram_task_count_[i];
+        total_busy += pt_ram_busy_ns_[i];
+    }
+    printf("    %-5s %-10lu %-10s %-10s %-12.1f\n",
+           "SUM", (unsigned long)total_tasks, "-", "-", total_busy);
+
+    // 并发吞吐: 窗口内每周期输出结果数(稳态目标接近1)
+    if (window_ns > 0) {
+        printf("  [Throughput]\n");
+        printf("    Results/cycle:       %.3f  (total_tasks / window, clock=1ns)\n",
+               (double)total_tasks / window_ns);
+        printf("    Aggregate busy/win:  %.2f  (>1 means cross-RAM concurrency)\n",
+               total_busy / window_ns);
+    }
+    printf("===============================================\n\n");
 }
 
 // Walker Cache 统一轮询调度线程

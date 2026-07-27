@@ -26,6 +26,8 @@ static CacheConfig parse_cache_config(const json& j, const CacheConfig& defaults
     if (j.contains("num_ways"))                  cfg.num_ways = static_cast<uint32_t>(j["num_ways"]);
     if (j.contains("replacement"))               cfg.replacement = static_cast<std::string>(j["replacement"]);
     if (j.contains("srrip_m_bits"))              cfg.srrip_m_bits = static_cast<uint32_t>(j["srrip_m_bits"]);
+    if (j.contains("num_rams"))                  cfg.num_rams = static_cast<uint32_t>(j["num_rams"]);
+    if (j.contains("ram_fifo_depth"))            cfg.ram_fifo_depth = static_cast<uint32_t>(j["ram_fifo_depth"]);
     parse_cache_timing_config(j, cfg);
     return cfg;
 }

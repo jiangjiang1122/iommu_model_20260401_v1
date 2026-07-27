@@ -39,7 +39,9 @@
     "num_sets": 1024,
     "num_ways": 8,
     "replacement": "plru",
-    "srrip_m_bits": 2
+    "srrip_m_bits": 2,
+    "num_rams": 4,
+    "ram_fifo_depth": 8
   },
 
   "walker_cache": {
