@@ -109,6 +109,8 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       msi_request_fifo(1),
       dedup_request_fifo(16),
       dedup_update_fifo(16),
+      dedup_inside_request_fifo(32),
+      dedup_hash_in_fifo(1),
       dc_response_fifo(16),
       pc_response_fifo(16),
       pt_hit_response_fifo(16),
@@ -174,7 +176,9 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
         }
     }
     SC_THREAD(pt_hash_thread);
-    SC_THREAD(dedup_scheduler_thread);  // [重构] 去重 Cache 乒乓调度线程
+    // [dedup多RAM] 去重Cache多RAM改造: Scheduler + Hash单元 + 每组RAM独立worker(sc_spawn)
+    SC_THREAD(dedup_scheduler_thread);
+    SC_THREAD(dedup_hash_process_thread);
     SC_THREAD(walker_scheduler_thread);  // 统一的walker cache轮询调度线程
     SC_THREAD(msi_worker_thread);
     SC_THREAD(dc_update_worker_thread);
@@ -189,10 +193,27 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     // [NEW] 初始化PT Cache去重功能
     dedup_buffer_ = new DedupBuffer();
     pt_dedup_enabled_ = true;
-    // [重构] 创建独立 dedup_cache (几何复用 pt_cache 配置)
-    dedup_cache_ = std::make_unique<DedupCache>(cfg.pt_cache.num_sets, cfg.pt_cache.num_ways);
-    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u)\n",
-           cfg.pt_cache.num_sets, cfg.pt_cache.num_ways);
+    // [dedup多RAM] 创建独立 dedup_cache (几何由 cfg.dedup_cache 配置) + RAM分组
+    dedup_cache_ = std::make_unique<DedupCache>(cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways);
+    dedup_cache_->configure_multi_ram(cfg.dedup_cache.num_rams);
+    dedup_num_rams_ = dedup_cache_->num_rams();
+    assert(dedup_num_rams_ >= 1 && dedup_num_rams_ <= DEDUP_MAX_RAMS);
+    {
+        const int fifo_depth = static_cast<int>(cfg.dedup_cache.ram_fifo_depth);
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            char fname[36];
+            snprintf(fname, sizeof(fname), "dedup_ram_fifo_%u", i);
+            dedup_ram_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, fifo_depth));
+        }
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            sc_spawn(sc_bind(&CacheSubsystem::dedup_ram_worker_thread, this,
+                             static_cast<int>(i)));
+        }
+    }
+    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u)\n",
+           cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways,
+           dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth);
     fflush(stdout);
 }
 
@@ -576,96 +597,124 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
 }
 
 // ============================================================
-// [重构] dedup_scheduler_thread - 去重 Cache 乒乓调度线程
-// 乒乓处理 dedup_request_fifo / dedup_update_fifo:
-//   - REQUEST: execute_dedup_request + 精确流水线时序 (原子段串行, 每任务 n*5cyc)
-//   - UPDATE : execute_dedup_update (dedup_cache 查表+清除, 触发 Buffer 刷新回调)
-// hash 建模为与前一任务原子段完全重叠(隐藏); 仅当流水线空闲时计一次 hash 填充。
+// [dedup多RAM] dedup_scheduler_thread - 去重 Cache 纯调度线程
+// 轮询3入口FIFO: dedup_request_fifo / dedup_inside_request_fifo / dedup_update_fifo
+//   - 乒乓仲裁: REQUEST类 vs UPDATE 交替(保持原策略)
+//   - REQUEST类内: inside(预取)优先于 request(预取尽早占位, 避免后续任务MISS)
+// 选中后阻塞写 dedup_hash_in_fifo(深度1): 写满=Hash忙=反压三个入口FIFO。
+// Hash单元空闲即可读下一任务(不等前一任务RAM原子段完成)。
 // ============================================================
 void CacheSubsystem::dedup_scheduler_thread() {
     while (true) {
         bool has_req = (dedup_request_fifo.num_available() > 0);
+        bool has_ins = (dedup_inside_request_fifo.num_available() > 0);
         bool has_upd = (dedup_update_fifo.num_available() > 0);
 
-        bool pipeline_idle = false;
-        if (!has_req && !has_upd) {
-            pipeline_idle = true;
+        if (!has_req && !has_ins && !has_upd) {
             wait(dedup_request_fifo.data_written_event() |
+                 dedup_inside_request_fifo.data_written_event() |
                  dedup_update_fifo.data_written_event());
-            (void)pipeline_idle;
             continue;
         }
 
+        // 乒乓仲裁: REQUEST类(request+inside) vs UPDATE
+        bool any_request = has_req || has_ins;
         bool do_request;
-        if (has_req && has_upd) {
-            do_request = dedup_sched_next_is_request_;  // 两者都有, 按乒乓选择
+        if (any_request && has_upd) {
+            do_request = dedup_sched_next_is_request_;  // 两类都有, 按乒乓选择
         } else {
-            do_request = has_req;  // 只有一个可用, 处理它
+            do_request = any_request;  // 只有一类可用, 处理它
         }
 
+        CacheMessage msg;
         if (do_request) {
-            // ============ 处理 REQUEST ============
-            CacheMessage req = dedup_request_fifo.read();
-            const sc_time dequeue_time = sc_time_stamp();
-            const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
-
-            // [STAT] 记录第一笔任务开始时刻
-            if (dedup_first_start_ns_ < 0) {
-                dedup_first_start_ns_ = dequeue_ns;
-            }
-
-            trace_task_event("begin", "dedup_cache", "lookup", req, dequeue_time);
-            CacheMessage resp = execute_dedup_request(req);
-
-            // [重构] 精确流水线时序: 每任务消耗 n_atomic 个原子段(5cyc), 单线程天然串行
-            uint32_t n_atomic = last_dedup_atomic_ops_;
-            wait(clock_period_ * static_cast<int>(n_atomic * DEDUP_ATOMIC_CYCLES));
-
-            const sc_time end_time = sc_time_stamp();
-            const double end_ns = end_time.to_seconds() * 1e9;
-            const double exec_ns = end_ns - dequeue_ns;
-
-            // [STAT] 更新 REQUEST 统计
-            dedup_req_count_++;
-            dedup_req_total_exec_ns_ += exec_ns;
-            if (exec_ns > dedup_req_max_exec_ns_) dedup_req_max_exec_ns_ = exec_ns;
-            if (exec_ns < dedup_req_min_exec_ns_) dedup_req_min_exec_ns_ = exec_ns;
-            dedup_last_end_ns_ = end_ns;
-
-            record_task_completion("dedup_cache", dequeue_time, end_time);
-            trace_task_event("end", "dedup_cache", "lookup", req, dequeue_time, &resp);
-
-            // [重构] 路由响应:
-            //   dedup_suspended: 任务已挂 Buffer -> 推 pt_hit_response_fifo(collector 识别后挂起)
-            //   否则(MISS/降级): 推 pt_miss_response_fifo -> collector -> PTW
-            if (resp.dedup_suspended) {
-                push_fifo(pt_hit_response_fifo, resp);
+            // REQUEST类内: inside(预取)优先
+            if (has_ins) {
+                msg = dedup_inside_request_fifo.read();
             } else {
-                push_fifo(pt_miss_response_fifo, resp);
+                msg = dedup_request_fifo.read();
             }
-
             dedup_sched_next_is_request_ = false;
         } else {
-            // ============ 处理 UPDATE ============
-            CacheMessage upd = dedup_update_fifo.read();
-            const sc_time dequeue_time = sc_time_stamp();
-            const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
+            msg = dedup_update_fifo.read();
+            dedup_sched_next_is_request_ = true;
+        }
 
-            // [STAT] 记录第一笔任务开始时刻
-            if (dedup_first_start_ns_ < 0) {
-                dedup_first_start_ns_ = dequeue_ns;
-            }
+        // 下发Hash单元: 阻塞写 = hash忙时scheduler阻塞(反压上游)
+        dedup_hash_in_fifo.write(msg);
+    }
+}
 
-            trace_task_event("begin", "dedup_cache", "update", upd, dequeue_time);
-            execute_dedup_update(upd);
-            // dedup_cache 查表+清除 计一个原子段; Buffer 刷新的 FIFO 转发阻塞已在回调内推进时间
+// ============================================================
+// [dedup多RAM] dedup_hash_process_thread - 去重 Cache Hash 单元线程
+// 读 dedup_hash_in_fifo -> wait(hash 1拍) -> ram_id = org_hash & (num_rams-1)
+//   -> 写 dedup_ram_fifo_[ram_id] (满则阻塞, Hash保持忙, 反压scheduler)
+// ============================================================
+void CacheSubsystem::dedup_hash_process_thread() {
+    while (true) {
+        CacheMessage msg = dedup_hash_in_fifo.read();
+        const double dequeue_ns = sc_time_stamp().to_seconds() * 1e9;
+
+        // Hash 单元执行 1 拍 (忙)
+        wait(clock_period_ * static_cast<int>(DEDUP_HASH_CYCLES));
+
+        uint32_t ram_id = dedup_cache_->compute_ram_id(msg.gscid, msg.pscid, msg.iova);
+
+        // 写目标 RAM FIFO: 满则阻塞(Hash保持忙, 反压上游)
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (dedup_ram_fifo_[ram_id]->num_free() == 0) {
+            dedup_hash_backpressure_cnt_++;
+            printf("[DEDUP_HASH_BP] task_id=%u -> RAM%u FIFO full, hash unit blocked\n",
+                   (unsigned)msg.task_id, ram_id);
+            fflush(stdout);
+        }
+        dedup_ram_fifo_[ram_id]->write(msg);  // 阻塞写 = 反压
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+
+        // [STAT] FIFO占用峰值与Hash单元统计
+        int occ = dedup_ram_fifo_[ram_id]->num_available();
+        if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
+        dedup_hash_task_count_++;
+        dedup_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
+    }
+}
+
+// ============================================================
+// [dedup多RAM] dedup_ram_worker_thread - 每组 RAM 独立 worker
+// 同一 RAM FIFO 内任务串行(单线程天然保证原子段不可分割), 跨 RAM 并发。
+// 原子段 = get_set(2) + get_free_line(2) + write(1) = 5cyc, 每任务消耗1次。
+// 任务类型:
+//   UPDATE(msg_type=PT_UPDATE): lookup + (主占位)flush回调 + clear_line
+//   预取REQUEST(dedup_is_prefetch=1): lookup已存在则跳过, 否则insert预取占位; 无响应
+//   普通REQUEST: 分支1/2/3处理(execute_dedup_request) + 响应路由
+// RAM i 独占 set 区间 [i*sets_per_ram, (i+1)*sets_per_ram), 无数据竞争。
+// Buffer满阻塞仅影响本RAM(其余RAM继续工作)。
+// ============================================================
+void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
+    sc_fifo<CacheMessage>& my_fifo = *dedup_ram_fifo_[ram_id];
+    while (true) {
+        CacheMessage msg = my_fifo.read();
+        const sc_time dequeue_time = sc_time_stamp();
+        const double start_ns = dequeue_time.to_seconds() * 1e9;
+
+        // [STAT] 记录第一笔任务开始时刻(全RAM聚合)
+        if (dedup_first_start_ns_ < 0) dedup_first_start_ns_ = start_ns;
+        if (dedup_ram_first_start_ns_ < 0) dedup_ram_first_start_ns_ = start_ns;
+
+        const bool is_update = (msg.msg_type == CacheMsgType::PT_UPDATE);
+
+        if (is_update) {
+            // ============ UPDATE: 查表 + 刷Buffer + 清占位 ============
+            trace_task_event("begin", "dedup_cache", "update", msg, dequeue_time);
+            execute_dedup_update(msg);
+            // 原子段延时; Buffer刷新的FIFO转发阻塞已在回调内推进时间
             wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
 
             const sc_time end_time = sc_time_stamp();
             const double end_ns = end_time.to_seconds() * 1e9;
-            const double exec_ns = end_ns - dequeue_ns;
+            const double exec_ns = end_ns - start_ns;
 
-            // [STAT] 更新 UPDATE 统计
             dedup_upd_count_++;
             dedup_upd_total_exec_ns_ += exec_ns;
             if (exec_ns > dedup_upd_max_exec_ns_) dedup_upd_max_exec_ns_ = exec_ns;
@@ -673,8 +722,60 @@ void CacheSubsystem::dedup_scheduler_thread() {
             dedup_last_end_ns_ = end_ns;
 
             record_task_completion("dedup_cache", dequeue_time, end_time);
-            dedup_sched_next_is_request_ = true;
+            dedup_ram_upd_count_[ram_id]++;
+        } else if (msg.dedup_is_prefetch) {
+            // ============ 预取REQUEST: 插预取占位CL(无响应输出) ============
+            uint64_t page_iova = msg.iova & ~0xFFFULL;
+            if (dedup_cache_->lookup(msg.gscid, msg.pscid, page_iova) == nullptr) {
+                dedup_cache_->insert(msg.gscid, msg.pscid, page_iova,
+                                     0xFFFF, false /*is_req=0 预取占位*/);
+                printf("[DEDUP_PREFETCH] task_id=%u -> prefetch placeholder inserted (iova=0x%lx, RAM%d)\n",
+                       (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
+            } else {
+                printf("[DEDUP_PREFETCH] task_id=%u -> placeholder exists, skip (iova=0x%lx, RAM%d)\n",
+                       (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
+            }
+            fflush(stdout);
+            // 预取任务同样消耗1个原子段
+            wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
+            dedup_last_end_ns_ = sc_time_stamp().to_seconds() * 1e9;
+            dedup_ram_prefetch_count_[ram_id]++;
+        } else {
+            // ============ 普通REQUEST: 分支1/2/3 + 响应路由 ============
+            trace_task_event("begin", "dedup_cache", "lookup", msg, dequeue_time);
+            CacheMessage resp = execute_dedup_request(msg);
+            // 原子段延时(预取占位已异步化, 每任务固定1个原子段)
+            wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
+
+            const sc_time end_time = sc_time_stamp();
+            const double end_ns = end_time.to_seconds() * 1e9;
+            const double exec_ns = end_ns - start_ns;
+
+            dedup_req_count_++;
+            dedup_req_total_exec_ns_ += exec_ns;
+            if (exec_ns > dedup_req_max_exec_ns_) dedup_req_max_exec_ns_ = exec_ns;
+            if (exec_ns < dedup_req_min_exec_ns_) dedup_req_min_exec_ns_ = exec_ns;
+            dedup_last_end_ns_ = end_ns;
+
+            record_task_completion("dedup_cache", dequeue_time, end_time);
+            trace_task_event("end", "dedup_cache", "lookup", msg, dequeue_time, &resp);
+
+            // 响应路由:
+            //   dedup_suspended: 任务已挂Buffer -> pt_hit_response_fifo(collector识别后挂起)
+            //   否则(MISS/降级): pt_miss_response_fifo -> collector -> PTW
+            if (resp.dedup_suspended) {
+                push_fifo(pt_hit_response_fifo, resp);
+            } else {
+                push_fifo(pt_miss_response_fifo, resp);
+            }
+            dedup_ram_req_count_[ram_id]++;
         }
+
+        // [STAT] 本RAM公共统计
+        const double task_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_ram_task_count_[ram_id]++;
+        dedup_ram_busy_ns_[ram_id] += (task_end_ns - start_ns);
+        if (task_end_ns > dedup_ram_last_end_ns_) dedup_ram_last_end_ns_ = task_end_ns;
     }
 }
 
@@ -900,6 +1001,63 @@ void CacheSubsystem::print_pt_multi_ram_report() const {
     printf("===============================================\n\n");
 }
 
+// [dedup多RAM] 去重Cache多RAM统计报告: Hash单元/每组RAM利用率/FIFO峰值/预取丢弃
+void CacheSubsystem::print_dedup_multi_ram_report() const {
+    printf("\n========== Dedup Cache Multi-RAM Report ==========\n");
+    printf("  Config:               num_rams=%u, ram_fifo_depth=%u, inside_fifo_depth=32\n",
+           dedup_num_rams_, cfg_.dedup_cache.ram_fifo_depth);
+
+    if (dedup_hash_task_count_ == 0) {
+        printf("  No tasks processed.\n");
+        printf("==================================================\n\n");
+        return;
+    }
+
+    // Hash 单元
+    printf("  [Hash Unit]\n");
+    printf("    Tasks hashed:        %lu\n", (unsigned long)dedup_hash_task_count_);
+    printf("    Busy time:           %.1f ns\n", dedup_hash_busy_ns_);
+    printf("    Backpressure count:  %lu\n", (unsigned long)dedup_hash_backpressure_cnt_);
+    printf("    Backpressure time:   %.1f ns (write-block on full RAM FIFO)\n",
+           dedup_hash_backpressure_ns_);
+
+    // 每组 RAM
+    double window_ns = dedup_ram_last_end_ns_ - dedup_ram_first_start_ns_;
+    printf("  [Per-RAM Workers]  (window=%.1f ns)\n", window_ns);
+    printf("    %-5s %-10s %-10s %-10s %-10s %-12s %-9s %-10s\n",
+           "RAM", "Tasks", "Requests", "Updates", "Prefetch", "Busy(ns)", "Util(%)", "FIFO_Peak");
+    uint64_t total_tasks = 0;
+    double total_busy = 0.0;
+    for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+        double util = (window_ns > 0) ? dedup_ram_busy_ns_[i] / window_ns * 100.0 : 0.0;
+        printf("    %-5u %-10lu %-10lu %-10lu %-10lu %-12.1f %-9.2f %-10d\n",
+               i,
+               (unsigned long)dedup_ram_task_count_[i],
+               (unsigned long)dedup_ram_req_count_[i],
+               (unsigned long)dedup_ram_upd_count_[i],
+               (unsigned long)dedup_ram_prefetch_count_[i],
+               dedup_ram_busy_ns_[i], util, dedup_ram_fifo_peak_[i]);
+        total_tasks += dedup_ram_task_count_[i];
+        total_busy += dedup_ram_busy_ns_[i];
+    }
+    printf("    %-5s %-10lu %-10s %-10s %-10s %-12.1f\n",
+           "SUM", (unsigned long)total_tasks, "-", "-", "-", total_busy);
+
+    // 预取丢弃(inside_fifo满)
+    printf("  [Prefetch]\n");
+    printf("    Dropped (inside_fifo full): %lu\n", (unsigned long)dedup_prefetch_dropped_);
+
+    // 并发吞吐
+    if (window_ns > 0) {
+        printf("  [Throughput]\n");
+        printf("    Results/cycle:       %.3f  (total_tasks / window, clock=1ns)\n",
+               (double)total_tasks / window_ns);
+        printf("    Aggregate busy/win:  %.2f  (>1 means cross-RAM concurrency)\n",
+               total_busy / window_ns);
+    }
+    printf("==================================================\n\n");
+}
+
 // Walker Cache 统一轮询调度线程
 // 按 lookup → update → invalidate 顺序轮询，避免互锁死锁
 void CacheSubsystem::walker_scheduler_thread() {
@@ -1108,13 +1266,13 @@ CacheMessage CacheSubsystem::execute_pt_request(const CacheMessage& req) {
 
 // ============================================================
 // [重构] execute_dedup_request - 去重 Cache 查询流程 (含 Buffer 交互)
-// 运行于 dedup_scheduler_thread (进程上下文, 允许 wait 反压)
+// [dedup多RAM] 运行于 dedup_ram_worker_thread (进程上下文, 允许 wait 反压;
+//   Buffer满阻塞仅影响本RAM, 其余RAM继续工作)
 // 分支:
 //   HIT 主占位(is_req=1)   -> 挂 Buffer 链尾, 任务挂起(dedup_suspended)
 //   HIT 预取占位(is_req=0) -> 分配 Buffer, 升级 is_req=1, 任务挂起
-//   MISS                   -> 插主占位 + D 个预取占位, 返回 MISS -> PTW
+//   MISS                   -> 插主占位 + 生成D个预取任务写inside_fifo, 返回 MISS -> PTW
 //   降级(insert 失败)       -> 释放 Buffer, dedup_bypass, 返回 MISS -> PTW
-// 设置 last_dedup_atomic_ops_ (原子段个数, 供调度线程计时)
 // ============================================================
 CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
     CacheMessage resp;
@@ -1126,8 +1284,6 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
     resp.stage = req.stage;
     resp.prefetch_enabled = req.prefetch_enabled;
     resp.prefetch_depth = req.prefetch_depth;
-
-    last_dedup_atomic_ops_ = 1;  // 默认 1 个原子段
 
     uint64_t page_iova = req.iova & ~0xFFFULL;
     DedupCacheLine* line = dedup_cache_->lookup(req.gscid, req.pscid, page_iova);
@@ -1235,25 +1391,38 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 resp.prefetch_enabled = req.prefetch_enabled;
                 resp.prefetch_depth = req.prefetch_depth;
 
-                // 插入 D 个预取占位CL(页表页边界内)
+                // [dedup多RAM] 预取异步化: 生成D个预取任务写 dedup_inside_request_fifo,
+                // 经scheduler重新调度分发到不同RAM并行执行(不占用本任务原子段)
+                uint32_t prefetch_issued = 0;
                 if (req.prefetch_enabled && req.prefetch_depth > 0) {
                     uint32_t D = req.prefetch_depth;
                     uint32_t vpn0_in_page = (page_iova >> 12) & 0x1FF;
                     uint32_t max_D = 511 - vpn0_in_page;
                     if (D > max_D) D = max_D;
-                    last_dedup_atomic_ops_ = 1 + D;  // 主任务 + D 个预取, 各一个原子段
 
                     for (uint32_t d = 1; d <= D; d++) {
-                        uint64_t prefetch_iova = page_iova + (d * 0x1000ULL);
-                        if (dedup_cache_->lookup(req.gscid, req.pscid, prefetch_iova) != nullptr) {
-                            continue;  // 已存在占位/常规CL, 跳过
+                        CacheMessage pf;
+                        pf.msg_type = CacheMsgType::PT_LOOKUP;
+                        pf.task_id = req.task_id;
+                        pf.gscid = req.gscid;
+                        pf.pscid = req.pscid;
+                        pf.iova = page_iova + (d * 0x1000ULL);
+                        pf.stage = req.stage;
+                        pf.dedup_is_prefetch = true;
+                        pf.timestamp = sc_time_stamp();
+                        // nb_write: inside_fifo满则丢弃预取(保功能防死锁, 仅损失性能)
+                        if (dedup_inside_request_fifo.nb_write(pf)) {
+                            prefetch_issued++;
+                        } else {
+                            dedup_prefetch_dropped_++;
+                            printf("[DEDUP_PREFETCH_DROP] task_id=%u -> inside_fifo full, prefetch iova=0x%lx dropped\n",
+                                   (unsigned)req.task_id, (unsigned long)pf.iova);
+                            fflush(stdout);
                         }
-                        dedup_cache_->insert(req.gscid, req.pscid, prefetch_iova,
-                                             0xFFFF, false /*is_req=0 预取占位*/);
                     }
                 }
-                printf("[DEDUP_CACHE] task_id=%u -> MISS, inserted main placeholder (head=%u, iova=0x%lx), atomic_ops=%u\n",
-                       (unsigned)req.task_id, head_idx, (unsigned long)page_iova, last_dedup_atomic_ops_);
+                printf("[DEDUP_CACHE] task_id=%u -> MISS, inserted main placeholder (head=%u, iova=0x%lx), prefetch_issued=%u\n",
+                       (unsigned)req.task_id, head_idx, (unsigned long)page_iova, prefetch_issued);
                 fflush(stdout);
             } else {
                 // 降级: dedup_cache set 全部为 is_req=1 受保护 -> 直接转发 PTW

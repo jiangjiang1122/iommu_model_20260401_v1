@@ -44,6 +44,13 @@
     "ram_fifo_depth": 8
   },
 
+  "dedup_cache": {
+    "num_sets": 1024,
+    "num_ways": 8,
+    "num_rams": 4,
+    "ram_fifo_depth": 8
+  },
+
   "walker_cache": {
     "base_sets": 64,
     "ptw_c1": {

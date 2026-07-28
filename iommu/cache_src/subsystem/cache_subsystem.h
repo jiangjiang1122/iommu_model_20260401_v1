@@ -44,6 +44,9 @@ public:
     // PTW 完成后 Monitor 写 dedup_update_fifo 驱动 dedup_cache 清除 + Buffer 刷新。
     sc_fifo<CacheMessage> dedup_request_fifo;
     sc_fifo<CacheMessage> dedup_update_fifo;
+    // [dedup多RAM] 内部预取任务FIFO: MISS时RAM Worker生成D个预取占位任务,
+    // 经 scheduler 重新调度分发到不同RAM并行执行 (深度32, 满则丢弃预取防死锁)
+    sc_fifo<CacheMessage> dedup_inside_request_fifo;
 
     // lookup 响应出口：各 cache 独立返回，避免共用一个 depth=1 FIFO 造成串行化。
     sc_fifo<CacheMessage> dc_response_fifo;
@@ -107,6 +110,17 @@ public:
         return n;
     }
 
+    // [dedup多RAM] dedup 内部在途任务数(hash_in + RAM FIFO + inside预取)
+    int dedup_ram_fifo_pending() const {
+        int n = dedup_hash_in_fifo.num_available() +
+                dedup_inside_request_fifo.num_available();
+        for (const auto& f : dedup_ram_fifo_) n += f->num_available();
+        return n;
+    }
+
+    // [dedup多RAM] 多 RAM 统计报告
+    void print_dedup_multi_ram_report() const;
+
     // 级联失效: DC/PC 失效后产生关联失效消息，推入 PT/Walker/MSIPT 的失效 FIFO
     void enqueue_cascade_invalidations(gscid_t gscid, pscid_t pscid,
                                        device_id_t device_id, bool has_gscid,
@@ -151,7 +165,14 @@ private:
     void pt_hash_thread();
     //   pt_ram_worker_thread: 同 RAM 串行消耗原子段延时, 跨 RAM 并发
     void pt_ram_worker_thread(int ram_id);
-    void dedup_scheduler_thread();  // [重构] 去重 Cache 乒乓调度(dedup_request/update)
+    // [dedup多RAM] 去重Cache多RAM改造: Scheduler(纯调度) + Hash单元 + 每组RAM独立worker
+    //   dedup_scheduler_thread: 轮询3入口FIFO(乒乓REQUEST/UPDATE, REQUEST类内inside优先),
+    //     阻塞写 dedup_hash_in_fifo(深度1, 写满=hash忙=反压)
+    //   dedup_hash_process_thread: 1cyc hash 后按 ram_id 分发到 dedup_ram_fifo_[i](满则阻塞保持忙)
+    //   dedup_ram_worker_thread(i): 原子段5cyc + 分支处理 + Buffer交互 + 响应路由
+    void dedup_scheduler_thread();
+    void dedup_hash_process_thread();
+    void dedup_ram_worker_thread(int ram_id);
     void msi_worker_thread();
     void dc_update_worker_thread();
     void pc_update_worker_thread();
@@ -205,14 +226,13 @@ private:
     DedupBuffer* dedup_buffer_ = nullptr;
     bool pt_dedup_enabled_ = false;
 
-    // [重构] 独立 dedup_cache 实例(几何默认复用 pt_cache)
+    // [重构] 独立 dedup_cache 实例(几何由 cfg.dedup_cache 配置)
     std::unique_ptr<DedupCache> dedup_cache_;
     // [重构] 转发 FIFO 句柄 + Buffer 刷新回调(由 iommu_top 绑定)
     sc_fifo<iommu_task_t*>* forward_fifo_ = nullptr;
     DedupFlushCallback      dedup_flush_cb_;
-    // [重构] dedup 乒乓调度状态 + 流水线时序: 每任务消耗的原子段个数
+    // [dedup多RAM] 乒乓调度状态(scheduler使用)
     bool     dedup_sched_next_is_request_ = true;
-    uint32_t last_dedup_atomic_ops_ = 1;  // execute_dedup_request 设置, 调度线程读取用于计时
 
     // [STAT] PT Scheduler任务间隔分析 (gap = 当前任务start - 上一任务end)
     double   pt_sched_first_start_ns_ = -1.0;   // 第一笔任务开始时刻
@@ -247,7 +267,7 @@ private:
     double   pt_group_sum_e2e_[32]   = {};       // 所有组position i的端到端延时累加
     int      pt_group_sum_upd_[32]   = {};       // 所有组position i的UPDATE数累加
 
-    // [STAT] Dedup Scheduler 执行延时统计
+    // [STAT] Dedup Scheduler 执行延时统计 (多RAM下由RAM Worker更新, 聚合口径)
     uint64_t dedup_req_count_        = 0;        // REQUEST 任务数
     uint64_t dedup_upd_count_        = 0;        // UPDATE 任务数
     double   dedup_req_total_exec_ns_ = 0.0;     // REQUEST 总执行时间
@@ -258,6 +278,34 @@ private:
     double   dedup_upd_min_exec_ns_   = 999999999.0; // UPDATE 最小执行时间
     double   dedup_first_start_ns_    = -1.0;    // 第一笔任务开始时刻
     double   dedup_last_end_ns_       = 0.0;     // 最后一笔任务结束时刻
+
+    // ============================================================
+    // [dedup多RAM] 去重Cache 多 RAM 方案状态与统计
+    // ============================================================
+    static constexpr uint32_t DEDUP_MAX_RAMS = 16;
+    uint32_t dedup_num_rams_ = 1;
+    // Scheduler -> Hash 单元接口FIFO(深度1): 写满即代表Hash忙, 天然反压
+    sc_fifo<CacheMessage> dedup_hash_in_fifo;
+    // 每组 RAM 前置 FIFO (深度 ram_fifo_depth, 满则反压 Hash 单元)
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_fifo_;
+
+    // [STAT] Hash 单元统计
+    uint64_t dedup_hash_task_count_       = 0;    // Hash处理任务总数
+    double   dedup_hash_busy_ns_          = 0.0;  // Hash执行总时长(含反压阻塞)
+    double   dedup_hash_backpressure_ns_  = 0.0;  // 因RAM FIFO满阻塞总时长
+    uint64_t dedup_hash_backpressure_cnt_ = 0;    // 反压发生次数
+
+    // [STAT] 每组 RAM worker 统计
+    uint64_t dedup_ram_task_count_[DEDUP_MAX_RAMS]     = {};  // 处理任务数(req+upd+prefetch)
+    uint64_t dedup_ram_req_count_[DEDUP_MAX_RAMS]      = {};  // 普通REQUEST任务数
+    uint64_t dedup_ram_upd_count_[DEDUP_MAX_RAMS]      = {};  // UPDATE任务数
+    uint64_t dedup_ram_prefetch_count_[DEDUP_MAX_RAMS] = {};  // 预取任务数
+    double   dedup_ram_busy_ns_[DEDUP_MAX_RAMS]        = {};  // RAM原子段忙总时长
+    int      dedup_ram_fifo_peak_[DEDUP_MAX_RAMS]      = {};  // FIFO占用峰值
+    double   dedup_ram_first_start_ns_ = -1.0;                // 首任务开始(全RAM)
+    double   dedup_ram_last_end_ns_    = 0.0;                 // 末任务结束(全RAM)
+    // [STAT] 预取丢弃计数(inside_fifo满时nb_write失败, 保功能防死锁)
+    uint64_t dedup_prefetch_dropped_ = 0;
 
     // ============================================================
     // [多RAM] PT Cache 多 RAM 方案状态与统计

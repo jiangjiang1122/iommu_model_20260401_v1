@@ -77,6 +77,20 @@ GlobalConfig parse_config(const std::string& json_str) {
         cfg.pt_cache = parse_cache_config(j["pt_cache"], pt_def);
     }
 
+    // [dedup多RAM] 去重Cache: 默认几何复用 pt_cache, num_rams=4, ram_fifo_depth=8
+    {
+        CacheConfig dedup_def = common_cache_def;
+        dedup_def.num_sets = cfg.pt_cache.num_sets;
+        dedup_def.num_ways = cfg.pt_cache.num_ways;
+        dedup_def.num_rams = 4;
+        dedup_def.ram_fifo_depth = 8;
+        if (j.contains("dedup_cache")) {
+            cfg.dedup_cache = parse_cache_config(j["dedup_cache"], dedup_def);
+        } else {
+            cfg.dedup_cache = dedup_def;
+        }
+    }
+
     // Walker Cache
     if (j.contains("walker_cache")) {
         const auto& wc = j["walker_cache"];

@@ -1,5 +1,7 @@
 #include "cache/dedup_cache.h"
 
+#include <cassert>
+#include <cstdio>
 #include <cstdlib>
 
 namespace iommu {
@@ -10,8 +12,20 @@ DedupCache::DedupCache(uint32_t num_sets, uint32_t num_ways)
       cache_array_(num_sets, std::vector<DedupCacheLine>(num_ways)) {
 }
 
-uint32_t DedupCache::hash_function(gscid_t gscid, pscid_t pscid, iova_t iova) const {
-    uint32_t mask = num_sets_ - 1;
+// [多RAM] 配置 RAM 分组参数: num_rams 必须为2的幂且整除 num_sets
+void DedupCache::configure_multi_ram(uint32_t num_rams) {
+    num_rams_ = (num_rams == 0) ? 1 : num_rams;
+    assert((num_rams_ & (num_rams_ - 1)) == 0 && "dedup num_rams must be power of 2");
+    assert(num_sets_ % num_rams_ == 0 && "dedup num_rams must divide num_sets");
+    sets_per_ram_ = num_sets_ / num_rams_;
+    log2_num_rams_ = 0;
+    for (uint32_t v = num_rams_; v > 1; v >>= 1) log2_num_rams_++;
+    printf("[DEDUP_CACHE] Multi-RAM config: num_rams=%u, sets_per_ram=%u\n",
+           num_rams_, sets_per_ram_);
+}
+
+// [多RAM] 未掩码原始hash(与 PT Cache 同构: gscid/pscid/iova>>12)
+uint32_t DedupCache::raw_hash(gscid_t gscid, pscid_t pscid, iova_t iova) const {
     constexpr iova_t iova_mask = (static_cast<iova_t>(1) << 32) - 1;  // 32-bit page number
     constexpr uint32_t pscid_mask = (1U << 20) - 1;
 
@@ -23,7 +37,26 @@ uint32_t DedupCache::hash_function(gscid_t gscid, pscid_t pscid, iova_t iova) co
     __uint128_t temp1 = array ^ (array >> 40);
     __uint128_t temp2 = temp1 ^ (temp1 >> 20);
 
-    return static_cast<uint32_t>(temp2) & mask;
+    return static_cast<uint32_t>(temp2);
+}
+
+// [多RAM] 计算任务所属 RAM 组号: org_hash & (num_rams-1)
+uint32_t DedupCache::compute_ram_id(gscid_t gscid, pscid_t pscid, iova_t iova) const {
+    if (num_rams_ <= 1) return 0;
+    return raw_hash(gscid, pscid, align_iova_4k(iova)) & (num_rams_ - 1);
+}
+
+uint32_t DedupCache::hash_function(gscid_t gscid, pscid_t pscid, iova_t iova) const {
+    // [多RAM] 新映射: 低 log2(num_rams) 位选 RAM, 高位作 RAM 内索引
+    // global_set = ram_id * sets_per_ram + set_in_ram, RAM i 独占连续 set 区间
+    // num_rams=1 时退化为原 raw & (num_sets-1)
+    uint32_t raw = raw_hash(gscid, pscid, iova);
+    if (num_rams_ <= 1) {
+        return raw & (num_sets_ - 1);
+    }
+    uint32_t ram_id = raw & (num_rams_ - 1);
+    uint32_t set_in_ram = (raw >> log2_num_rams_) & (sets_per_ram_ - 1);
+    return ram_id * sets_per_ram_ + set_in_ram;
 }
 
 DedupCacheLine* DedupCache::lookup(gscid_t gscid, pscid_t pscid, iova_t iova) {

@@ -554,6 +554,9 @@ struct CacheMessage {
     bool            dedup_suspended = false;    // 命中占位CL, 任务已挂入Buffer(等待PTW), 无需转发
     bool            dedup_bypass = false;       // 降级: dedup_cache插入失败, 直接转发PTW, PTW完成不刷Buffer
     uint64_t        dedup_pa_base = 0;          // dedup_update携带: 该iova已解析的最终PA页基址(用于Buffer刷新算PA)
+    // [dedup多RAM] 预取任务标记: MISS时生成的D个预取占位任务(经 dedup_inside_request_fifo 重新调度)
+    //   RAM Worker处理: lookup已存在则跳过, 否则 insert(is_req=0, head_index=0xFFFF); 无响应输出
+    bool            dedup_is_prefetch = false;
     
     // Task指针（用于在execute_pt_request中传递task，避免在collector中操作Buffer）
     void*           task_ptr = nullptr;  // iommu_task_t* 类型
@@ -628,6 +631,9 @@ struct GlobalConfig {
     CacheConfig pc_cache;
     CacheConfig msipt_cache;
     CacheConfig pt_cache;
+    // [dedup多RAM] 去重Cache独立配置(num_sets/num_ways/num_rams/ram_fifo_depth)
+    // 默认几何与 pt_cache 相同(1024x8), num_rams=4, ram_fifo_depth=8
+    CacheConfig dedup_cache;
     // Walker Cache配置
     uint32_t    walker_base_sets = 64;
     CacheConfig walker_ptw_c1;

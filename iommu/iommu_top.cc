@@ -574,8 +574,10 @@ void iommu_top::va_dedup_recover(iommu_task_t* completed_task, bool is_fault) {
 void iommu_top::print_cache_statistics() {
     // [FIX] 等待 pt_update_worker_thread 处理完 FIFO 中所有剩余请求，修正仿真终止时的统计误差
     // [多RAM] 同时等待内部 RAM FIFO 排空(多RAM改造后任务可能滞留在分发FIFO中)
+    // [dedup多RAM] dedup 内部在途任务(hash_in/RAM FIFO/inside预取)同样需排空
     while (cache_sub.pt_update_fifo.num_available() > 0 ||
-           cache_sub.pt_ram_fifo_pending() > 0) {
+           cache_sub.pt_ram_fifo_pending() > 0 ||
+           cache_sub.dedup_ram_fifo_pending() > 0) {
         sc_core::wait(sc_core::SC_ZERO_TIME);
     }
 
@@ -597,6 +599,9 @@ void iommu_top::print_cache_statistics() {
 
     // [多RAM] PT Cache 多 RAM 统计报告
     cache_sub.print_pt_multi_ram_report();
+
+    // [dedup多RAM] 去重Cache 多 RAM 统计报告
+    cache_sub.print_dedup_multi_ram_report();
 
     // VA Dedup Statistics
     printf("========== VA Dedup Statistics ==========\n");
