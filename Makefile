@@ -78,6 +78,18 @@ else ifeq ($(TEST), rand4k_twostage)
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
+else ifeq ($(TEST), rand4k_twostage_s2on_128g)
+    # 场景7: 4KB随机读(16MB IOVA范围) + 两阶段 + S2开启 + 128GB/s入口/出口
+    #   全局并发512 + Buffer512 + PTW并发4 + D=3预取(随机IOVA下预取失效) + 10000包(1250页x8)
+    TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=4 \
+                 -DTEST_CFG_NUM_PAGES=1250
 else
     # rand4k_singlestage (default)
     TEST_THREAD_SRC = rp/test_rp_rand4k_single_stage_thread.cc

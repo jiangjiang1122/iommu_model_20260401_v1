@@ -66,9 +66,14 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t RANGE_16MB  = 0x1000000;        // 16MB
         const uint64_t PA_OFFSET   = 0x10000;          // SPA = GPA + 0x10000
         const uint64_t GPA_STRIDE  = 0x200000;         // 2MB per page
+        // [场景化] 默认625页(5000包); 场景7经Makefile传入TEST_CFG_NUM_PAGES=1250(10000包)
+#ifndef TEST_CFG_NUM_PAGES
         const int PAGES_NEEDED     = 625;              // 5000 reqs / 8 per page
+#else
+        const int PAGES_NEEDED     = TEST_CFG_NUM_PAGES;
+#endif
         const int REQ_PER_PAGE     = 8;                // 8 × 512B = 4KB
-        const int NUM_REQUESTS     = PAGES_NEEDED * REQ_PER_PAGE;  // 5000
+        const int NUM_REQUESTS     = PAGES_NEEDED * REQ_PER_PAGE;  // 5000 / 10000
         const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_16MB / 0x1000);  // 4096
 
         printf("\n[TEST] Two-Stage Random 4KB Read Page Table Construction:\n");
