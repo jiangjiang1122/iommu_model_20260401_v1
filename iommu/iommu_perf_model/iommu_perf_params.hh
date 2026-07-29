@@ -88,12 +88,17 @@ static const uint32_t AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING = 256; // axi_mas
 // ===================== 端口带宽参数 (bandwidth_mbps = freq_mhz * width_bit) =====================
 // 带宽延迟公式: delay_ns = 1000.0 * data_length_bytes * 8 / bandwidth_mbps
 static const uint32_t AXI_SLAVE_0_FREQ_MHZ  = 1000;   // axi_slave_from_pcie_noc_0_socket 频率(MHz)
+// [场景化] 入口/出口端口位宽: 默认512bit=64GB/s(场景5); 场景6经Makefile传入1024bit=128GB/s
+#ifndef TEST_CFG_AXI_PORT_WIDTH_BIT
 static const uint32_t AXI_SLAVE_0_WIDTH_BIT  = 512;    // axi_slave_from_pcie_noc_0_socket 数据位宽(bit)
-static const uint32_t AXI_SLAVE_0_BANDWIDTH_MBPS = AXI_SLAVE_0_FREQ_MHZ * AXI_SLAVE_0_WIDTH_BIT;  // 512000 Mbps = 64GB/s
+#else
+static const uint32_t AXI_SLAVE_0_WIDTH_BIT  = TEST_CFG_AXI_PORT_WIDTH_BIT;
+#endif
+static const uint32_t AXI_SLAVE_0_BANDWIDTH_MBPS = AXI_SLAVE_0_FREQ_MHZ * AXI_SLAVE_0_WIDTH_BIT;  // 512bit=64GB/s, 1024bit=128GB/s
 
 static const uint32_t AXI_MASTER_0_FREQ_MHZ = 1000;   // axi_master_0_to_pcie_noc 频率(MHz)
-static const uint32_t AXI_MASTER_0_WIDTH_BIT = 512;    // axi_master_0_to_pcie_noc 数据位宽(bit)
-static const uint32_t AXI_MASTER_0_BANDWIDTH_MBPS = AXI_MASTER_0_FREQ_MHZ * AXI_MASTER_0_WIDTH_BIT;  // 512000 Mbps = 64GB/s
+static const uint32_t AXI_MASTER_0_WIDTH_BIT = AXI_SLAVE_0_WIDTH_BIT;  // 出口位宽与入口一致
+static const uint32_t AXI_MASTER_0_BANDWIDTH_MBPS = AXI_MASTER_0_FREQ_MHZ * AXI_MASTER_0_WIDTH_BIT;
 
 static const uint32_t AXI_MASTER_1_FREQ_MHZ = 1000;   // axi_master_1_to_cmn_rnd 频率(MHz)
 static const uint32_t AXI_MASTER_1_WIDTH_BIT = 128;    // axi_master_1_to_cmn_rnd 数据位宽(bit)
@@ -102,7 +107,13 @@ static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
 static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
+// [场景化] PTW并发度: 默认4(场景5, 64GB/s够用); 场景6经Makefile传入5
+//   (128GB/s下达标250M所需最小并发: 5组x32请求/554ns=289M > 250M)
+#ifndef TEST_CFG_PTW_MAX_OUTSTANDING_TASKS
 static const uint32_t PTW_MAX_OUTSTANDING_TASKS = 4;          // PTW总outstanding任务数（按主任务计数，每组=1主+D预取）
+#else
+static const uint32_t PTW_MAX_OUTSTANDING_TASKS = TEST_CFG_PTW_MAX_OUTSTANDING_TASKS;
+#endif
 static const uint32_t PTW_REQ_PIPELINE_DELAY_NS = 30;         // PTW请求流水延时(ns, PEQ)
 static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 2;         // PTW响应流水延时(ns, PEQ)
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
@@ -129,7 +140,14 @@ static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能�
 
 // ===================== PT Cache去重+预取模块参数 =====================
 static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
+// Buffer必须 >= IOMMU_GLOBAL_MAX_OUTSTANDING: 否则挂起任务可致Buffer满,
+// RAM Worker阻塞 -> RAM FIFO满 -> Hash/Scheduler阻塞 -> UPDATE无法分发 -> 死锁环
+// [场景化] 跟随全局并发上限: 场景5=256, 场景6=512
+#ifndef TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING
 static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
+#else
+static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
+#endif
 // 预取深度（页数量，D=0表示关闭预取）
 // 允许通过Makefile TEST_FLAGS传入 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 覆盖
 #ifndef TEST_CFG_PT_DEDUP_PREFETCH_DEPTH
@@ -183,7 +201,12 @@ static const uint32_t FORWARDER_DELAY = 2;          // Forwarder转发延迟
 // ===================== 出口重排序与全局 Outstanding =====================
 // IOMMU 模块整体 outstanding 上限：
 //   入口 parser 申请，重排序输出后释放。
+// [场景化] 默认256(场景5); 场景6经Makefile传入512(随128GB/s带宽提升)
+#ifndef TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING
 static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = 256;
+#else
+static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
+#endif
 // 重排序输出每次发送的延迟(ns)
 static const uint32_t REORDER_OUTPUT_DELAY = 1;
 

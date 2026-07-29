@@ -200,7 +200,16 @@ void RP_Module::send_translation_request_1_thread()
 
         // ============================================================
         // Phase 1: Single packet injection sanity check
+        // [场景化] 场景5(默认)保留单包sanity check; 场景6经Makefile传入
+        //   TEST_CFG_SKIP_PHASE1=1 跳过, 仅仿真10000个两阶段请求,
+        //   避免Phase1的PTW/DDR统计污染主测试性能指标
         // ============================================================
+#ifdef TEST_CFG_SKIP_PHASE1
+        const bool RUN_PHASE1 = false;
+#else
+        const bool RUN_PHASE1 = true;
+#endif
+        if (RUN_PHASE1) {
         printf("\n========== Phase 1: Single Packet Two-Stage Translation ==========\n");
 
         response_count = 0;
@@ -263,6 +272,7 @@ void RP_Module::send_translation_request_1_thread()
         }
 
         single_trans.clear_extension(&single_ext);
+        }  // if (RUN_PHASE1)
 
         // ============================================================
         // Phase 2: Full 128KB sequential read test

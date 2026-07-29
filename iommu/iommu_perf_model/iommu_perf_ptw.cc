@@ -124,8 +124,12 @@ void iommu_top::ptw_req_process_thread() {
                 bool s2_cache_hit = false;
                 if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED) {
                     iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                    // [FIX] walker_response_fifo为共享通道: req/rsp两线程并发查询会响应错配,
+                    // 必须锁住"写请求->读响应"往返(DC/PC提速后首次暴露此竞态)
+                    walker_cache_mtx.lock();
                     cache_sub.walker_request_fifo.write(s2_req);
                     iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                    walker_cache_mtx.unlock();
 
                     if (s2_resp.hit) {
                         s2_cache_hit = true;
@@ -229,11 +233,15 @@ void iommu_top::ptw_req_process_thread() {
                 // 使用转换函数构造Walker Cache Lookup请求
                 iommu::CacheMessage req = task_to_walker_request(task);
                 
+                // [FIX] 锁住共享 walker_request/response_fifo 往返, 防止与
+                // ptw_rsp_process_thread 的 S2 lookup 响应错配
+                walker_cache_mtx.lock();
                 // 发送Lookup请求
                 cache_sub.walker_request_fifo.write(req);
                 
                 // 阻塞等待响应
                 iommu::CacheMessage resp = cache_sub.walker_response_fifo.read();
+                walker_cache_mtx.unlock();
                 
                 // 使用转换函数将响应写回task
                 walker_response_to_task(resp, task);
@@ -816,8 +824,11 @@ void iommu_top::ptw_rsp_process_thread() {
                     if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
                         && task->iosatp.MODE != IOSATP_Bare) {
                         iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                        // [FIX] 锁住共享FIFO往返, 防止与 ptw_req_process_thread 的VS lookup响应错配
+                        walker_cache_mtx.lock();
                         cache_sub.walker_request_fifo.write(s2_req);
                         iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                        walker_cache_mtx.unlock();
                         
                         if (s2_resp.hit) {
                             s2_cache_hit = true;
@@ -1167,8 +1178,11 @@ void iommu_top::ptw_rsp_process_thread() {
                 && task->GV && task->iohgatp.MODE != IOHGATP_Bare
                 && task->iosatp.MODE != IOSATP_Bare) {
                 iommu::CacheMessage s2_req = task_to_s2_walker_request(task, data_page_gpa);
+                // [FIX] 锁住共享FIFO往返, 防止跨线程响应错配(预取路径)
+                walker_cache_mtx.lock();
                 cache_sub.walker_request_fifo.write(s2_req);
                 iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                walker_cache_mtx.unlock();
                 
                 if (s2_resp.hit) {
                     s2_pf_hit = true;
@@ -1357,8 +1371,11 @@ void iommu_top::ptw_rsp_process_thread() {
                 if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
                     && task->iosatp.MODE != IOSATP_Bare) {
                     iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
+                    // [FIX] 锁住共享FIFO往返, 防止跨线程响应错配(AD_UPDATE路径)
+                    walker_cache_mtx.lock();
                     cache_sub.walker_request_fifo.write(s2_req);
                     iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
+                    walker_cache_mtx.unlock();
 
                     if (s2_resp.hit) {
                         task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;

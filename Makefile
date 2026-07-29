@@ -61,6 +61,18 @@ else ifeq ($(TEST), seq128k_twostage_s2on)
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
                  -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1
+else ifeq ($(TEST), seq128k_twostage_s2on_128g)
+    # 场景6: 128KB顺序读 + 两阶段 + S2开启 + 128GB/s入口/出口 + 全局并发512 + PTW并发5
+    #   基准: 稳态IOPS=250M(100%效率), 纯10000包(跳过Phase1单包)
+    TEST_THREAD_SRC = rp/test_rp_seq128k_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=5 \
+                 -DTEST_CFG_SKIP_PHASE1=1
 else ifeq ($(TEST), rand4k_twostage)
     TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \

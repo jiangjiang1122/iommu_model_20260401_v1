@@ -1236,7 +1236,9 @@ void iommu_top::print_cache_statistics() {
         }
 
         // Pipeline drain analysis
-        double input_time_ns = (double)iommu_total_completed * 8.0; // 8ns per 512B @ 64GB/s
+        // 每512B包入口占用时间 = 512*8/BANDWIDTH_MBPS*1000 ns (128GB/s时为4ns)
+        double per_pkt_ns = 512.0 * 8.0 * 1000.0 / (double)AXI_SLAVE_0_BANDWIDTH_MBPS;
+        double input_time_ns = (double)iommu_total_completed * per_pkt_ns;
         double drain_ns = sim_ns - input_time_ns;
         printf("  ---\n");
         printf("  Input active:       %.0f ns (%.3f us)\n", input_time_ns, input_time_ns/1000.0);
