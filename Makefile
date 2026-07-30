@@ -91,6 +91,21 @@ else ifeq ($(TEST), seq512b_2mb_twostage_s2on)
                  -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE8_PTW) \
                  -DTEST_CFG_SKIP_PHASE1=1
+else ifeq ($(TEST), seq512b_2mb_twostage_s2on_128g)
+    # 场景9: 场景8的高带宽版 - 512B步进顺序递增 + VS/G两级均2MB大页 + 两阶段 + S2开启
+    #   128GB/s(1024bit)入口/出口 + 全局并发512 + Buffer512(绑定跟随) + D=3预取
+    #   PTW并发可用 make SCENE9_PTW=N 调参(大页任务exec仅~37ns, 默认4理论足够)
+    #   目标: 验证大页路径在翻倍带宽下能否翻倍到250M线速
+    SCENE9_PTW ?= 4
+    TEST_THREAD_SRC = rp/test_rp_seq512b_2mb_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_512B_2MB -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE9_PTW) \
+                 -DTEST_CFG_SKIP_PHASE1=1
 else ifeq ($(TEST), rand4k_twostage_s2on_128g)
     # 场景7: 4KB随机读(16MB IOVA范围) + 两阶段 + S2开启 + 128GB/s入口/出口
     #   全局并发512 + Buffer512 + PTW并发4(可用 make SCENE7_PTW=N 覆盖调参) + D=3预取(随机IOVA下预取失效) + 10000包(1250页x8)
