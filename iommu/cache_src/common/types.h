@@ -421,6 +421,8 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
 //   bit3: Sv39/Sv48 标志
 //   bit4: x4 模式标志（Sv39/Sv48 与 Sv39x4/Sv48x4 区分）
 //   bit5: is_s2 标志（S2 Cache，G-stage显式第二阶段缓存）
+//   bit6: is_leaf 标志（[大页] 端到端大页leaf PTE: next_ppn=最终物理页帧PPN，
+//         区别于中间级next_ppn; 2MB存C3/1GB存C2/512GB存C1）
 union walker_reserved_t {
     struct {
         uint8_t valid:1;
@@ -429,7 +431,8 @@ union walker_reserved_t {
         uint8_t sv48_flag:1;
         uint8_t x4_mode_flag:1;
         uint8_t is_s2:1;       // [S2] S2 Cache标志
-        uint8_t reserved:2;
+        uint8_t is_leaf:1;     // [大页] 端到端leaf PTE标志
+        uint8_t reserved:1;
     };
     uint8_t raw = 0;
 };
@@ -445,6 +448,7 @@ inline bool walker_stage_flag(const WalkerData& data) { return data.reserved.sta
 inline bool walker_sv48_flag(const WalkerData& data) { return data.reserved.sv48_flag != 0; }
 inline bool walker_x4_mode_flag(const WalkerData& data) { return data.reserved.x4_mode_flag != 0; }
 inline bool walker_is_s2(const WalkerData& data) { return data.reserved.is_s2 != 0; }
+inline bool walker_is_leaf(const WalkerData& data) { return data.reserved.is_leaf != 0; }
 
 inline void walker_set_valid(WalkerData& data, bool valid) {
     data.reserved.valid = valid ? 1U : 0U;
@@ -456,7 +460,8 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
                                    bool is_stage1_and_2 = true,
                                    bool is_sv48 = true,
                                    bool is_x4_mode = false,
-                                   bool is_s2 = false) {
+                                   bool is_s2 = false,
+                                   bool is_leaf = false) {
     WalkerData data;
     data.next_ppn = next_ppn;
     data.reserved.valid = valid ? 1U : 0U;
@@ -465,6 +470,7 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
     data.reserved.sv48_flag = is_sv48 ? 1U : 0U;
     data.reserved.x4_mode_flag = is_x4_mode ? 1U : 0U;
     data.reserved.is_s2 = is_s2 ? 1U : 0U;
+    data.reserved.is_leaf = is_leaf ? 1U : 0U;
     return data;
 }
 

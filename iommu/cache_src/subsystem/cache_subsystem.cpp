@@ -1434,13 +1434,15 @@ void CacheSubsystem::walker_join_thread() {
         }
         resp.latency = clock_period_ + e.max_ram_latency;  // hash + 最慢子查询
 
-        walker_cache_->record_vs_lookup_result(hit_level);
+        walker_cache_->record_vs_lookup_result(
+            hit_level, resp.hit && walker_is_leaf(resp.walker_data));
         if (resp.hit) {
-            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c%u (level=%u), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c%u (level=%u), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx%s\n",
                    (unsigned long long)sc_time_stamp().value()/1000,
                    hit_level, hit_level, e.base.gscid, e.base.pscid,
                    (unsigned long)e.base.iova,
-                   (unsigned long)resp.walker_data.next_ppn);
+                   (unsigned long)resp.walker_data.next_ppn,
+                   walker_is_leaf(resp.walker_data) ? " [LEAF]" : "");
         } else {
             printf("[t=%llu ns][WALKER_CACHE] MISS: all levels, gscid=%u, pscid=%u, iova=0x%lx\n",
                    (unsigned long long)sc_time_stamp().value()/1000,

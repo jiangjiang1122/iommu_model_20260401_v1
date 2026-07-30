@@ -140,6 +140,10 @@ struct walk_context_t {
     bool     walker_front_hit = false;
     uint8_t  walker_front_level = 0;
     uint64_t walker_front_next_ppn = 0;
+    // [大页] 前置查询命中端到端大页leaf PTE: next_ppn即最终物理页帧PPN,
+    // PTW可完全短路(0次DDR); leaf_page_sz由命中子表级推导(C3=2MB/C2=1GB/C1=512GB)
+    bool     walker_front_is_leaf = false;
+    uint64_t walker_front_leaf_page_sz = 0;
 
     // [S2] S2 Walker Cache 命中层级 (0=全miss, 3=c3 hit, 2=c2 hit, 1=c1 hit)
     // 用于GS_EXPLICIT阶段的G-stage walker cache

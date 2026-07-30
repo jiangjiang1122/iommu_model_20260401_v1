@@ -525,12 +525,23 @@ void iommu_top::walker_front_response_thread() {
         task->walk_ctx.walker_front_hit = resp.hit;
         task->walk_ctx.walker_front_level = resp.hit ? resp.walker_level : 0;
         task->walk_ctx.walker_front_next_ppn = resp.hit ? resp.walker_data.next_ppn : 0;
+        // [大页] 端到端leaf命中: 页大小由命中子表级推导(C3=2MB/C2=1GB/C1=512GB)
+        if (resp.hit && iommu::walker_is_leaf(resp.walker_data)) {
+            task->walk_ctx.walker_front_is_leaf = true;
+            task->walk_ctx.walker_front_leaf_page_sz =
+                (resp.walker_level == 3) ? 0x200000ULL :
+                (resp.walker_level == 2) ? 0x40000000ULL : 0x8000000000ULL;
+        } else {
+            task->walk_ctx.walker_front_is_leaf = false;
+            task->walk_ctx.walker_front_leaf_page_sz = 0;
+        }
         task->walk_ctx.walker_front_valid = true;
 
-        printf("[WALKER_FRONT] task_id=%u result recorded: hit=%d, level=%u, next_ppn=0x%lx\n",
+        printf("[WALKER_FRONT] task_id=%u result recorded: hit=%d, level=%u, next_ppn=0x%lx%s\n",
                task->task_id, resp.hit ? 1 : 0,
                task->walk_ctx.walker_front_level,
-               (unsigned long)task->walk_ctx.walker_front_next_ppn);
+               (unsigned long)task->walk_ctx.walker_front_next_ppn,
+               task->walk_ctx.walker_front_is_leaf ? " [LEAF]" : "");
         fflush(stdout);
 
         // 通知PTW输入侧的兜底等待
@@ -714,6 +725,9 @@ void iommu_top::print_cache_statistics() {
         printf("    C2 hit (2 DDR):    %lu\n", (unsigned long)vs_hit_c2);
         printf("    C1 hit (3 DDR):    %lu\n", (unsigned long)vs_hit_c1);
         printf("  VS Miss (4 DDR):     %lu\n", (unsigned long)vs_miss);
+        // [大页] 端到端leaf命中(包含在对应级hit中, 命中后PTW 0次DDR)
+        printf("  VS LEAF hits:        %lu  (end-to-end hugepage leaf, 0 DDR)\n",
+               (unsigned long)cache_sub.walker_cache().get_vs_leaf_hit_count());
         if (vs_lookup > 0) {
             printf("  VS Hit Rate:         %.1f%%\n", 100.0 * vs_total_hit / vs_lookup);
             printf("  VS Hit Distribution (of lookups):\n");
@@ -763,6 +777,9 @@ void iommu_top::print_cache_statistics() {
         printf("    C2 hit (2 DDR):    %lu\n", (unsigned long)s2_hit_c2);
         printf("    C1 hit (3 DDR):    %lu\n", (unsigned long)s2_hit_c1);
         printf("  S2 Miss (4 DDR):     %lu\n", (unsigned long)s2_miss);
+        // [大页] S2端到端leaf命中(GS_EXPLICIT 0次DDR)
+        printf("  S2 LEAF hits:        %lu  (end-to-end hugepage leaf, 0 DDR)\n",
+               (unsigned long)cache_sub.walker_cache().get_s2_leaf_hit_count());
         if (s2_lookup > 0) {
             printf("  S2 Hit Rate:         %.1f%%\n", 100.0 * s2_total_hit / s2_lookup);
             printf("  S2 Hit Distribution (of lookups):\n");
@@ -809,6 +826,15 @@ void iommu_top::print_cache_statistics() {
         printf("  PTW  Completed:       %lu tasks\n",  (unsigned long)ptw_total_completed);
         printf("    Main tasks:         %lu\n",  (unsigned long)ptw_main_task_count);
         printf("    Prefetch tasks:     %lu\n",  (unsigned long)ptw_prefetch_task_count);
+        // [大页] 大页任务统计
+        printf("    Hugepage main:      %lu  (page_sz>4KB, prefetch spawn skipped)\n",
+               (unsigned long)ptw_hugepage_main_count);
+        printf("    Hugepage PF skip:   %lu  (prefetch spawns suppressed)\n",
+               (unsigned long)ptw_hugepage_pf_skipped);
+        printf("    Invalid result slots: %lu  (D per hugepage group, placeholder-clear only)\n",
+               (unsigned long)ptw_hugepage_invalid_slots);
+        printf("    Front LEAF hits:    %lu  (short-circuit complete, 0 DDR)\n",
+               (unsigned long)ptw_front_leaf_hits);
         printf("  PTW  IOPS:            %.2f M tasks/s\n", ptw_iops_mps);
         if (ptw_total_completed > 0) {
             printf("  PTW  avg DDR reads:   %.2f reads/task\n",

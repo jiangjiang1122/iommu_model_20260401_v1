@@ -611,7 +611,7 @@ bool WalkerCache::update_level_ram(uint8_t level, gscid_t gscid,
 }
 
 // [多RAM] join仲裁后记录VS lookup统计(与旧lookup()口径一致)
-void WalkerCache::record_vs_lookup_result(uint8_t hit_level) {
+void WalkerCache::record_vs_lookup_result(uint8_t hit_level, bool is_leaf) {
     vs_lookup_count_++;
     switch (hit_level) {
         case 3: vs_hit_c3_count_++; break;
@@ -619,6 +619,8 @@ void WalkerCache::record_vs_lookup_result(uint8_t hit_level) {
         case 1: vs_hit_c1_count_++; break;
         default: vs_miss_count_++; break;
     }
+    // [大页] 端到端leaf命中单独计数
+    if (hit_level > 0 && is_leaf) vs_leaf_hit_count_++;
 }
 
 // [多RAM] hash线程拆分update时记录更新类型统计(与旧update()口径一致)
@@ -717,6 +719,8 @@ bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
         latency = lat_c3 + lat_c2 + lat_c1;
         vs_miss_count_++;
     }
+    // [大页] VS端到端leaf命中统计
+    if ((hit_c3 || hit_c2 || hit_c1) && walker_is_leaf(out_data)) vs_leaf_hit_count_++;
     
     return (hit_c3 || hit_c2 || hit_c1);
 }
@@ -788,6 +792,8 @@ bool WalkerCache::lookup_s2(gscid_t gscid, pscid_t pscid, iova_t gpa,
                gscid, pscid, gpa);
         fflush(stdout);
     }
+    // [大页] S2端到端leaf命中统计
+    if ((hit_c3 || hit_c2 || hit_c1) && walker_is_leaf(out_data)) s2_leaf_hit_count_++;
 
     return (hit_c3 || hit_c2 || hit_c1);
 }

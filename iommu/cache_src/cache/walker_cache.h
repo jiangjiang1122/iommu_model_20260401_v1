@@ -102,6 +102,8 @@ public:
     uint64_t get_s2_hit_c2_count() const { return s2_hit_c2_count_; }
     uint64_t get_s2_hit_c1_count() const { return s2_hit_c1_count_; }
     uint64_t get_s2_miss_count() const { return s2_miss_count_; }
+    // [大页] S2端到端leaf命中数(包含在对应级hit计数中, 此处单独计数)
+    uint64_t get_s2_leaf_hit_count() const { return s2_leaf_hit_count_; }
 
     // [VS] VS-stage Walker Cache统计接口
     uint64_t get_vs_lookup_count() const { return vs_lookup_count_; }
@@ -109,6 +111,8 @@ public:
     uint64_t get_vs_hit_c2_count() const { return vs_hit_c2_count_; }
     uint64_t get_vs_hit_c1_count() const { return vs_hit_c1_count_; }
     uint64_t get_vs_miss_count() const { return vs_miss_count_; }
+    // [大页] VS端到端leaf命中数
+    uint64_t get_vs_leaf_hit_count() const { return vs_leaf_hit_count_; }
 
     // ============================================================
     // [多RAM] 三级子表独立分RAM方案接口 (供 cache_subsystem 的
@@ -134,8 +138,8 @@ public:
                           iova_t va, const WalkerData& data,
                           sc_time& ram_latency);
 
-    // join仲裁后记录VS lookup结果统计 (hit_level: 0=miss,1/2/3)
-    void record_vs_lookup_result(uint8_t hit_level);
+    // join仲裁后记录VS lookup结果统计 (hit_level: 0=miss,1/2/3; is_leaf: 端到端leaf命中)
+    void record_vs_lookup_result(uint8_t hit_level, bool is_leaf = false);
     // hash线程拆分update时记录更新类型统计
     void record_update_kind(WalkerUpdateKind kind);
 
@@ -169,6 +173,7 @@ private:
     uint64_t s2_hit_c2_count_ = 0;
     uint64_t s2_hit_c1_count_ = 0;
     uint64_t s2_miss_count_ = 0;
+    uint64_t s2_leaf_hit_count_ = 0;   // [大页] S2端到端leaf命中数
 
     // [VS] VS-stage Walker Cache统计
     uint64_t vs_lookup_count_ = 0;
@@ -176,6 +181,7 @@ private:
     uint64_t vs_hit_c2_count_ = 0;
     uint64_t vs_hit_c1_count_ = 0;
     uint64_t vs_miss_count_ = 0;
+    uint64_t vs_leaf_hit_count_ = 0;   // [大页] VS端到端leaf命中数
 
     // [多RAM] 三子表统一的RAM分组参数(来自cfg, 构造时校验一致)
     uint32_t num_rams_ = 1;

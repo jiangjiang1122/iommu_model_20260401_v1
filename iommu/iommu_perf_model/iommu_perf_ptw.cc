@@ -131,7 +131,7 @@ void iommu_top::ptw_req_process_thread() {
                     iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
                     walker_cache_mtx.unlock();
 
-                    if (s2_resp.hit) {
+                    if (s2_resp.hit && !iommu::walker_is_leaf(s2_resp.walker_data)) {
                         s2_cache_hit = true;
                         task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
                         uint8_t GS_LEVELS = 0;
@@ -149,6 +149,7 @@ void iommu_top::ptw_req_process_thread() {
                                task->task_id, s2_resp.walker_level, gs_start_level, gs_pte_addr);
                         fflush(stdout);
                     } else {
+                        // [大页] leaf命中不能按中间级解释, Bare路径保守按MISS处理
                         task->walk_ctx.s2_walker_hit_level = 0;
                         printf("[PTW_REQ] task_id=%u, Bare S2 Cache MISS -> normal GS_EXPLICIT\n", task->task_id);
                         fflush(stdout);
@@ -339,6 +340,113 @@ void iommu_top::ptw_req_process_thread() {
             for (int k = 0; k < 5; k++) task->walk_ctx.vpn[k] = vpn[k];
             task->walk_ctx.max_levels = LEVELS;
             task->walk_ctx.ptesize = PTESIZE;
+
+            // =====================================================================
+            // [大页] 前置/内联Walker查询命中端到端大页leaf: 完全短路(0次DDR)
+            //   next_ppn=最终PA页帧PPN, 直接拼接PA完成翻译;
+            //   构造大页组(1+D_eff个4KB iova)交Monitor刷新去重Cache, 不写PT Cache
+            // =====================================================================
+            if (walker_cache_enabled && walker_hit &&
+                task->walk_ctx.walker_front_is_leaf) {
+                uint64_t leaf_page_sz = task->walk_ctx.walker_front_leaf_page_sz;
+                uint64_t leaf_pa_base = task->walk_ctx.walker_front_next_ppn * PAGESIZE;
+                task->pa = (leaf_pa_base & ~(leaf_page_sz - 1)) |
+                           (task->iova & (leaf_page_sz - 1));
+                task->page_sz = leaf_page_sz;
+                task->gst_page_sz = leaf_page_sz;
+                task->gpa = task->pa;  // 端到端缓存无GPA中间值, 用PA占位
+                // 合成PTE(权限位全置, 与Bare直通路径一致)
+                task->vs_pte.raw = 0;
+                task->vs_pte.D = task->vs_pte.A = task->vs_pte.G = task->vs_pte.U = 1;
+                task->vs_pte.X = task->vs_pte.W = task->vs_pte.R = task->vs_pte.V = 1;
+                task->vs_pte.PBMT = PMA;
+                task->vs_pte.PPN = task->pa / PAGESIZE;
+                task->g_pte.raw = 0;
+                task->g_pte.D = task->g_pte.A = task->g_pte.U = 1;
+                task->g_pte.X = task->g_pte.W = task->g_pte.R = task->g_pte.V = 1;
+                task->g_pte.PBMT = PMA;
+                task->g_pte.PPN = task->pa / PAGESIZE;
+                task->state = TASK_PTW_DONE;
+
+                ptw_front_leaf_hits++;
+                ptw_hugepage_main_count++;
+
+                printf("[PTW_HUGEPAGE] task_id=%u -> Front LEAF HIT short-circuit (0 DDR), iova=0x%lx, pa=0x%lx, page_sz=0x%lx\n",
+                       task->task_id, task->iova, task->pa, leaf_page_sz);
+                fflush(stdout);
+
+                if (task->walk_ctx.dedup_bypass) {
+                    // 降级任务: 无dedup占位, 直接转发(不建组/不写PT Cache)
+                    ptw_outstanding_task_count--;
+                    assert(ptw_outstanding_task_count >= 0);
+                    ptw_total_completed++;
+                    ptw_ddr_reads_distribution[0]++;
+                    ptw_main_ddr_reads_distribution[0]++;
+                    ptw_main_task_count++;
+                    { auto _s = ptw_task_start_ns.find(task->task_id);
+                      if (_s != ptw_task_start_ns.end()) {
+                          double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
+                          ptw_total_exec_ns += lat;
+                          ptw_task_latency_values.push_back(lat);
+                          ptw_task_start_ns.erase(_s); } }
+                    ptw_task_completed_event.notify(SC_ZERO_TIME);
+                    pt_cache_to_fwd_fifo.write(task);
+                    va_dedup_recover(task, false);
+                    continue;
+                }
+
+                // 构造大页组: D_eff截断规则与dedup预取占位插入一致(不跨512项边界)
+                uint64_t base_iova = task->iova & ~PAGE_MASK_4KB;
+                uint32_t D_eff = 0;
+                if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0) {
+                    uint32_t vpn0_in_page = (uint32_t)((base_iova >> 12) & 0x1FF);
+                    uint32_t max_D = 511 - vpn0_in_page;
+                    D_eff = task->walk_ctx.prefetch_depth;
+                    if (D_eff > max_D) D_eff = max_D;
+                }
+                ptw_hugepage_pf_skipped += D_eff;
+                ptw_hugepage_invalid_slots += D_eff;
+
+                uint64_t huge_frame_pa = task->pa & ~(leaf_page_sz - 1);
+                task->walk_ctx.prefetch_group_id = task->task_id;
+                task->walk_ctx.prefetch_total = 1 + D_eff;
+                task->walk_ctx.prefetch_idx = 0;
+                task->walk_ctx.pt_update_count = 1 + D_eff;
+
+                prefetch_group_mtx.lock();
+                auto& hp_group = prefetch_groups[task->task_id];
+                hp_group.main_task = task;
+                hp_group.pending_tasks = 0;
+                hp_group.total_tasks = 1 + D_eff;
+                hp_group.completed = true;
+                hp_group.main_task_done = true;
+                hp_group.is_hugepage = true;
+                { auto _s = ptw_task_start_ns.find(task->task_id);
+                  if (_s != ptw_task_start_ns.end()) hp_group.group_start_ns = _s->second;
+                  else hp_group.group_start_ns = sc_time_stamp().to_seconds() * 1e9; }
+                for (uint32_t d = 0; d <= D_eff; d++) {
+                    uint64_t slot_iova = base_iova + (uint64_t)d * PAGE_SIZE_4KB;
+                    uint64_t slot_pa = huge_frame_pa | (slot_iova & (leaf_page_sz - 1));
+                    hp_group.group_iovas[d] = slot_iova;
+                    hp_group.vs_ptes[d] = task->vs_pte;
+                    hp_group.g_ptes[d] = task->g_pte;
+                    hp_group.pas[d] = slot_pa;
+                    hp_group.page_szs[d] = leaf_page_sz;
+                    hp_group.slot_invalid[d] = (d > 0);  // D个无效结果槽
+                    task->walk_ctx.pt_updates[d].iova = slot_iova;
+                    task->walk_ctx.pt_updates[d].vs_pte = task->vs_pte;
+                    task->walk_ctx.pt_updates[d].g_pte = task->g_pte;
+                    task->walk_ctx.pt_updates[d].pa = slot_pa;
+                    task->walk_ctx.pt_updates[d].page_sz = leaf_page_sz;
+                }
+                prefetch_group_mtx.unlock();
+
+                printf("[PTW_HUGEPAGE] task_id=%u -> hugepage group created (1+%u results, %u invalid), notify monitor\n",
+                       task->task_id, D_eff, D_eff);
+                fflush(stdout);
+                prefetch_group_completed_event.notify(SC_ZERO_TIME);
+                continue;
+            }
 
             // =====================================================================
             // 根据 Walker Cache 命中情况初始化 walk
@@ -857,6 +965,7 @@ void iommu_top::ptw_rsp_process_thread() {
                     
                     // [S2] S2 Walker Cache lookup before GS_EXPLICIT
                     bool s2_cache_hit = false;
+                    bool s2_leaf_done = false;
                     if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
                         && task->iosatp.MODE != IOSATP_Bare) {
                         iommu::CacheMessage s2_req = task_to_s2_walker_request(task, task->gpa);
@@ -866,7 +975,29 @@ void iommu_top::ptw_rsp_process_thread() {
                         iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
                         walker_cache_mtx.unlock();
                         
-                        if (s2_resp.hit) {
+                        if (s2_resp.hit && iommu::walker_is_leaf(s2_resp.walker_data)) {
+                            // [大页] S2端到端leaf命中: GS_EXPLICIT直接完成(0次DDR)
+                            s2_cache_hit = true;
+                            s2_leaf_done = true;
+                            task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                            uint64_t s2_page_sz =
+                                (s2_resp.walker_level == 3) ? 0x200000ULL :
+                                (s2_resp.walker_level == 2) ? 0x40000000ULL : 0x8000000000ULL;
+                            uint64_t s2_frame = (s2_resp.walker_data.next_ppn * PAGESIZE) &
+                                                ~(s2_page_sz - 1);
+                            task->pa = s2_frame | (task->gpa & (s2_page_sz - 1));
+                            task->gst_page_sz = s2_page_sz;
+                            task->g_pte.raw = 0;
+                            task->g_pte.PPN = task->pa / PAGESIZE;
+                            task->g_pte.D = task->g_pte.A = task->g_pte.U = 1;
+                            task->g_pte.X = task->g_pte.W = task->g_pte.R = task->g_pte.V = 1;
+                            task->g_pte.PBMT = PMA;
+                            task->state = TASK_PTW_DONE;
+                            walk_complete = true;
+                            printf("[PTW_HUGEPAGE] task_id=%u, S2 LEAF HIT level=%d -> GS_EXPLICIT skipped (0 DDR), pa=0x%lx, gst_page_sz=0x%lx\n",
+                                   task->task_id, s2_resp.walker_level, task->pa, s2_page_sz);
+                            fflush(stdout);
+                        } else if (s2_resp.hit) {
                             s2_cache_hit = true;
                             task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
                             uint8_t GS_LEVELS = 0;
@@ -899,17 +1030,19 @@ void iommu_top::ptw_rsp_process_thread() {
                         task->walk_ctx.ddr_read_count++;
                         need_next_ddr = true;
                     }
-                    // [STAT] DDR access log - GS_EXPLICIT
-                    if (task->walk_ctx.ddr_log_count < 8) {
+                    // [STAT] DDR access log - GS_EXPLICIT (S2 leaf短路无DDR访问, 跳过)
+                    if (!s2_leaf_done && task->walk_ctx.ddr_log_count < 8) {
                         task->walk_ctx.ddr_log_type[task->walk_ctx.ddr_log_count] = 4; // GS_EXPLICIT
                         task->walk_ctx.ddr_log_level[task->walk_ctx.ddr_log_count] = 0;
                         task->walk_ctx.ddr_log_addr[task->walk_ctx.ddr_log_count] = task->walk_ctx.read_addr;
                         task->walk_ctx.ddr_log_size[task->walk_ctx.ddr_log_count] = task->walk_ctx.read_size;
                         task->walk_ctx.ddr_log_count++;
                     }
-                    printf("[PTW_RSP] task_id=%u, -> GS_EXPLICIT (read_count=%u), gpa=0x%lx\n",
-                           task->task_id, task->walk_ctx.ddr_read_count, task->gpa);
-                    fflush(stdout);
+                    if (!s2_leaf_done) {
+                        printf("[PTW_RSP] task_id=%u, -> GS_EXPLICIT (read_count=%u), gpa=0x%lx\n",
+                               task->task_id, task->walk_ctx.ddr_read_count, task->gpa);
+                        fflush(stdout);
+                    }
                 } else {
                     // G-stage Bare: complete
                     task->pa = task->gpa;
@@ -1220,7 +1353,7 @@ void iommu_top::ptw_rsp_process_thread() {
                 iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
                 walker_cache_mtx.unlock();
                 
-                if (s2_resp.hit) {
+                if (s2_resp.hit && !iommu::walker_is_leaf(s2_resp.walker_data)) {
                     s2_pf_hit = true;
                     task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
                     uint8_t GS_LEVELS = 0;
@@ -1241,6 +1374,7 @@ void iommu_top::ptw_rsp_process_thread() {
                            task->task_id, s2_resp.walker_level, gs_start_level);
                     fflush(stdout);
                 } else {
+                    // [大页] leaf命中不能按中间级解释, 预取路径保守按MISS处理
                     task->walk_ctx.s2_walker_hit_level = 0;
                 }
             }
@@ -1725,6 +1859,97 @@ void iommu_top::ptw_rsp_process_thread() {
             // [两阶段预取] GS_EXPLICIT leaf完成 + 预取启用 + 两阶段模式
             // 仅在early spawn未触发时执行(walker cache miss路径)
             // early spawn已在ptw_req_thread中设置is_two_stage_prefetch=true
+            // =====================================================================
+            // [大页] 主任务walk发现实际页大小>4KB: 不spawn预取任务(硬件D=3不变),
+            // 仍按D+1个结果返回(D个标注无效), 构造1+D_eff个4KB级iova交Monitor
+            // 刷新去重Cache(清除MISS时插入的D个预取占位); 大页leaf不写PT Cache.
+            // 单阶段/两阶段统一处理(不要求GV)
+            // =====================================================================
+            if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0
+                && !task->walk_ctx.is_prefetch_task
+                && !task->walk_ctx.is_two_stage_prefetch
+                && task->page_sz > PAGE_SIZE_4KB) {
+                uint32_t group_id = task->task_id;
+                uint64_t base_iova = task->iova & ~PAGE_MASK_4KB;
+                uint64_t leaf_page_sz = task->page_sz;
+                uint64_t huge_frame_pa = task->pa & ~(leaf_page_sz - 1);
+
+                // D_eff截断规则与dedup预取占位插入一致(不跨512项边界)
+                uint32_t vpn0_in_page = (uint32_t)((base_iova >> 12) & 0x1FF);
+                uint32_t max_D = 511 - vpn0_in_page;
+                uint32_t D_eff = task->walk_ctx.prefetch_depth;
+                if (D_eff > max_D) D_eff = max_D;
+
+                ptw_hugepage_main_count++;
+                ptw_hugepage_pf_skipped += D_eff;
+                ptw_hugepage_invalid_slots += D_eff;
+
+                printf("[PTW_HUGEPAGE] task_id=%u -> hugepage walk complete (page_sz=0x%lx, pa=0x%lx), NO prefetch spawn, return 1+%u results (%u invalid)\n",
+                       task->task_id, leaf_page_sz, task->pa, D_eff, D_eff);
+                fflush(stdout);
+
+                // Walker Cache update: 写入端到端大页leaf + 中间级结果
+                if (PTW_WALKER_CACHE_ENABLED) {
+                    iommu::CacheMessage walker_req = task_to_walker_update(task);
+                    cache_sub.walker_update_fifo.write(walker_req);
+                    printf("[t=%llu ns][PTW_RSP] task_id=%u -> Walker Cache UPDATE (hugepage path)\n",
+                           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                           task->task_id);
+                    fflush(stdout);
+                }
+                // [S2] S2 Walker Cache update (hugepage path)
+                if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
+                    && task->GV && task->iohgatp.MODE != IOHGATP_Bare
+                    && task->iosatp.MODE != IOSATP_Bare) {
+                    iommu::CacheMessage s2_req = task_to_s2_walker_update(task, task->gpa);
+                    if (s2_req.walker_update_kind != iommu::WalkerUpdateKind::NONE) {
+                        cache_sub.walker_update_fifo.write(s2_req);
+                        printf("[t=%llu ns][PTW_RSP] task_id=%u -> S2 Walker Cache UPDATE (hugepage path)\n",
+                               (unsigned long long)sc_core::sc_time_stamp().value()/1000, task->task_id);
+                        fflush(stdout);
+                    }
+                }
+
+                // 建组: pending=0且completed, Monitor立即处理(不写PT Cache, 仅刷去重Cache)
+                task->walk_ctx.prefetch_group_id = group_id;
+                task->walk_ctx.prefetch_total = 1 + D_eff;
+                task->walk_ctx.prefetch_idx = 0;
+                task->walk_ctx.pt_update_count = 1 + D_eff;
+
+                prefetch_group_mtx.lock();
+                auto& hp_group = prefetch_groups[group_id];
+                hp_group.main_task = task;
+                hp_group.pending_tasks = 0;
+                hp_group.total_tasks = 1 + D_eff;
+                hp_group.completed = true;
+                hp_group.main_task_done = true;
+                hp_group.is_hugepage = true;
+                { auto _s = ptw_task_start_ns.find(task->task_id);
+                  if (_s != ptw_task_start_ns.end()) hp_group.group_start_ns = _s->second;
+                  else hp_group.group_start_ns = sc_time_stamp().to_seconds() * 1e9; }
+                for (uint32_t d = 0; d <= D_eff; d++) {
+                    uint64_t slot_iova = base_iova + (uint64_t)d * PAGE_SIZE_4KB;
+                    uint64_t slot_pa = huge_frame_pa | (slot_iova & (leaf_page_sz - 1));
+                    hp_group.group_iovas[d] = slot_iova;
+                    hp_group.vs_ptes[d] = task->vs_pte;
+                    hp_group.g_ptes[d] = task->g_pte;
+                    hp_group.pas[d] = slot_pa;
+                    hp_group.page_szs[d] = leaf_page_sz;
+                    hp_group.slot_invalid[d] = (d > 0);  // D个无效结果槽
+                    task->walk_ctx.pt_updates[d].iova = slot_iova;
+                    task->walk_ctx.pt_updates[d].vs_pte = task->vs_pte;
+                    task->walk_ctx.pt_updates[d].g_pte = task->g_pte;
+                    task->walk_ctx.pt_updates[d].pa = slot_pa;
+                    task->walk_ctx.pt_updates[d].page_sz = leaf_page_sz;
+                }
+                prefetch_group_mtx.unlock();
+
+                prefetch_group_completed_event.notify(SC_ZERO_TIME);
+
+                // 主任务不进入normal cleanup路径, 等待monitor线程处理
+                goto skip_walk_cleanup;
+            }
+
             // =====================================================================
             if (task->walk_ctx.prefetch_enabled && task->walk_ctx.prefetch_depth > 0
                 && task->GV && task->iohgatp.MODE != IOHGATP_Bare
@@ -2274,9 +2499,16 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // [FIX] PT Cache更新(填常规CL)
-            iommu::CacheMessage pt_update_req = task_to_pt_update(task);
-            pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
-            cache_sub.pt_update_fifo.write(pt_update_req);
+            // [大页] page_sz>4KB时跳过: 大页leaf不写PT Cache(PT Cache仅缓存4KB leaf PTE)
+            if (task->page_sz <= PAGE_SIZE_4KB) {
+                iommu::CacheMessage pt_update_req = task_to_pt_update(task);
+                pt_update_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
+                cache_sub.pt_update_fifo.write(pt_update_req);
+            } else {
+                printf("[PTW_HUGEPAGE] task_id=%u -> skip PT Cache update (page_sz=0x%lx > 4KB)\n",
+                       task->task_id, task->page_sz);
+                fflush(stdout);
+            }
             
             // =====================================================================
             // Update Walker Cache (如果启用)
@@ -2367,6 +2599,7 @@ void iommu_top::prefetch_group_monitor_thread() {
             bool sv48;
             bool gstage_x4;
             bool has_fault;
+            bool is_hugepage;  // [大页] 大页组: 不写PT Cache, 仅刷去重Cache
             std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
             // [FIX-V2] 保存flush参数, 在无锁阶段执行
             std::vector<uint64_t> group_iovas;
@@ -2419,6 +2652,7 @@ void iommu_top::prefetch_group_monitor_thread() {
                 pgu.sv48 = sv48;
                 pgu.gstage_x4 = gstage_x4;
                 pgu.has_fault = group.has_fault;
+                pgu.is_hugepage = group.is_hugepage;  // [大页]
                 
                 for (uint32_t i = 0; i < group.total_tasks; i++) {
                     uint64_t iova = group.group_iovas[i];
@@ -2576,7 +2810,8 @@ void iommu_top::prefetch_group_monitor_thread() {
                 cache_sub.dedup_update_fifo.write(dedup_upd);
 
                 // (b) 正常组: 写 pt_update_fifo 填 PT Cache 常规 CL(fault 组跳过)
-                if (!pgu.has_fault) {
+                // [大页] 大页组同样跳过: 大页leaf不写PT Cache(仅刷去重Cache释放挂起任务)
+                if (!pgu.has_fault && !pgu.is_hugepage) {
                     iommu::CacheMessage update_msg;
                     update_msg.msg_type = iommu::CacheMsgType::PT_UPDATE;
                     update_msg.task_id = pgu.main_task->task_id;
@@ -2610,7 +2845,9 @@ void iommu_top::prefetch_group_monitor_thread() {
                 processed_iova_count++;
             }
             printf("[PTW_PREFETCH_MONITOR] Group %u: %s (%u iovas, has_fault=%d)\n",
-                   pgu.group_id, pgu.has_fault ? "FLUSH-only(fault)" : "FLUSH+PT_UPDATE",
+                   pgu.group_id,
+                   pgu.has_fault ? "FLUSH-only(fault)" :
+                   pgu.is_hugepage ? "FLUSH-only(hugepage, no PT update)" : "FLUSH+PT_UPDATE",
                    processed_iova_count, pgu.has_fault);
             fflush(stdout);
             

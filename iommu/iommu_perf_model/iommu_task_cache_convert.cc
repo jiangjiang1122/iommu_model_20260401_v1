@@ -361,6 +361,23 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
         uint8_t hit_level = resp.walker_level;
         iommu::ppn_t next_ppn = resp.walker_data.next_ppn;
         
+        // [大页] 端到端leaf命中: next_ppn=最终PA页帧PPN, 不能按中间级解释;
+        // 记录到walker_front_*字段, 由PTW统一短路处理(0次DDR)
+        if (iommu::walker_is_leaf(resp.walker_data)) {
+            task->walk_ctx.walker_front_is_leaf = true;
+            task->walk_ctx.walker_front_next_ppn = next_ppn;
+            task->walk_ctx.walker_front_leaf_page_sz =
+                (hit_level == 3) ? 0x200000ULL :
+                (hit_level == 2) ? 0x40000000ULL : 0x8000000000ULL;
+            task->walk_ctx.walker_hit_level = hit_level;
+            printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_LOOKUP response (LEAF HIT at level=%d, leaf_ppn=0x%lx, page_sz=0x%lx)\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   task->task_id, hit_level, next_ppn,
+                   task->walk_ctx.walker_front_leaf_page_sz);
+            fflush(stdout);
+            return;
+        }
+        
         // 修正：根据命中层级设置正确的 walk 起始 level
         // Walker Cache 只缓存中间映射，叶子节点不缓存。
         // hit_level 对应命中的子表 level：
@@ -405,6 +422,17 @@ bool apply_walker_front_result(iommu_task_t* task) {
     if (task->walk_ctx.walker_front_hit) {
         uint8_t hit_level = task->walk_ctx.walker_front_level;
         iommu::ppn_t next_ppn = task->walk_ctx.walker_front_next_ppn;
+
+        // [大页] 端到端leaf命中: 不设置中间级walk起点, 由PTW短路完成(0次DDR)
+        if (task->walk_ctx.walker_front_is_leaf) {
+            task->walk_ctx.walker_hit_level = hit_level;
+            printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_FRONT result (LEAF HIT at level=%d, leaf_ppn=0x%lx, page_sz=0x%lx)\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+                   task->task_id, hit_level, (unsigned long)next_ppn,
+                   task->walk_ctx.walker_front_leaf_page_sz);
+            fflush(stdout);
+            return true;
+        }
 
         // level = 3 - hit_level (解释逻辑同walker_response_to_task)
         task->walk_ctx.level = 3 - hit_level;
@@ -547,6 +575,38 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
         }
     }
     
+    // =====================================================================
+    // [大页] 端到端大页leaf PTE写入: page_sz>4KB时按页大小选目标子表
+    //   2MB→C3(key=iova>>21), 1GB→C2(key=iova>>30), 512GB→C1(key=iova>>39)
+    //   next_ppn=最终PA页帧PPN(按页对齐), is_leaf=1
+    //   大页walk时对应子表中间结果必为空(leaf提前终止), 直接覆盖无冲突
+    // =====================================================================
+    if (task->page_sz > 0x1000ULL) {
+        uint64_t leaf_ppn = (task->pa & ~(task->page_sz - 1)) >> 12;
+        iommu::WalkerData leaf_data = iommu::make_walker_data(
+            leaf_ppn, true,
+            req.walker_addr_is_va, req.walker_from_two_stage,
+            req.walker_sv48, req.walker_x4_mode,
+            false /*is_s2*/, true /*is_leaf*/);
+        if (task->page_sz == 0x200000ULL) {          // 2MB → C3
+            req.walker_data_ptwc3 = leaf_data;
+            if (req.walker_update_kind == iommu::WalkerUpdateKind::NONE)
+                req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        } else if (task->page_sz == 0x40000000ULL) {  // 1GB → C2
+            req.walker_data_ptwc2 = leaf_data;
+            if (req.walker_update_kind == iommu::WalkerUpdateKind::NONE ||
+                req.walker_update_kind == iommu::WalkerUpdateKind::PTWC_3)
+                req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+        } else {                                       // 512GB → C1
+            req.walker_data_ptwc1 = leaf_data;
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+        }
+        printf("[CONVERT] task_id=%u -> WALKER_UPDATE hugepage LEAF (iova=0x%lx, page_sz=0x%lx, leaf_ppn=0x%lx, kind=%d)\n",
+               task->task_id, task->iova, task->page_sz, leaf_ppn,
+               static_cast<int>(req.walker_update_kind));
+        fflush(stdout);
+    }
+    
     printf("[CONVERT] task_id=%u -> WALKER_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, hit_level=%d, kind=%d, L2=%d, L1=%d, L0=%d)\n",
            task->task_id, task->GSCID, task->PSCID, task->iova,
            task->walk_ctx.walker_hit_level,
@@ -656,6 +716,34 @@ iommu::CacheMessage task_to_s2_walker_update(iommu_task_t* task, uint64_t gpa) {
         } else {
             req.walker_update_kind = iommu::WalkerUpdateKind::NONE;
         }
+    }
+
+    // =====================================================================
+    // [大页] G-stage端到端大页leaf(GPA→SPA)写入: gst_page_sz>4KB时
+    //   2MB→C3, 1GB→C2, 512GB→C1; next_ppn=最终SPA页帧PPN(按页对齐), is_leaf=1
+    // =====================================================================
+    if (task->gst_page_sz > 0x1000ULL) {
+        uint64_t s2_leaf_ppn = (task->pa & ~(task->gst_page_sz - 1)) >> 12;
+        iommu::WalkerData s2_leaf_data = iommu::make_walker_data(
+            s2_leaf_ppn, true, false, true, true, true,
+            true /*is_s2*/, true /*is_leaf*/);
+        if (task->gst_page_sz == 0x200000ULL) {          // 2MB → C3
+            req.walker_data_ptwc3 = s2_leaf_data;
+            if (req.walker_update_kind == iommu::WalkerUpdateKind::NONE)
+                req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_3;
+        } else if (task->gst_page_sz == 0x40000000ULL) {  // 1GB → C2
+            req.walker_data_ptwc2 = s2_leaf_data;
+            if (req.walker_update_kind == iommu::WalkerUpdateKind::NONE ||
+                req.walker_update_kind == iommu::WalkerUpdateKind::PTWC_3)
+                req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_2_3;
+        } else {                                           // 512GB → C1
+            req.walker_data_ptwc1 = s2_leaf_data;
+            req.walker_update_kind = iommu::WalkerUpdateKind::PTWC_1_2_3;
+        }
+        printf("[CONVERT] task_id=%u -> S2_WALKER_UPDATE hugepage LEAF (gpa=0x%lx, gst_page_sz=0x%lx, leaf_ppn=0x%lx, kind=%d)\n",
+               task->task_id, gpa, task->gst_page_sz, s2_leaf_ppn,
+               static_cast<int>(req.walker_update_kind));
+        fflush(stdout);
     }
 
     printf("[CONVERT] task_id=%u -> S2_WALKER_UPDATE (gscid=%u, pscid=%u, gpa=0x%lx, s2_hit_level=%d, kind=%d, L1=%d, L2=%d, L3=%d)\n",

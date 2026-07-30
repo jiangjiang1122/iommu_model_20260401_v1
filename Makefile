@@ -78,6 +78,19 @@ else ifeq ($(TEST), rand4k_twostage)
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1
+else ifeq ($(TEST), seq512b_2mb_twostage_s2on)
+    # 场景8: 512B步进顺序递增 + VS/G两级均为2MB大页 + 两阶段 + S2开启
+    #   复用场景5配置: 64GB/s(512bit)入口/出口 + 全局并发256 + PTW并发4 + D=3预取
+    #   大页语义: PT Cache只查不写(命中率0), Walker Cache缓存端到端2MB leaf,
+    #   PTW大页不启动预取(仍返回D+1个结果, D个无效), 首包walk最多15次DDR
+    SCENE8_PTW ?= 4
+    TEST_THREAD_SRC = rp/test_rp_seq512b_2mb_two_stage_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_512B_2MB -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE8_PTW) \
+                 -DTEST_CFG_SKIP_PHASE1=1
 else ifeq ($(TEST), rand4k_twostage_s2on_128g)
     # 场景7: 4KB随机读(16MB IOVA范围) + 两阶段 + S2开启 + 128GB/s入口/出口
     #   全局并发512 + Buffer512 + PTW并发4(可用 make SCENE7_PTW=N 覆盖调参) + D=3预取(随机IOVA下预取失效) + 10000包(1250页x8)

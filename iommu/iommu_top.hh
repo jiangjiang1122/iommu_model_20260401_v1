@@ -173,6 +173,10 @@ public:
         bool     completed = false;           // 组完成标志
         bool     main_task_done = false;      // 主任务walk完成标志(pt_updates[0]已填充)
         bool     has_fault = false;           // 组中有任务fault
+        // [大页] 大页组: 不写PT Cache, 仅按D+1个构造4KB iova刷新去重Cache;
+        // slot_invalid标注D个无效结果槽(未真实预取, 仅用于占位清除)
+        bool     is_hugepage = false;
+        bool     slot_invalid[17] = {false};
         double   group_start_ns = 0.0;        // [STAT] 组起始时间(主任务进入PTW时刻, ns)
         
         // 收集所有walk结果
@@ -240,6 +244,11 @@ public:
     // [STAT] 主任务/预取任务DDR reads汇总
     uint64_t ptw_main_total_ddr_reads;     // 主任务DDR读总数
     uint64_t ptw_prefetch_total_ddr_reads; // 预取任务DDR读总数
+    // [大页][STAT] 大页任务统计
+    uint64_t ptw_hugepage_main_count;      // 大页主任务数(page_sz>4KB)
+    uint64_t ptw_hugepage_pf_skipped;      // 大页跳过的预取spawn数
+    uint64_t ptw_hugepage_invalid_slots;   // 返回的无效结果槽总数(D个/组)
+    uint64_t ptw_front_leaf_hits;          // 前置leaf命中短路完成数(0次DDR)
     std::vector<double> ptw_output_interval_values;  // 所有输出间隔值(ns), 用于波动曲线
     std::vector<double> ptw_task_latency_values;     // 所有任务执行延时(ns), 用于分布统计
     // [STAT] PTW任务组执行时间统计 (1主+D预取为一组)
@@ -541,6 +550,10 @@ public:
         ptw_prefetch_task_count(0),
         ptw_main_total_ddr_reads(0),
         ptw_prefetch_total_ddr_reads(0),
+        ptw_hugepage_main_count(0),
+        ptw_hugepage_pf_skipped(0),
+        ptw_hugepage_invalid_slots(0),
+        ptw_front_leaf_hits(0),
         ptw_group_exec_total_ns(0.0),
         ptw_group_exec_max_ns(0.0),
         ptw_group_exec_min_ns(999999999.0),
