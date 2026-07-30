@@ -40,6 +40,12 @@ public:
     sc_fifo<CacheMessage> walker_request_fifo;
     sc_fifo<CacheMessage> msi_request_fifo;
 
+    // [前置] Walker Cache 前置查询通道: 所有输入请求在PT Cache查询发起点
+    // 同时写入此FIFO; 与 walker_request_fifo(PTW S2/旧路径)物理隔离,
+    // 响应按 walker_origin 路由, 消除跨线程响应错配
+    sc_fifo<CacheMessage> walker_front_request_fifo;
+    sc_fifo<CacheMessage> walker_front_response_fifo;
+
     // [重构] 去重 Cache 请求/更新入口: PT Cache MISS 转发至 dedup_request_fifo;
     // PTW 完成后 Monitor 写 dedup_update_fifo 驱动 dedup_cache 清除 + Buffer 刷新。
     sc_fifo<CacheMessage> dedup_request_fifo;
@@ -121,6 +127,9 @@ public:
     // [dedup多RAM] 多 RAM 统计报告
     void print_dedup_multi_ram_report() const;
 
+    // [walker多RAM] Walker Cache 多 RAM 统计报告: Hash单元/每组RAM利用率/前置查询计数
+    void print_walker_multi_ram_report() const;
+
     // 级联失效: DC/PC 失效后产生关联失效消息，推入 PT/Walker/MSIPT 的失效 FIFO
     void enqueue_cascade_invalidations(gscid_t gscid, pscid_t pscid,
                                        device_id_t device_id, bool has_gscid,
@@ -146,9 +155,16 @@ private:
     std::unique_ptr<PTCache>     pt_cache_;
     std::unique_ptr<WalkerCache> walker_cache_;
 
-    // Walker Cache 统一轮询调度线程：替代原有的三个独立worker线程，
-    // 按 lookup → update → invalidate 轮询调度，避免互锁死锁问题。
-    void walker_scheduler_thread();
+    // Walker Cache 多RAM架构: Hash线程 + N个RAM Worker + Join线程
+    // (替代原统一轮询调度线程 walker_scheduler_thread)
+    //   walker_hash_thread: 轮询 front_request/request/update/invalidate 四入口;
+    //     lookup/update拆分为按级子操作分发到 walker_ram_fifo_[id];
+    //     S2 lookup/update(零延时)与invalidate内联执行(与旧调度器时序一致)
+    //   walker_ram_worker_thread(i): 串行消耗本RAM子操作原子段延时
+    //   walker_join_thread: 按(origin,task_id)聚合子响应, C3>C2>C1仲裁后回响应
+    void walker_hash_thread();
+    void walker_ram_worker_thread(int ram_id);
+    void walker_join_thread();
 
     // invalidate 响应出口：返回失效是否完成、影响条目数和处理延迟。
     sc_fifo<CacheMessage> dc_invalidate_response_fifo;
@@ -329,6 +345,60 @@ private:
     int      pt_ram_fifo_peak_[PT_MAX_RAMS]    = {};  // FIFO占用峰值
     double   pt_ram_first_start_ns_ = -1.0;           // 首任务开始(全RAM)
     double   pt_ram_last_end_ns_    = 0.0;            // 末任务结束(全RAM)
+
+    // ============================================================
+    // [walker多RAM] Walker Cache 三级子表独立分RAM 状态与统计
+    // 物理拓扑: 每个子表(C1/C2/C3)拥有独立的 num_rams 组RAM bank,
+    // 共 3*num_rams 个worker; 同一lookup的三级子查询天然落在不同子表的
+    // RAM上完全并行; 同子表内按本级set哈希低位分4组
+    // worker索引 = (level-1)*num_rams + ram_id
+    // ============================================================
+    static constexpr uint32_t WALKER_MAX_RAMS = 16;   // 每子表最大RAM组数
+    static constexpr uint32_t WALKER_LEVELS = 3;      // 子表数(C1/C2/C3)
+    uint32_t walker_num_rams_ = 1;                    // 每子表RAM组数
+    uint32_t walker_total_workers_ = 3;               // = WALKER_LEVELS * num_rams
+    // 每组 RAM 前置 FIFO (深度 ram_fifo_depth, 满则反压 Hash 线程)
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> walker_ram_fifo_;
+    // [优先级] 每个worker独立的update高优先FIFO: update不排在积压的lookup之后,
+    // worker每轮优先消费update(硬件语义=写口优先), 保证Walker更新及时可见
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> walker_ram_upd_fifo_;
+    // RAM worker -> Join 线程的子响应汇聚FIFO
+    sc_fifo<CacheMessage> walker_join_fifo;
+
+    // Join 待聚合表项: 按 key=(origin<<56)|task_id 索引
+    struct WalkerJoinEntry {
+        CacheMessage base;                     // 原始lookup请求(携带origin/路由信息)
+        uint8_t  expected = 0;                 // 期望子响应数(2或3)
+        uint8_t  received = 0;                 // 已收子响应数
+        bool     hit[4] = {false, false, false, false};   // 按级命中标志[1..3]
+        WalkerData data[4];                    // 按级命中数据[1..3]
+        sc_time  max_ram_latency = SC_ZERO_TIME;  // 子查询最大原子段延时
+        sc_time  start_time = SC_ZERO_TIME;    // hash入队时刻(统计用)
+    };
+    std::map<uint64_t, WalkerJoinEntry> walker_join_pending_;
+
+    // 内部辅助: lookup/update 拆分分发(含hash 1拍与反压统计)
+    void dispatch_walker_lookup(CacheMessage& req);
+    void dispatch_walker_update(CacheMessage& req);
+
+    // [STAT] Walker Hash 单元统计
+    uint64_t walker_hash_task_count_       = 0;
+    double   walker_hash_busy_ns_          = 0.0;
+    double   walker_hash_backpressure_ns_  = 0.0;
+    uint64_t walker_hash_backpressure_cnt_ = 0;
+
+    // [STAT] Walker 每个 worker(子表x RAM组) 统计, 索引=(level-1)*num_rams+ram_id
+    static constexpr uint32_t WALKER_MAX_WORKERS = WALKER_LEVELS * WALKER_MAX_RAMS;
+    uint64_t walker_ram_task_count_[WALKER_MAX_WORKERS]   = {};
+    uint64_t walker_ram_lookup_count_[WALKER_MAX_WORKERS] = {};
+    uint64_t walker_ram_update_count_[WALKER_MAX_WORKERS] = {};
+    double   walker_ram_busy_ns_[WALKER_MAX_WORKERS]      = {};
+    int      walker_ram_fifo_peak_[WALKER_MAX_WORKERS]    = {};
+    double   walker_ram_first_start_ns_ = -1.0;
+    double   walker_ram_last_end_ns_    = 0.0;
+
+    // [STAT] 前置查询计数(walker_front_request_fifo入口)
+    uint64_t walker_front_lookup_count_ = 0;
 
 public:
     void print_dedup_scheduler_report() const;   // 打印 dedup scheduler 统计报告

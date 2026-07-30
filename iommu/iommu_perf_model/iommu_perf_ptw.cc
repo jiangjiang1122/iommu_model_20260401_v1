@@ -225,11 +225,47 @@ void iommu_top::ptw_req_process_thread() {
         {
             // =====================================================================
             // Walker Cache Lookup (如果启用)
+            // [前置] WALKER_FRONT_ENABLED=1: 查询已在configure_and_route处前置发起,
+            //   结果随任务携带(walk_ctx.walker_front_*), 这里直接使用, 不再FIFO往返;
+            //   若结果尚未就绪(罕见时序), 兜底等待walker_front_ready_event
+            // WALKER_FRONT_ENABLED=0: 旧路径, PTW同步查询Walker Cache
             // =====================================================================
             bool walker_cache_enabled = PTW_WALKER_CACHE_ENABLED;  // 从PTW模块参数读取
             bool walker_hit = false;
             
-            if (walker_cache_enabled) {
+            if (walker_cache_enabled && WALKER_FRONT_ENABLED) {
+                // [前置] 兜底等待: 正常时序下Walker查询(数拍)远快于dedup路径,
+                // 结果早已就绪; 极端反压场景下在此等待写回
+                while (!task->walk_ctx.walker_front_valid) {
+                    printf("[PTW_REQ] task_id=%u waiting for walker front result...\n",
+                           task->task_id);
+                    fflush(stdout);
+                    wait(walker_front_ready_event);
+                }
+                walker_hit = apply_walker_front_result(task);
+
+                // [前置] 二次校验: 前置结果非最高级命中(hit_level<3)时再查一次。
+                // 高带宽顺序场景下同一页表段任务批量涌入, 前置时Walker尚未
+                // 被首任务更新(MISS或仅低级命中); 到PTW时已可高级命中,
+                // 二次校验取更优结果, 避免退化为更长walk(与基线行为对齐)
+                if (WALKER_FRONT_RECHECK && task->walk_ctx.walker_hit_level < 3) {
+                    iommu::CacheMessage req = task_to_walker_request(task);
+                    walker_cache_mtx.lock();
+                    cache_sub.walker_request_fifo.write(req);
+                    iommu::CacheMessage resp = cache_sub.walker_response_fifo.read();
+                    walker_cache_mtx.unlock();
+                    // 仅在二次结果更优(命中且级别高于前置)时采用
+                    if (resp.hit && resp.walker_level > task->walk_ctx.walker_hit_level) {
+                        walker_response_to_task(resp, task);
+                        walker_hit = true;
+                        task->walk_ctx.walker_hit_level = resp.walker_level;
+                        printf("[PTW_REQ] task_id=%u front(level=%u) -> recheck HIT at level=%u (upgraded)\n",
+                               task->task_id, task->walk_ctx.walker_front_level,
+                               resp.walker_level);
+                        fflush(stdout);
+                    }
+                }
+            } else if (walker_cache_enabled) {
                 // 使用转换函数构造Walker Cache Lookup请求
                 iommu::CacheMessage req = task_to_walker_request(task);
                 

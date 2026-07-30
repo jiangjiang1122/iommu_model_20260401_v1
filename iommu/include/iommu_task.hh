@@ -133,6 +133,14 @@ struct walk_context_t {
     // 0=全部miss, 3=c3 hit, 2=c2 hit, 1=c1 hit
     uint8_t walker_hit_level = 0;
 
+    // [前置] Walker Cache前置查询结果 (configure_and_route处发起, 随任务透传至PTW)
+    //   walker_front_valid: 前置查询结果已写回(PTW输入侧兜底等待此标志)
+    //   walker_front_hit/level/next_ppn: 查询结果原始值, PTW在walk init时解释
+    bool     walker_front_valid = false;
+    bool     walker_front_hit = false;
+    uint8_t  walker_front_level = 0;
+    uint64_t walker_front_next_ppn = 0;
+
     // [S2] S2 Walker Cache 命中层级 (0=全miss, 3=c3 hit, 2=c2 hit, 1=c1 hit)
     // 用于GS_EXPLICIT阶段的G-stage walker cache
     uint8_t s2_walker_hit_level = 0;

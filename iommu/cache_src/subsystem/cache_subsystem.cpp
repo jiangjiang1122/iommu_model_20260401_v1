@@ -107,6 +107,9 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       pt_request_fifo(16),
       walker_request_fifo(1),
       msi_request_fifo(1),
+      walker_front_request_fifo(16),
+      walker_front_response_fifo(16),
+      walker_join_fifo(64),
       dedup_request_fifo(16),
       dedup_update_fifo(16),
       dedup_inside_request_fifo(32),
@@ -179,7 +182,33 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     // [dedup多RAM] 去重Cache多RAM改造: Scheduler + Hash单元 + 每组RAM独立worker(sc_spawn)
     SC_THREAD(dedup_scheduler_thread);
     SC_THREAD(dedup_hash_process_thread);
-    SC_THREAD(walker_scheduler_thread);  // 统一的walker cache轮询调度线程
+    // [walker多RAM] Walker Cache 多RAM改造: Hash线程 + 每子表x每RAM组独立worker + Join线程
+    // 物理拓扑: C1/C2/C3三子表各自独立 num_rams 组RAM, 共 3*num_rams 个worker,
+    // 同一lookup的三级子查询天然并行; worker索引=(level-1)*num_rams+ram_id
+    walker_num_rams_ = walker_cache_->num_rams();
+    assert(walker_num_rams_ >= 1 && walker_num_rams_ <= WALKER_MAX_RAMS);
+    walker_total_workers_ = WALKER_LEVELS * walker_num_rams_;
+    {
+        const int fifo_depth = static_cast<int>(walker_cache_->ram_fifo_depth());
+        for (uint32_t w = 0; w < walker_total_workers_; ++w) {
+            char fname[40];
+            snprintf(fname, sizeof(fname), "walker_ram_fifo_L%u_%u",
+                     w / walker_num_rams_ + 1, w % walker_num_rams_);
+            walker_ram_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, fifo_depth));
+            char uname[44];
+            snprintf(uname, sizeof(uname), "walker_ram_upd_fifo_L%u_%u",
+                     w / walker_num_rams_ + 1, w % walker_num_rams_);
+            walker_ram_upd_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(uname, fifo_depth));
+        }
+        for (uint32_t w = 0; w < walker_total_workers_; ++w) {
+            sc_spawn(sc_bind(&CacheSubsystem::walker_ram_worker_thread, this,
+                             static_cast<int>(w)));
+        }
+    }
+    SC_THREAD(walker_hash_thread);
+    SC_THREAD(walker_join_thread);
     SC_THREAD(msi_worker_thread);
     SC_THREAD(dc_update_worker_thread);
     SC_THREAD(pc_update_worker_thread);
@@ -1058,35 +1087,119 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
     printf("==================================================\n\n");
 }
 
-// Walker Cache 统一轮询调度线程
-// 按 lookup → update → invalidate 顺序轮询，避免互锁死锁
-void CacheSubsystem::walker_scheduler_thread() {
+// [walker多RAM] Walker Cache多RAM统计报告: Hash单元/每组RAM利用率/前置查询计数
+void CacheSubsystem::print_walker_multi_ram_report() const {
+    printf("\n========== Walker Cache Multi-RAM Report ==========\n");
+    printf("  Config:               num_rams=%u/subtable, workers=%u (三级子表独立分RAM), ram_fifo_depth=%u\n",
+           walker_num_rams_, walker_total_workers_, walker_cache_->ram_fifo_depth());
+    printf("  Front lookups:        %lu (前置查询总数)\n",
+           (unsigned long)walker_front_lookup_count_);
+
+    if (walker_hash_task_count_ == 0) {
+        printf("  No tasks processed.\n");
+        printf("===================================================\n\n");
+        return;
+    }
+
+    printf("  [Hash Unit]\n");
+    printf("    Tasks hashed:        %lu (lookup+update, 不含S2/invalidate内联)\n",
+           (unsigned long)walker_hash_task_count_);
+    printf("    Busy time:           %.1f ns\n", walker_hash_busy_ns_);
+    printf("    Backpressure count:  %lu\n", (unsigned long)walker_hash_backpressure_cnt_);
+    printf("    Backpressure time:   %.1f ns (write-block on full RAM FIFO)\n",
+           walker_hash_backpressure_ns_);
+
+    double window_ns = walker_ram_last_end_ns_ - walker_ram_first_start_ns_;
+    printf("  [Per-Worker: SubTable x RAM]  (window=%.1f ns)\n", window_ns);
+    printf("    %-8s %-10s %-10s %-10s %-12s %-9s %-10s\n",
+           "Worker", "SubOps", "Lookups", "Updates", "Busy(ns)", "Util(%)", "FIFO_Peak");
+    uint64_t total_tasks = 0;
+    double total_busy = 0.0;
+    for (uint32_t w = 0; w < walker_total_workers_; ++w) {
+        double util = (window_ns > 0) ? walker_ram_busy_ns_[w] / window_ns * 100.0 : 0.0;
+        char wname[16];
+        snprintf(wname, sizeof(wname), "C%u-R%u",
+                 w / walker_num_rams_ + 1, w % walker_num_rams_);
+        printf("    %-8s %-10lu %-10lu %-10lu %-12.1f %-9.2f %-10d\n",
+               wname,
+               (unsigned long)walker_ram_task_count_[w],
+               (unsigned long)walker_ram_lookup_count_[w],
+               (unsigned long)walker_ram_update_count_[w],
+               walker_ram_busy_ns_[w], util, walker_ram_fifo_peak_[w]);
+        total_tasks += walker_ram_task_count_[w];
+        total_busy += walker_ram_busy_ns_[w];
+    }
+    printf("    %-8s %-10lu %-10s %-10s %-12.1f\n",
+           "SUM", (unsigned long)total_tasks, "-", "-", total_busy);
+
+    if (window_ns > 0) {
+        printf("  [Throughput]\n");
+        printf("    SubOps/cycle:        %.3f  (total_subops / window, clock=1ns)\n",
+               (double)total_tasks / window_ns);
+        printf("    Aggregate busy/win:  %.2f  (>1 means cross-RAM concurrency)\n",
+               total_busy / window_ns);
+    }
+    printf("===================================================\n\n");
+}
+
+// ============================================================
+// [walker多RAM] Walker Cache Hash 线程
+// 轮询四入口: front_request(前置lookup) > request(S2/旧路径lookup)
+//           > update > invalidate
+// - VS lookup/update: hash 1拍后按级拆分子操作分发 walker_ram_fifo_[id]
+//   (目标FIFO满则阻塞反压, Hash保持忙)
+// - S2 lookup/update: 零延时模型, 内联执行(与旧调度器时序一致)
+// - invalidate: 内联执行(低频操作)
+// ============================================================
+void CacheSubsystem::walker_hash_thread() {
     while (true) {
         bool processed = false;
-        
-        // 1. 优先处理 lookup 请求
         CacheMessage req;
-        if (walker_request_fifo.num_available() > 0) {
-            req = walker_request_fifo.read();
-            const sc_time start = sc_time_stamp();
-            trace_task_event("begin", "walker_cache", "lookup", req, start);
-            CacheMessage resp = execute_walker_request(req);
-            record_task_completion("walker_cache", start, sc_time_stamp());
-            trace_task_event("end", "walker_cache", "lookup", req, start, &resp);
-            push_fifo(walker_response_fifo, resp);
-            processed = true;
-        }
-        // 2. 处理 update 请求
-        else if (walker_update_fifo.num_available() > 0) {
+
+        // 1. update优先: 保证Walker更新及时可见(后续同段任务二次校验可命中)
+        if (walker_update_fifo.num_available() > 0) {
             req = walker_update_fifo.read();
-            const sc_time start = sc_time_stamp();
-            trace_task_event("begin", "walker_cache", "update", req, start);
-            CacheMessage resp = execute_walker_update_request(req);
-            record_task_completion("walker_cache", start, sc_time_stamp());
-            trace_task_event("end", "walker_cache", "update", req, start, &resp);
+            if (req.walker_is_s2_lookup) {
+                // S2 Cache更新: 零延时, 内联执行
+                const sc_time start = sc_time_stamp();
+                trace_task_event("begin", "walker_cache", "update", req, start);
+                CacheMessage resp = execute_walker_update_request(req);
+                record_task_completion("walker_cache", start, sc_time_stamp());
+                trace_task_event("end", "walker_cache", "update", req, start, &resp);
+            } else {
+                dispatch_walker_update(req);
+            }
             processed = true;
         }
-        // 3. 处理 invalidate 请求
+        // 2. PTW关键路径lookup(S2/二次校验/旧路径): PTW在互斥锁内同步等待响应,
+        // 优先于前置lookup(前置不在关键路径, 结果早于dedup路径完成即可),
+        // 避免高速前置流饿死PTW查询
+        else if (walker_request_fifo.num_available() > 0) {
+            req = walker_request_fifo.read();
+            req.walker_origin = 0;
+            if (req.walker_is_s2_lookup) {
+                // S2 Cache查询: 零延时, 内联执行
+                const sc_time start = sc_time_stamp();
+                trace_task_event("begin", "walker_cache", "lookup", req, start);
+                CacheMessage resp = execute_walker_request(req);
+                record_task_completion("walker_cache", start, sc_time_stamp());
+                trace_task_event("end", "walker_cache", "lookup", req, start, &resp);
+                push_fifo(walker_response_fifo, resp);
+            } else {
+                // 二次校验/旧路径VS lookup
+                dispatch_walker_lookup(req);
+            }
+            processed = true;
+        }
+        // 3. 前置lookup(主数据通路, 非关键路径)
+        else if (walker_front_request_fifo.num_available() > 0) {
+            req = walker_front_request_fifo.read();
+            req.walker_origin = 1;
+            walker_front_lookup_count_++;
+            dispatch_walker_lookup(req);
+            processed = true;
+        }
+        // 4. invalidate
         else if (walker_invalidate_fifo.num_available() > 0) {
             req = walker_invalidate_fifo.read();
             const sc_time start = sc_time_stamp();
@@ -1097,13 +1210,254 @@ void CacheSubsystem::walker_scheduler_thread() {
             push_fifo(walker_invalidate_response_fifo, resp);
             processed = true;
         }
-        
-        // 如果没有处理任何请求，等待任意一个FIFO有数据
+
         if (!processed) {
-            // 等待任意一个FIFO有数据（使用event通知）
-            wait(walker_request_fifo.data_written_event() | 
-                 walker_update_fifo.data_written_event() | 
+            wait(walker_front_request_fifo.data_written_event() |
+                 walker_request_fifo.data_written_event() |
+                 walker_update_fifo.data_written_event() |
                  walker_invalidate_fifo.data_written_event());
+        }
+    }
+}
+
+// [walker多RAM] lookup拆分分发: hash 1拍 + 注册join表项 + 按级分发子查询
+void CacheSubsystem::dispatch_walker_lookup(CacheMessage& req) {
+    const sc_time start = sc_time_stamp();
+    const double start_ns = start.to_seconds() * 1e9;
+    trace_task_event("begin", "walker_cache", "lookup", req, start);
+
+    // Hash 单元 1 拍(三级子表并行hash)
+    wait(clock_period_);
+
+    // 确定子查询级列表: C3/C2必查, C1仅Sv48且非Sv39模式
+    uint8_t levels[3];
+    uint8_t count = 0;
+    levels[count++] = 3;
+    levels[count++] = 2;
+    if (!walker_cache_->sv39_mode() && req.walker_sv48) {
+        levels[count++] = 1;
+    }
+
+    // 注册 join 表项
+    const uint64_t key = (static_cast<uint64_t>(req.walker_origin) << 56) |
+                         req.task_id;
+    WalkerJoinEntry entry;
+    entry.base = req;
+    entry.expected = count;
+    entry.start_time = start;
+    walker_join_pending_[key] = entry;
+
+    // 按级分发子查询(目标RAM FIFO满则阻塞 = 反压)
+    // worker索引 = (level-1)*num_rams + ram_id: 三级子查询落在各自子表的独立RAM上并行
+    // [优先级] origin=0(PTW关键路径: S2后续/二次校验/旧路径)走高优先通道,
+    // 不被积压的前置子查询延迟; origin=1(前置)走普通通道
+    for (uint8_t i = 0; i < count; ++i) {
+        CacheMessage sub = req;
+        sub.walker_sub_level = levels[i];
+        sub.walker_sub_expected = count;
+        uint32_t ram_id = walker_cache_->compute_ram_id(
+            levels[i], req.gscid, req.pscid, req.iova,
+            req.walker_addr_is_va, req.walker_from_two_stage,
+            req.walker_sv48, req.walker_x4_mode);
+        uint32_t worker_id = (levels[i] - 1) * walker_num_rams_ + ram_id;
+        sc_fifo<CacheMessage>& target =
+            (req.walker_origin == 0) ? *walker_ram_upd_fifo_[worker_id]
+                                     : *walker_ram_fifo_[worker_id];
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (target.num_free() == 0) {
+            walker_hash_backpressure_cnt_++;
+        }
+        target.write(sub);  // 阻塞写 = 反压
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        walker_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+        int occ = walker_ram_fifo_[worker_id]->num_available();
+        if (occ > walker_ram_fifo_peak_[worker_id]) walker_ram_fifo_peak_[worker_id] = occ;
+    }
+
+    walker_hash_task_count_++;
+    walker_hash_busy_ns_ += (sc_time_stamp().to_seconds() * 1e9 - start_ns);
+}
+
+// [walker多RAM] update拆分分发: hash 1拍 + 按kind/valid拆子更新(无响应)
+void CacheSubsystem::dispatch_walker_update(CacheMessage& req) {
+    walker_cache_->record_update_kind(req.walker_update_kind);
+    if (req.walker_update_kind == WalkerUpdateKind::NONE) {
+        printf("[t=%llu ns][WALKER_CACHE] UPDATE: NONE (skip), gscid=%u, pscid=%u, iova=0x%lx\n",
+               (unsigned long long)sc_time_stamp().value()/1000,
+               req.gscid, req.pscid, (unsigned long)req.iova);
+        fflush(stdout);
+        return;
+    }
+
+    const sc_time start = sc_time_stamp();
+    const double start_ns = start.to_seconds() * 1e9;
+    trace_task_event("begin", "walker_cache", "update", req, start);
+
+    // Hash 单元 1 拍
+    wait(clock_period_);
+
+    const bool update_ptwc1 = req.walker_update_kind == WalkerUpdateKind::PTWC_1_2_3;
+    const bool update_ptwc2 = req.walker_update_kind == WalkerUpdateKind::PTWC_1_2_3 ||
+                              req.walker_update_kind == WalkerUpdateKind::PTWC_2_3;
+
+    printf("[t=%llu ns][WALKER_CACHE] UPDATE: gscid=%u, pscid=%u, iova=0x%lx, kind=%d, ptwc1_valid=%d, ptwc2_valid=%d, ptwc3_valid=%d\n",
+           (unsigned long long)sc_time_stamp().value()/1000,
+           req.gscid, req.pscid, (unsigned long)req.iova,
+           static_cast<int>(req.walker_update_kind),
+           req.walker_data_ptwc1.reserved.valid,
+           req.walker_data_ptwc2.reserved.valid,
+           req.walker_data_ptwc3.reserved.valid);
+    fflush(stdout);
+
+    // 按级分发子更新: valid=0跳过(与旧update_entry一致, 防缓存污染)
+    // worker索引 = (level-1)*num_rams + ram_id; 写入update高优先FIFO
+    auto dispatch_one = [&](uint8_t level, const WalkerData& data) {
+        if (!data.reserved.valid) return;
+        CacheMessage sub = req;
+        sub.walker_sub_level = level;
+        uint32_t ram_id = walker_cache_->compute_ram_id(
+            level, req.gscid, req.pscid, req.iova,
+            walker_va_pa_flag(data), walker_stage_flag(data),
+            walker_sv48_flag(data), walker_x4_mode_flag(data));
+        uint32_t worker_id = (level - 1) * walker_num_rams_ + ram_id;
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (walker_ram_upd_fifo_[worker_id]->num_free() == 0) {
+            walker_hash_backpressure_cnt_++;
+        }
+        walker_ram_upd_fifo_[worker_id]->write(sub);
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        walker_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+    };
+
+    if (update_ptwc1 && !walker_cache_->sv39_mode() &&
+        walker_sv48_flag(req.walker_data_ptwc1)) {
+        dispatch_one(1, req.walker_data_ptwc1);
+    }
+    if (update_ptwc2) {
+        dispatch_one(2, req.walker_data_ptwc2);
+    }
+    dispatch_one(3, req.walker_data_ptwc3);
+
+    walker_hash_task_count_++;
+    walker_hash_busy_ns_ += (sc_time_stamp().to_seconds() * 1e9 - start_ns);
+}
+
+// ============================================================
+// [walker多RAM] 每组 RAM 独立 worker
+// 同一 RAM FIFO 内子操作串行(单线程天然保证原子段不可分割);
+// 不同 RAM 组并发。lookup子响应写 walker_join_fifo; update无响应。
+// ============================================================
+void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
+    sc_fifo<CacheMessage>& my_fifo = *walker_ram_fifo_[ram_id];
+    sc_fifo<CacheMessage>& my_upd_fifo = *walker_ram_upd_fifo_[ram_id];
+    while (true) {
+        // update高优先(写口优先): 保证Walker更新不被积压的lookup延迟
+        CacheMessage sub;
+        bool is_upd_channel = my_upd_fifo.nb_read(sub);
+        if (!is_upd_channel && !my_fifo.nb_read(sub)) {
+            wait(my_upd_fifo.data_written_event() | my_fifo.data_written_event());
+            continue;
+        }
+        const double start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (walker_ram_first_start_ns_ < 0.0) walker_ram_first_start_ns_ = start_ns;
+
+        sc_time ram_latency = SC_ZERO_TIME;
+        if (sub.msg_type == CacheMsgType::WALKER_LOOKUP) {
+            WalkerData data;
+            bool hit = walker_cache_->lookup_level_ram(
+                sub.walker_sub_level, sub.gscid, sub.pscid, sub.iova,
+                sub.walker_addr_is_va, sub.walker_from_two_stage,
+                sub.walker_sv48, sub.walker_x4_mode, data, ram_latency);
+            wait(ram_latency);  // RAM原子段延时(同RAM串行, 跨RAM并发)
+            CacheMessage jr = sub;
+            jr.hit = hit;
+            if (hit) jr.walker_data = data;
+            jr.latency = ram_latency;
+            walker_join_fifo.write(jr);
+            walker_ram_lookup_count_[ram_id]++;
+        } else {
+            // WALKER_UPDATE 子更新: 按级选择payload
+            const WalkerData& d =
+                (sub.walker_sub_level == 1) ? sub.walker_data_ptwc1 :
+                (sub.walker_sub_level == 2) ? sub.walker_data_ptwc2 :
+                                              sub.walker_data_ptwc3;
+            walker_cache_->update_level_ram(sub.walker_sub_level, sub.gscid,
+                                            sub.pscid, sub.iova, d, ram_latency);
+            wait(ram_latency);
+            walker_ram_update_count_[ram_id]++;
+        }
+
+        const double end_ns = sc_time_stamp().to_seconds() * 1e9;
+        walker_ram_task_count_[ram_id]++;
+        walker_ram_busy_ns_[ram_id] += (end_ns - start_ns);
+        if (end_ns > walker_ram_last_end_ns_) walker_ram_last_end_ns_ = end_ns;
+    }
+}
+
+// ============================================================
+// [walker多RAM] Join 线程: 聚合子响应, C3>C2>C1 仲裁, 按origin回响应
+// ============================================================
+void CacheSubsystem::walker_join_thread() {
+    while (true) {
+        CacheMessage jr = walker_join_fifo.read();
+        const uint64_t key = (static_cast<uint64_t>(jr.walker_origin) << 56) |
+                             jr.task_id;
+        auto it = walker_join_pending_.find(key);
+        if (it == walker_join_pending_.end()) {
+            printf("[WALKER_JOIN] WARNING: task_id=%u origin=%u sub-response without join entry!\n",
+                   (unsigned)jr.task_id, jr.walker_origin);
+            fflush(stdout);
+            continue;
+        }
+        WalkerJoinEntry& e = it->second;
+        e.received++;
+        if (jr.walker_sub_level >= 1 && jr.walker_sub_level <= 3) {
+            e.hit[jr.walker_sub_level] = jr.hit;
+            e.data[jr.walker_sub_level] = jr.walker_data;
+        }
+        if (jr.latency > e.max_ram_latency) e.max_ram_latency = jr.latency;
+        if (e.received < e.expected) continue;
+
+        // 收齐: C3 > C2 > C1 仲裁
+        uint8_t hit_level = e.hit[3] ? 3 : (e.hit[2] ? 2 : (e.hit[1] ? 1 : 0));
+        CacheMessage resp;
+        resp.msg_type = CacheMsgType::CACHE_RESPONSE;
+        resp.task_id = e.base.task_id;
+        resp.iova = e.base.iova;
+        resp.gscid = e.base.gscid;
+        resp.pscid = e.base.pscid;
+        resp.walker_origin = e.base.walker_origin;
+        resp.hit = (hit_level > 0);
+        if (resp.hit) {
+            resp.walker_level = hit_level;
+            resp.walker_data = e.data[hit_level];
+        }
+        resp.latency = clock_period_ + e.max_ram_latency;  // hash + 最慢子查询
+
+        walker_cache_->record_vs_lookup_result(hit_level);
+        if (resp.hit) {
+            printf("[t=%llu ns][WALKER_CACHE] HIT: ptw_c%u (level=%u), gscid=%u, pscid=%u, iova=0x%lx, next_ppn=0x%lx\n",
+                   (unsigned long long)sc_time_stamp().value()/1000,
+                   hit_level, hit_level, e.base.gscid, e.base.pscid,
+                   (unsigned long)e.base.iova,
+                   (unsigned long)resp.walker_data.next_ppn);
+        } else {
+            printf("[t=%llu ns][WALKER_CACHE] MISS: all levels, gscid=%u, pscid=%u, iova=0x%lx\n",
+                   (unsigned long long)sc_time_stamp().value()/1000,
+                   e.base.gscid, e.base.pscid, (unsigned long)e.base.iova);
+        }
+        fflush(stdout);
+
+        record_task_completion("walker_cache", e.start_time, sc_time_stamp());
+        trace_task_event("end", "walker_cache", "lookup", e.base, e.start_time, &resp);
+
+        const uint8_t origin = e.base.walker_origin;
+        walker_join_pending_.erase(it);
+
+        if (origin == 1) {
+            push_fifo(walker_front_response_fifo, resp);
+        } else {
+            push_fifo(walker_response_fifo, resp);
         }
     }
 }

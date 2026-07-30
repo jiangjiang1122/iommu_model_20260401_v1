@@ -396,6 +396,42 @@ void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task) {
 }
 
 // ============================================================
+// [前置] Apply front walker lookup result carried in task walk_ctx
+// 语义与walker_response_to_task一致: 命中时设置walk起点(level/base_addr),
+// hit_level=3时保存vs_l0_spa_ppn供两阶段预取; 同时设置walker_hit_level
+// 返回: 前置查询是否命中
+// ============================================================
+bool apply_walker_front_result(iommu_task_t* task) {
+    if (task->walk_ctx.walker_front_hit) {
+        uint8_t hit_level = task->walk_ctx.walker_front_level;
+        iommu::ppn_t next_ppn = task->walk_ctx.walker_front_next_ppn;
+
+        // level = 3 - hit_level (解释逻辑同walker_response_to_task)
+        task->walk_ctx.level = 3 - hit_level;
+        task->walk_ctx.base_addr = next_ppn * PAGESIZE;
+        task->walk_ctx.walker_hit_level = hit_level;
+
+        if (hit_level == 3) {
+            task->walk_ctx.vs_l0_spa_ppn = next_ppn;
+        }
+
+        printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_FRONT result (HIT at level=%d, next_ppn=0x%lx, start from level=%d)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+               task->task_id, hit_level, (unsigned long)next_ppn,
+               task->walk_ctx.level);
+        fflush(stdout);
+        return true;
+    }
+
+    task->walk_ctx.walker_hit_level = 0;
+    printf("[t=%llu ns][CONVERT] task_id=%u <- WALKER_FRONT result (MISS)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value()/1000,
+           task->task_id);
+    fflush(stdout);
+    return false;
+}
+
+// ============================================================
 // Convert iommu_task_t to CacheMessage for Walker Cache update
 // ============================================================
 iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {

@@ -41,6 +41,13 @@ void iommu_top::collector_pt_response_thread() {
             
                 if (!is_placeholder) {
                     // 常规CL HIT: 转换响应并直接转发到Forwarder
+                    // [前置] PT HIT直接输出: 先移除walker前置pending表项,
+                    // 后到的前置响应将被丢弃, 防止响应线程触碰已释放的task
+                    if (PTW_WALKER_CACHE_ENABLED && WALKER_FRONT_ENABLED) {
+                        walker_front_mtx.lock();
+                        walker_front_pending.erase(task->task_id);
+                        walker_front_mtx.unlock();
+                    }
                     pt_hit_response_to_task(resp, task);
                     printf("[PT_CACHE] task_id=%u -> HIT regular CL, routing to fwd_fifo (pa=0x%lx)\n",
                            task->task_id, task->pa);

@@ -33,6 +33,10 @@ iommu::CacheMessage task_to_walker_request(iommu_task_t* task);
 // Convert Walker Cache Message response back to iommu_task_t
 void walker_response_to_task(iommu::CacheMessage& resp, iommu_task_t* task);
 
+// [前置] PTW walk init时应用任务携带的前置查询结果(语义同walker_response_to_task):
+// 设置walk_ctx.level/base_addr/vs_l0_spa_ppn/walker_hit_level, 返回是否命中
+bool apply_walker_front_result(iommu_task_t* task);
+
 // Convert iommu_task_t to CacheMessage for Walker Cache update
 iommu::CacheMessage task_to_walker_update(iommu_task_t* task);
 

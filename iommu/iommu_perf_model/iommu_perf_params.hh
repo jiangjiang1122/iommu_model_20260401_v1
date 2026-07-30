@@ -135,6 +135,25 @@ static const bool PTW_WALKER_S2_CACHE_ENABLED = true;
 static const bool PTW_WALKER_S2_CACHE_ENABLED = TEST_CFG_WALKER_CACHE_S2_ENABLED;
 #endif
 
+// [前置] Walker Cache前置查询开关：true=所有输入请求在PT Cache查询发起点同时
+// 查询Walker Cache, 结果随任务透传至PTW直接使用(PTW不再自行查询);
+// false=恢复旧路径(PTW内同步查询), 用于基线A/B回归验证
+#ifndef TEST_CFG_WALKER_FRONT_ENABLED
+static const bool WALKER_FRONT_ENABLED = true;
+#else
+static const bool WALKER_FRONT_ENABLED = TEST_CFG_WALKER_FRONT_ENABLED;
+#endif
+
+// [前置] PTW二次校验开关: 前置查询MISS的任务到达PTW时再查一次Walker Cache
+// (高带宽顺序场景下, 同一页表段的一批任务在首任务walk完成前涌入,
+// 前置结果均为MISS, 到PTW时Walker已被更新可命中; 二次校验恢复基线行为)
+// 前置HIT的任务不二次查询。置0=纯严格前置语义
+#ifndef TEST_CFG_WALKER_FRONT_RECHECK
+static const bool WALKER_FRONT_RECHECK = true;
+#else
+static const bool WALKER_FRONT_RECHECK = TEST_CFG_WALKER_FRONT_RECHECK;
+#endif
+
 // ===================== PT Cache VA去重参数 =====================
 static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能开关（true=启用，false=禁用）
 

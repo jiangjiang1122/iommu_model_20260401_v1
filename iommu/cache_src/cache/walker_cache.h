@@ -110,6 +110,40 @@ public:
     uint64_t get_vs_hit_c1_count() const { return vs_hit_c1_count_; }
     uint64_t get_vs_miss_count() const { return vs_miss_count_; }
 
+    // ============================================================
+    // [多RAM] 三级子表独立分RAM方案接口 (供 cache_subsystem 的
+    // walker_hash_thread / walker_ram_worker_thread / walker_join_thread 使用)
+    //   - 每个子表按本级 raw hash 低 log2(num_rams) 位选 RAM;
+    //   - 子操作原子段(lookup: read_set+compare; update: read_set+compute+write)
+    //     由 RAM worker 消耗, 同 RAM 串行/跨 RAM 并发; hash 1拍由 Hash 线程消耗
+    // ============================================================
+
+    // 计算某级子查询/更新的目标 RAM 组号
+    uint32_t compute_ram_id(uint8_t level, gscid_t gscid, pscid_t pscid,
+                            iova_t addr, bool va_pa_flag, bool stage_flag,
+                            bool sv48_flag, bool x4_mode_flag) const;
+
+    // 单级子表原子段查询 (无wait, ram_latency返回原子段延时, 不含hash)
+    bool lookup_level_ram(uint8_t level, gscid_t gscid, pscid_t pscid,
+                          iova_t va, bool va_pa_flag, bool stage_flag,
+                          bool sv48_flag, bool x4_mode_flag,
+                          WalkerData& out_data, sc_time& ram_latency);
+
+    // 单级子表原子段更新 (无wait; level=1时direct_write, 与旧update路径一致)
+    bool update_level_ram(uint8_t level, gscid_t gscid, pscid_t pscid,
+                          iova_t va, const WalkerData& data,
+                          sc_time& ram_latency);
+
+    // join仲裁后记录VS lookup结果统计 (hit_level: 0=miss,1/2/3)
+    void record_vs_lookup_result(uint8_t hit_level);
+    // hash线程拆分update时记录更新类型统计
+    void record_update_kind(WalkerUpdateKind kind);
+
+    bool sv39_mode() const { return sv39_mode_; }
+    // 三子表统一的RAM分组数(构造时断言三者一致)
+    uint32_t num_rams() const { return num_rams_; }
+    uint32_t ram_fifo_depth() const { return ram_fifo_depth_; }
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -143,6 +177,13 @@ private:
     uint64_t vs_hit_c1_count_ = 0;
     uint64_t vs_miss_count_ = 0;
 
+    // [多RAM] 三子表统一的RAM分组参数(来自cfg, 构造时校验一致)
+    uint32_t num_rams_ = 1;
+    uint32_t ram_fifo_depth_ = 8;
+
+    // 根据level选择子表
+    WalkerSubCache* sub_cache(uint8_t level) const;
+
 };
 
 // Walker 子表: 继承 CacheBase 实现特定散列函数
@@ -171,6 +212,22 @@ public:
     uint32_t invalidate_s2_global();
     UpdateResult update_entry(const WalkerTag& tag, const WalkerData& data,
                               bool direct_write);
+
+    // ============================================================
+    // [多RAM] 原子段接口: 纯功能访问(无wait/无仲裁), 延时由RAM worker消耗
+    //   ram_id = raw_hash & (num_rams-1)
+    //   set    = ram_id * sets_per_ram + ((raw >> log2(num_rams)) & (sets_per_ram-1))
+    // ============================================================
+    void configure_multi_ram(uint32_t num_rams);
+    uint32_t compute_ram_id(const WalkerTag& tag) const;
+    // 原子段查询: ram_latency = read_set + compare (不含hash)
+    bool lookup_ram(const WalkerTag& tag, WalkerData& out_data,
+                    sc_time& ram_latency);
+    // 原子段更新: ram_latency = read_set + compute_index + write_way (不含hash);
+    //   direct_write路径仅write_way。valid=0时跳过(防缓存污染), 返回false
+    bool update_entry_ram(const WalkerTag& tag, const WalkerData& data,
+                          bool direct_write, sc_time& ram_latency);
+
     uint32_t invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
                             bool has_gscid, bool has_pscid, bool has_iova,
                             CacheInvalidateMode mode, sc_time* latency = nullptr);
@@ -184,6 +241,14 @@ protected:
 
 private:
     uint8_t level_;
+
+    // [多RAM] RAM分组参数(参照PTCache: 低位选RAM+连续set区间)
+    uint32_t num_rams_ = 1;
+    uint32_t log2_num_rams_ = 0;
+    uint32_t sets_per_ram_ = 0;
+
+    // [多RAM] 未掩码原始hash(va_seg ^ gscid ^ pscid)
+    uint32_t raw_hash(const WalkerTag& tag) const;
 
     // [S2] 独立的S2 Cache存储阵列，与普通Walker Cache物理隔离
     std::vector<std::vector<CacheLine<WalkerTag, WalkerData>>> s2_cache_array_;

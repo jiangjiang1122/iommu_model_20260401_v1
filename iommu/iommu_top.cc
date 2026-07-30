@@ -479,10 +479,63 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     pt_cache_pending_tasks[task->task_id] = task;
     pt_cache_mtx.unlock();
 
+    // [前置] Walker Cache前置查询: 与PT Cache查询同时发起, 结果由
+    // walker_front_response_thread写回task->walk_ctx.walker_front_*字段,
+    // 随任务透传经去重模块直到PTW直接使用
+    if (PTW_WALKER_CACHE_ENABLED && WALKER_FRONT_ENABLED) {
+        walker_front_mtx.lock();
+        walker_front_pending[task->task_id] = task;
+        walker_front_mtx.unlock();
+        iommu::CacheMessage walker_req = task_to_walker_request(task);
+        walker_req.timestamp = sc_time_stamp();
+        cache_sub.walker_front_request_fifo.write(walker_req);
+    }
+
     // Convert task to CacheMessage and write to cache_sub.pt_request_fifo
     iommu::CacheMessage pt_req = task_to_pt_request(task);
     pt_req.timestamp = sc_time_stamp();  // [STAT] 记录FIFO写入时刻
     cache_sub.pt_request_fifo.write(pt_req);
+}
+
+/**********************************************/
+// walker_front_response_thread - [前置] Walker前置查询响应处理
+// 读walker_front_response_fifo, 按task_id查pending表:
+//   命中: 结果写入walk_ctx.walker_front_*字段, 置valid并通知PTW兜底等待
+//   已移除(PT HIT已直接输出): 丢弃响应, 不触碰task(防use-after-free)
+/**********************************************/
+void iommu_top::walker_front_response_thread() {
+    while (true) {
+        iommu::CacheMessage resp = cache_sub.walker_front_response_fifo.read();
+
+        walker_front_mtx.lock();
+        auto it = walker_front_pending.find(resp.task_id);
+        if (it == walker_front_pending.end()) {
+            walker_front_mtx.unlock();
+            // PT HIT常规CL已直接输出并移除表项: 丢弃前置结果
+            printf("[WALKER_FRONT] task_id=%u response discarded (task already output via PT HIT)\n",
+                   (unsigned)resp.task_id);
+            fflush(stdout);
+            continue;
+        }
+        iommu_task_t* task = it->second;
+        walker_front_pending.erase(it);
+        walker_front_mtx.unlock();
+
+        // 记录前置查询结果到任务信息(一直保存直到输入PTW)
+        task->walk_ctx.walker_front_hit = resp.hit;
+        task->walk_ctx.walker_front_level = resp.hit ? resp.walker_level : 0;
+        task->walk_ctx.walker_front_next_ppn = resp.hit ? resp.walker_data.next_ppn : 0;
+        task->walk_ctx.walker_front_valid = true;
+
+        printf("[WALKER_FRONT] task_id=%u result recorded: hit=%d, level=%u, next_ppn=0x%lx\n",
+               task->task_id, resp.hit ? 1 : 0,
+               task->walk_ctx.walker_front_level,
+               (unsigned long)task->walk_ctx.walker_front_next_ppn);
+        fflush(stdout);
+
+        // 通知PTW输入侧的兜底等待
+        walker_front_ready_event.notify(SC_ZERO_TIME);
+    }
 }
 
 /**********************************************/
@@ -602,6 +655,9 @@ void iommu_top::print_cache_statistics() {
 
     // [dedup多RAM] 去重Cache 多 RAM 统计报告
     cache_sub.print_dedup_multi_ram_report();
+    
+        // [walker多RAM] Walker Cache 多 RAM 统计报告
+        cache_sub.print_walker_multi_ram_report();
 
     // VA Dedup Statistics
     printf("========== VA Dedup Statistics ==========\n");

@@ -57,15 +57,21 @@
     "base_sets": 64,
     "ptw_c1": {
       "num_ways": 1,
-      "replacement": "none"
+      "replacement": "none",
+      "num_rams": 4,
+      "ram_fifo_depth": 8
     },
     "ptw_c2": {
       "num_ways": 2,
-      "replacement": "plru"
+      "replacement": "plru",
+      "num_rams": 4,
+      "ram_fifo_depth": 8
     },
     "ptw_c3": {
       "num_ways": 4,
-      "replacement": "plru"
+      "replacement": "plru",
+      "num_rams": 4,
+      "ram_fifo_depth": 8
     }
   },
 

@@ -505,6 +505,14 @@ struct CacheMessage {
     bool            walker_x4_mode = false;
     bool            walker_is_s2_lookup = false;  // [S2] S2 Cache查询/更新请求标志
 
+    // [前置/多RAM] Walker 多RAM子操作路由字段
+    //   walker_origin: 响应路由 0=walker_response_fifo(PTW S2/旧路径), 1=walker_front_response_fifo(前置)
+    //   walker_sub_level: 子操作目标子表级(1/2/3), 0=非子操作
+    //   walker_sub_expected: lookup拆分的子查询数(join收齐条件)
+    uint8_t         walker_origin = 0;
+    uint8_t         walker_sub_level = 0;
+    uint8_t         walker_sub_expected = 0;
+
     // Walker update 请求类型和各 level 独立 payload。 更新输入
     WalkerUpdateKind walker_update_kind = WalkerUpdateKind::PTWC_3;
     WalkerData      walker_data_ptwc1{};

@@ -123,6 +123,13 @@ public:
     std::map<uint32_t, iommu_task_t*> pt_cache_pending_tasks;  // Save original task for PT lookup
     sc_mutex pt_cache_mtx;
 
+    // ===================== [前置] Walker Front Pending Tasks =====================
+    // 前置查询待响应任务表: configure_and_route注册, 响应线程写回后移除;
+    // PT HIT直接输出路径会先移除表项(防响应线程触碰已释放的task)
+    std::map<uint32_t, iommu_task_t*> walker_front_pending;
+    sc_mutex walker_front_mtx;
+    sc_event walker_front_ready_event;   // 前置结果写回通知(PTW兜底等待用)
+
     // ===================== VA Dedup Table (PT Cache VA去重) =====================
     // ... 保留旧去重代码（暂时不删除，后续清理） ...
     struct va_dedup_key_t {
@@ -390,6 +397,10 @@ public:
     void collector_pt_response_thread();  // New: handle PT cache responses
     void collector_xdtw_response_thread();
 
+    // [前置] Walker Cache前置查询响应线程: 读walker_front_response_fifo,
+    // 将结果写入task->walk_ctx.walker_front_*字段并通知PTW
+    void walker_front_response_thread();
+
     // xDTW (2 threads)
     void xdtw_req_thread();
     void xdtw_rsp_thread();
@@ -607,6 +618,7 @@ public:
         SC_THREAD(collector_cache_lookup_result_thread);
         SC_THREAD(collector_pt_response_thread);  // New: handle PT cache hit/miss responses
         SC_THREAD(collector_xdtw_response_thread);
+        SC_THREAD(walker_front_response_thread);   // [前置] Walker前置查询响应处理
         SC_THREAD(xdtw_req_thread);
         SC_THREAD(xdtw_rsp_thread);
         // SC_THREAD(pt_cache_query_thread);    // Replaced by CacheSubsystem

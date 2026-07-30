@@ -35,11 +35,150 @@ void WalkerSubCache::init_s2_cache_array() {
 
 uint32_t WalkerSubCache::hash_function(const WalkerTag& tag) const {
     // LSB 低位有效策略: va_segment[5:0] XOR gscid[5:0] XOR pscid[5:0]
-    uint32_t mask = num_sets_ - 1;
-    uint32_t va_low = static_cast<uint32_t>(tag.va_segment) & mask;
-    uint32_t gscid_low = static_cast<uint32_t>(tag.gscid) & mask;
-    uint32_t pscid_low = tag.pscid & mask;
-    return (va_low ^ gscid_low ^ pscid_low) & mask;
+    // [多RAM] 新映射: 低 log2(num_rams) 位选 RAM, 高位作 RAM 内索引
+    // global_set = ram_id * sets_per_ram + set_in_ram; num_rams=1 时退化原逻辑
+    uint32_t raw = raw_hash(tag);
+    if (num_rams_ <= 1) {
+        return raw & (num_sets_ - 1);
+    }
+    uint32_t ram_id = raw & (num_rams_ - 1);
+    uint32_t set_in_ram = (raw >> log2_num_rams_) & (sets_per_ram_ - 1);
+    return ram_id * sets_per_ram_ + set_in_ram;
+}
+
+// [多RAM] 未掩码原始hash(原 hash_function 去掉 & mask)
+uint32_t WalkerSubCache::raw_hash(const WalkerTag& tag) const {
+    uint32_t va_low = static_cast<uint32_t>(tag.va_segment);
+    uint32_t gscid_low = static_cast<uint32_t>(tag.gscid);
+    uint32_t pscid_low = tag.pscid;
+    return va_low ^ gscid_low ^ pscid_low;
+}
+
+// [多RAM] 初始化RAM分组参数: num_rams必须为2的幂且整除num_sets
+void WalkerSubCache::configure_multi_ram(uint32_t num_rams) {
+    num_rams_ = (num_rams == 0) ? 1 : num_rams;
+    assert((num_rams_ & (num_rams_ - 1)) == 0 && "walker num_rams must be power of 2");
+    assert(num_sets_ % num_rams_ == 0 && "walker num_rams must divide num_sets");
+    sets_per_ram_ = num_sets_ / num_rams_;
+    log2_num_rams_ = 0;
+    for (uint32_t v = num_rams_; v > 1; v >>= 1) log2_num_rams_++;
+    printf("[WALKER_CACHE] %s Multi-RAM config: num_rams=%u, sets_per_ram=%u\n",
+           cache_name_.c_str(), num_rams_, sets_per_ram_);
+}
+
+uint32_t WalkerSubCache::compute_ram_id(const WalkerTag& tag) const {
+    if (num_rams_ <= 1) return 0;
+    return raw_hash(tag) & (num_rams_ - 1);
+}
+
+// [多RAM] 原子段查询: 纯功能(无wait/无仲裁), 同RAM串行由单worker线程保证
+// ram_latency = read_set + compare (不含hash, hash已由Hash线程消耗)
+bool WalkerSubCache::lookup_ram(const WalkerTag& tag, WalkerData& out_data,
+                                sc_time& ram_latency) {
+    uint32_t set = hash_function(tag);
+    assert(set < num_sets_);
+
+    stats_.record_access(cache_name_);
+    ram_latency = cycles_to_time(cfg_.read_set_latency_cycles +
+                                 cfg_.compare_latency_cycles);
+    // [STAT] 口径与旧版本一致: 记录含hash的完整操作延时
+    const double op_latency_ns =
+        (cycles_to_time(cfg_.hash_latency_cycles) + ram_latency).to_seconds() * 1e9;
+
+    int way = find_way(set, tag);
+    if (way >= 0) {
+        out_data = cache_array_[set][way].data;
+        if (replacement_) replacement_->access(set, way);
+        if (cache_array_[set][way].from_prefetch) {
+            stats_.record_prefetch_hit(cache_name_);
+            cache_array_[set][way].from_prefetch = false;
+        }
+        cache_array_[set][way].access_count++;
+        stats_.record_hit(cache_name_);
+        stats_.record_lookup(cache_name_);
+        stats_.record_latency(cache_name_, op_latency_ns);
+        return true;
+    }
+
+    stats_.record_miss(cache_name_);
+    stats_.record_lookup(cache_name_);
+    stats_.record_latency(cache_name_, op_latency_ns);
+    return false;
+}
+
+// [多RAM] 原子段更新: 纯功能(无wait/无仲裁), 逻辑与 update_entry 一致
+bool WalkerSubCache::update_entry_ram(const WalkerTag& tag,
+                                      const WalkerData& data,
+                                      bool direct_write,
+                                      sc_time& ram_latency) {
+    // 跳过无效数据的缓存写入, 防止缓存污染(与 update_entry 一致)
+    if (!data.reserved.valid) {
+        ram_latency = SC_ZERO_TIME;
+        return false;
+    }
+
+    const uint32_t set = hash_function(tag);
+    assert(set < num_sets_);
+
+    if (direct_write) {
+        const uint32_t way = 0;
+        if (cache_array_[set][way].valid && !(cache_array_[set][way].tag == tag)) {
+            stats_.record_eviction(cache_name_);
+        }
+        cache_array_[set][way].fill(tag, data, false);
+        if (replacement_) replacement_->access(set, way);
+        ram_latency = cycles_to_time(cfg_.write_way_latency_cycles);
+        stats_.record_latency(cache_name_,
+            (cycles_to_time(cfg_.hash_latency_cycles) + ram_latency).to_seconds() * 1e9);
+        return true;
+    }
+
+    const uint32_t base_cycles = cfg_.read_set_latency_cycles +
+                                 cfg_.write_way_latency_cycles;
+
+    const int existing_way = find_way(set, tag);
+    if (existing_way >= 0) {
+        cache_array_[set][existing_way].data = data;
+        cache_array_[set][existing_way].valid = true;
+        cache_array_[set][existing_way].from_prefetch = false;
+        cache_array_[set][existing_way].access_count = 0;
+        if (replacement_) replacement_->access(set, static_cast<uint32_t>(existing_way));
+        ram_latency = cycles_to_time(base_cycles + cfg_.fill_compute_index_hit_cycles);
+        stats_.record_latency(cache_name_,
+            (cycles_to_time(cfg_.hash_latency_cycles) + ram_latency).to_seconds() * 1e9);
+        return true;
+    }
+
+    const int empty_way = find_empty_way(set);
+    if (empty_way >= 0) {
+        cache_array_[set][empty_way].fill(tag, data, false);
+        if (replacement_) replacement_->access(set, static_cast<uint32_t>(empty_way));
+        ram_latency = cycles_to_time(base_cycles + cfg_.fill_compute_index_invalid_cycles);
+        stats_.record_latency(cache_name_,
+            (cycles_to_time(cfg_.hash_latency_cycles) + ram_latency).to_seconds() * 1e9);
+        return true;
+    }
+
+    uint32_t victim_way = 0;
+    if (replacement_) {
+        victim_way = replacement_->find_victim(set);
+    }
+    if (cache_array_[set][victim_way].valid) {
+        stats_.record_eviction(cache_name_);
+    }
+    cache_array_[set][victim_way].fill(tag, data, false);
+    if (replacement_) {
+        auto* srrip = dynamic_cast<SRRIPPolicy*>(replacement_.get());
+        if (srrip) {
+            srrip->on_insert(set, victim_way);
+        } else {
+            replacement_->access(set, victim_way);
+        }
+    }
+    ram_latency = cycles_to_time(base_cycles + cfg_.fill_compute_index_replacement_cycles);
+    stats_.record_latency(cache_name_,
+        (cycles_to_time(cfg_.hash_latency_cycles) + ram_latency).to_seconds() * 1e9);
+    return true;
 }
 
 bool WalkerSubCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
@@ -377,6 +516,16 @@ WalkerCache::WalkerCache(sc_module_name name,
     ptw_c3_ = std::make_unique<WalkerSubCache>(
         "ptw_c3", cfg3, stats, "walker_ptw_c3", 3);
 
+    // [多RAM] 三子表独立分RAM: 各自按本级set哈希低位分组;
+    // 要求三子表num_rams一致(简化subsystem的RAM worker拓扑)
+    assert(cfg1.num_rams == cfg2.num_rams && cfg2.num_rams == cfg3.num_rams &&
+           "walker ptw_c1/c2/c3 num_rams must be identical");
+    ptw_c1_->configure_multi_ram(cfg1.num_rams);
+    ptw_c2_->configure_multi_ram(cfg2.num_rams);
+    ptw_c3_->configure_multi_ram(cfg3.num_rams);
+    num_rams_ = (cfg3.num_rams == 0) ? 1 : cfg3.num_rams;
+    ram_fifo_depth_ = cfg3.ram_fifo_depth;
+
     // 上电主动无效化所有条目（确保初始状态干净，避免残留数据污染）
     uint32_t cleared = 0;
     cleared += ptw_c1_->invalidate_global(nullptr);
@@ -387,6 +536,101 @@ WalkerCache::WalkerCache(sc_module_name name,
 }
 
 WalkerCache::~WalkerCache() = default;
+
+// [多RAM] 根据level选择子表
+WalkerSubCache* WalkerCache::sub_cache(uint8_t level) const {
+    switch (level) {
+        case 1: return ptw_c1_.get();
+        case 2: return ptw_c2_.get();
+        case 3: return ptw_c3_.get();
+        default: return nullptr;
+    }
+}
+
+// [多RAM] 计算某级子操作的目标RAM组号(无延时)
+uint32_t WalkerCache::compute_ram_id(uint8_t level, gscid_t gscid,
+                                     pscid_t pscid, iova_t addr,
+                                     bool va_pa_flag, bool stage_flag,
+                                     bool sv48_flag, bool x4_mode_flag) const {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) return 0;
+    WalkerTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    tag.level = level;
+    tag.va_pa_flag = va_pa_flag;
+    tag.stage_flag = stage_flag;
+    tag.sv48_flag = sv48_flag;
+    tag.x4_mode_flag = x4_mode_flag;
+    tag.va_segment = extract_addr_segment(addr, level, va_pa_flag,
+                                          sv48_flag, x4_mode_flag);
+    return sub->compute_ram_id(tag);
+}
+
+// [多RAM] 单级子表原子段查询(无wait), RAM worker消耗 ram_latency
+bool WalkerCache::lookup_level_ram(uint8_t level, gscid_t gscid,
+                                   pscid_t pscid, iova_t va,
+                                   bool va_pa_flag, bool stage_flag,
+                                   bool sv48_flag, bool x4_mode_flag,
+                                   WalkerData& out_data, sc_time& ram_latency) {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) { ram_latency = SC_ZERO_TIME; return false; }
+    WalkerTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    tag.level = level;
+    tag.va_pa_flag = va_pa_flag;
+    tag.stage_flag = stage_flag;
+    tag.sv48_flag = sv48_flag;
+    tag.x4_mode_flag = x4_mode_flag;
+    tag.is_s2 = false;
+    tag.va_segment = extract_addr_segment(va, level, va_pa_flag,
+                                          sv48_flag, x4_mode_flag);
+    return sub->lookup_ram(tag, out_data, ram_latency);
+}
+
+// [多RAM] 单级子表原子段更新(无wait); level=1 direct_write(直接映射)
+bool WalkerCache::update_level_ram(uint8_t level, gscid_t gscid,
+                                   pscid_t pscid, iova_t va,
+                                   const WalkerData& data,
+                                   sc_time& ram_latency) {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) { ram_latency = SC_ZERO_TIME; return false; }
+    WalkerTag tag;
+    tag.gscid = gscid;
+    tag.pscid = pscid;
+    tag.level = level;
+    tag.va_pa_flag = walker_va_pa_flag(data);
+    tag.stage_flag = walker_stage_flag(data);
+    tag.sv48_flag = walker_sv48_flag(data);
+    tag.x4_mode_flag = walker_x4_mode_flag(data);
+    tag.is_s2 = false;
+    tag.va_segment = extract_addr_segment(
+        va, level, tag.va_pa_flag, tag.sv48_flag, tag.x4_mode_flag);
+    return sub->update_entry_ram(tag, data, level == 1, ram_latency);
+}
+
+// [多RAM] join仲裁后记录VS lookup统计(与旧lookup()口径一致)
+void WalkerCache::record_vs_lookup_result(uint8_t hit_level) {
+    vs_lookup_count_++;
+    switch (hit_level) {
+        case 3: vs_hit_c3_count_++; break;
+        case 2: vs_hit_c2_count_++; break;
+        case 1: vs_hit_c1_count_++; break;
+        default: vs_miss_count_++; break;
+    }
+}
+
+// [多RAM] hash线程拆分update时记录更新类型统计(与旧update()口径一致)
+void WalkerCache::record_update_kind(WalkerUpdateKind kind) {
+    switch (kind) {
+        case WalkerUpdateKind::PTWC_1_2_3: update_ptwc_123_count_++; break;
+        case WalkerUpdateKind::PTWC_2_3:   update_ptwc_23_count_++;  break;
+        case WalkerUpdateKind::PTWC_3:     update_ptwc_3_count_++;   break;
+        case WalkerUpdateKind::NONE:       update_none_count_++;     break;
+        default: break;
+    }
+}
 
 bool WalkerCache::lookup(gscid_t gscid, pscid_t pscid, iova_t va,
                          bool va_pa_flag, bool stage_flag,
