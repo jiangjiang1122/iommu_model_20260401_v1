@@ -60,84 +60,12 @@ void PTCache::fill_pt(gscid_t gscid, pscid_t pscid, iova_t iova,
     fill(tag, stored_data, from_prefetch);
 }
 
-uint32_t PTCache::invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
-                                 bool has_gscid, bool has_pscid, bool has_iova,
-                                 CacheInvalidateMode mode, sc_time* latency) {
-    auto predicate = [=](const PTTag& tag, const PTData&) {
-        if (has_gscid && tag.gscid != gscid) return false;
-        if (has_pscid && tag.pscid != pscid) return false;
-        if (has_iova && tag.iova != align_iova(iova, PageSize::PAGE_4K)) return false;
-        // VMA 失效仅影响包含第一阶段的翻译
-        if (tag.stage == TransStage::STAGE2_ONLY) return false;
-        return true;
-    };
-
-    if (mode == CacheInvalidateMode::GLOBAL) {
-        return invalidate_all_entries(latency);
-    }
-
-    if (mode == CacheInvalidateMode::PRECISE && has_gscid && has_pscid && has_iova) {
-        PTTag hash_tag;
-        hash_tag.gscid = gscid;
-        hash_tag.pscid = pscid;
-        hash_tag.iova = align_iova(iova, PageSize::PAGE_4K);
-        hash_tag.stage = TransStage::STAGE1_AND_2;
-        return invalidate_precise_by_line(
-            hash_tag,
-            predicate,
-            [](const PTTag&, const PTData&) {},
-            latency);
-    }
-
-    return invalidate_scan_by_line(
-        predicate,
-        [](const PTTag&, const PTData&) {},
-        latency);
-}
-
-uint32_t PTCache::invalidate_gvma(gscid_t gscid, iova_t gpa,
-                                  bool has_gscid, bool has_gpa,
-                                  CacheInvalidateMode mode, sc_time* latency) {
-    auto predicate = [=](const PTTag& tag, const PTData&) {
-        if (has_gscid && tag.gscid != gscid) return false;
-        if (has_gpa && tag.iova != align_iova(gpa, PageSize::PAGE_4K)) return false;
-        // GVMA 失效仅影响包含第二阶段的翻译
-        if (tag.stage == TransStage::STAGE1_ONLY) return false;
-        return true;
-    };
-
-    if (mode == CacheInvalidateMode::GLOBAL) {
-        return invalidate_all_entries(latency);
-    }
-
-    return invalidate_scan_by_line(
-        predicate,
-        [](const PTTag&, const PTData&) {},
-        latency);
-}
-
-uint32_t PTCache::invalidate_by_gscid(gscid_t gscid, sc_time* latency) {
-    return invalidate_scan_by_line(
-        [gscid](const PTTag& tag, const PTData&) {
-            return tag.gscid == gscid;
-        },
-        [](const PTTag&, const PTData&) {},
-        latency);
-}
-
-uint32_t PTCache::invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                            sc_time* latency) {
-    return invalidate_scan_by_line(
-        [gscid, pscid](const PTTag& tag, const PTData&) {
-            return tag.gscid == gscid && tag.pscid == pscid;
-        },
-        [](const PTTag&, const PTData&) {},
-        latency);
-}
-
-uint32_t PTCache::invalidate_global(sc_time* latency) {
-    return invalidate_all_entries(latency);
-}
+// [失效] 旧单体失效接口 invalidate_vma/invalidate_gvma/invalidate_by_gscid/
+// invalidate_by_gscid_pscid/invalidate_global 已删除:
+// 它们直接调用 invalidate_scan_by_line/invalidate_all_entries, 绕过了多RAM
+// 原子段拆分与 LIB 延迟失效语义。现由 CacheSubsystem::dispatch_pt_invalidate
+// 拆分为子失效, 经 invalidate_set_ram / invalidate_ram_range / lazy_sweep_ram
+// 在各 RAM worker 内串行执行。
 
 uint32_t PTCache::hash_function(const PTTag& tag) const {
     return set_from_raw(raw_hash(tag));

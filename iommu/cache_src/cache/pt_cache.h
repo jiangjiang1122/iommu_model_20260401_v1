@@ -97,24 +97,10 @@ public:
     bool line_matches_inval(const PTTag& tag, const PTData& data,
                             const CacheMessage& cmd) const;
 
-    // 失效操作
-    // IOTINVAL.VMA: 第一阶段页表失效
-    uint32_t invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
-                            bool has_gscid, bool has_pscid, bool has_iova,
-                            CacheInvalidateMode mode = CacheInvalidateMode::SCAN,
-                            sc_time* latency = nullptr);
-
-    // IOTINVAL.GVMA: 第二阶段页表失效
-    uint32_t invalidate_gvma(gscid_t gscid, iova_t gpa,
-                             bool has_gscid, bool has_gpa,
-                             CacheInvalidateMode mode = CacheInvalidateMode::SCAN,
-                             sc_time* latency = nullptr);
-
-    // 按 gscid/pscid 批量失效 (级联用)
-    uint32_t invalidate_by_gscid(gscid_t gscid, sc_time* latency = nullptr);
-    uint32_t invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                       sc_time* latency = nullptr);
-    uint32_t invalidate_global(sc_time* latency = nullptr);
+    // [失效] 旧的单体失效接口(invalidate_vma/gvma/by_gscid/by_gscid_pscid/global)
+    // 已删除: 它们绕过多RAM原子段与 LIB 语义, 全部由上述
+    // invalidate_set_ram / invalidate_ram_range / lazy_sweep_ram 取代;
+    // GLOBAL 模式通过 invalidate_ram_range(cmd.invalidate_mode==GLOBAL) 实现。
 
 protected:
     uint32_t hash_function(const PTTag& tag) const override;

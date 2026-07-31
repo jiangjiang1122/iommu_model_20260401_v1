@@ -72,11 +72,12 @@ public:
 
 
     // invalidate 请求入口：外部模块把定点失效请求送到对应 cache。
+    // [MSI] 无 msi_invalidate_fifo: 当前性能模型不实现 MSI 处理路径,
+    //       因此不实现 MSIPT Cache 失效。
     sc_fifo<CacheMessage> dc_invalidate_fifo;
     sc_fifo<CacheMessage> pc_invalidate_fifo;
     sc_fifo<CacheMessage> pt_invalidate_fifo;
     sc_fifo<CacheMessage> walker_invalidate_fifo;
-    sc_fifo<CacheMessage> msi_invalidate_fifo;
 
     // 全局 invalidation pipeline：走失效控制器的专用请求/响应通道。
     sc_fifo<CacheMessage> invalidation_request_fifo;
@@ -131,10 +132,8 @@ public:
     // [walker多RAM] Walker Cache 多 RAM 统计报告: Hash单元/每组RAM利用率/前置查询计数
     void print_walker_multi_ram_report() const;
 
-    // 级联失效: DC/PC 失效后产生关联失效消息，推入 PT/Walker/MSIPT 的失效 FIFO
-    void enqueue_cascade_invalidations(gscid_t gscid, pscid_t pscid,
-                                       device_id_t device_id, bool has_gscid,
-                                       bool has_pscid, bool include_msi);
+    // [失效] enqueue_cascade_invalidations 已删除: 按 spec V1.0.1,
+    // IODIR 只失效 DDT/PDT 目录缓存; DC→PC 关联失效由失效 pipeline 统一编排。
 
     // 获取配置
     const GlobalConfig& config() const { return cfg_; }
@@ -175,7 +174,6 @@ private:
     sc_fifo<CacheMessage> pc_invalidate_response_fifo;
     sc_fifo<CacheMessage> pt_invalidate_response_fifo;
     sc_fifo<CacheMessage> walker_invalidate_response_fifo;
-    sc_fifo<CacheMessage> msi_invalidate_response_fifo;
 
     // [失效] DC/PC/MSI 合并为单一调度线程: 每轮先查 invalidate FIFO(最高优先),
     //   再处理 update/lookup; 单线程串行消除 lookup/invalidate 对同一阵列的竞态。
@@ -220,9 +218,8 @@ private:
     CacheMessage execute_msi_update_request(const CacheMessage& req);
     CacheMessage execute_dc_invalidate_request(const CacheMessage& req);
     CacheMessage execute_pc_invalidate_request(const CacheMessage& req);
-    CacheMessage execute_pt_invalidate_request(const CacheMessage& req);
-    CacheMessage execute_walker_invalidate_request(const CacheMessage& req);
-    CacheMessage execute_msi_invalidate_request(const CacheMessage& req);
+    // [失效] execute_pt/walker_invalidate_request 已删除(由 dispatch_* 取代);
+    // [MSI] execute_msi_invalidate_request 已删除(不实现 MSI 失效)
     void record_task_completion(const std::string& cache_name,
                                 const sc_time& start_time,
                                 const sc_time& end_time);

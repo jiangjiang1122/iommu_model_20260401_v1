@@ -929,7 +929,7 @@ int8_t RP_Module::check_exp_pq_rec(iommu_top *iommu, uint32_t DID, uint32_t PID,
 }
 void RP_Module::iotinval(
     iommu_top *iommu,
-    uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address) {
+    uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address, uint8_t NL) {
     command_t cmd;
     cqb_t cqb;
     cqt_t cqt;
@@ -944,6 +944,7 @@ void RP_Module::iotinval(
     cmd.iotinval.gv = GV;
     cmd.iotinval.av = AV;
     cmd.iotinval.pscv = PSCV;
+    cmd.iotinval.nl = NL;   // [失效] 非叶PTE失效扩展位(需 capabilities.NL=1)
     cmd.iotinval.gscid = GSCID;
     cmd.iotinval.pscid = PSCID;
     cmd.iotinval.addr_63_12 = address / PAGESIZE;
@@ -1063,4 +1064,167 @@ void RP_Module::iofence(
     write_register(&iommu->iommu_inst, CQT_OFFSET, 4, cqt.raw);
     process_commands(&iommu->iommu_inst);
     return;
+}
+
+// ============================================================
+// [CPU侧] RISC-V hart 侧 Cache/TLB 失效指令行为建模
+//
+// 关键规范语义(本组方法的存在意义):
+//   SFENCE.VMA / SINVAL.VMA 只失效执行该指令的 hart 的地址转换缓存,
+//   **不失效 IOMMU 的 IOATC**。因此 OS 修改被 DMA 使用的页表后, 除了
+//   CPU 侧维护序列, 还必须经 IOMMU 命令队列下发 IOTINVAL.VMA/GVMA。
+//   测试用例通过"只做 CPU 侧序列 -> IOMMU 仍命中"来验证这一隔离性。
+//
+// 建模口径: 本平台无 CPU core, 且页表由 write_memory_test_rp 直写 DDR,
+//   故这些指令的数据搬移语义为空操作; 保留 计数 + 仿真时间推进 + 日志,
+//   以在时间轴与统计上体现 OS 维护开销。
+// ============================================================
+
+void RP_Module::cpu_fence_i() {
+    cpu_stats.fence_i++;
+    printf("[t=%llu ns][CPU_INSTR] FENCE.I : flush local I-cache + refetch pipeline "
+           "(no effect on IOMMU IOATC)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_sfence_vma(uint64_t addr, uint32_t asid) {
+    cpu_stats.sfence_vma++;
+    if (addr == 0 && asid == 0) {
+        printf("[t=%llu ns][CPU_INSTR] SFENCE.VMA x0,x0 : invalidate ALL local TLB entries "
+               "(IOMMU IOATC NOT affected)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    } else if (addr != 0 && asid == 0) {
+        printf("[t=%llu ns][CPU_INSTR] SFENCE.VMA addr=0x%lx : invalidate local TLB for VA "
+               "(IOMMU IOATC NOT affected)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+               (unsigned long)addr);
+    } else if (addr == 0 && asid != 0) {
+        printf("[t=%llu ns][CPU_INSTR] SFENCE.VMA asid=%u : invalidate local TLB for ASID "
+               "(IOMMU IOATC NOT affected)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value() / 1000, asid);
+    } else {
+        printf("[t=%llu ns][CPU_INSTR] SFENCE.VMA addr=0x%lx asid=%u : invalidate local TLB "
+               "(IOMMU IOATC NOT affected)\n",
+               (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+               (unsigned long)addr, asid);
+    }
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_sfence_w_inval() {
+    cpu_stats.sfence_w_inval++;
+    printf("[t=%llu ns][CPU_INSTR] SFENCE.W.INVAL : order prior writes before SINVAL sequence\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_sinval_vma(uint64_t addr, uint32_t asid) {
+    cpu_stats.sinval_vma++;
+    printf("[t=%llu ns][CPU_INSTR] SINVAL.VMA addr=0x%lx asid=%u : invalidate local TLB "
+           "(NO ordering guarantee; must be fenced; IOMMU IOATC NOT affected)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           (unsigned long)addr, asid);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_sfence_inval_ir() {
+    cpu_stats.sfence_inval_ir++;
+    printf("[t=%llu ns][CPU_INSTR] SFENCE.INVAL.IR : order SINVAL sequence before "
+           "subsequent implicit reads\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_cbo_clean(uint64_t addr) {
+    const uint64_t blk = addr & ~(CPU_CACHE_BLOCK_SIZE - 1);
+    cpu_stats.cbo_clean++;
+    cpu_stats.blocks_processed++;
+    printf("[t=%llu ns][CPU_INSTR] CBO.CLEAN blk=0x%lx (size=%lu) : writeback dirty data, "
+           "block stays valid\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           (unsigned long)blk, (unsigned long)CPU_CACHE_BLOCK_SIZE);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_cbo_flush(uint64_t addr) {
+    const uint64_t blk = addr & ~(CPU_CACHE_BLOCK_SIZE - 1);
+    cpu_stats.cbo_flush++;
+    cpu_stats.blocks_processed++;
+    printf("[t=%llu ns][CPU_INSTR] CBO.FLUSH blk=0x%lx (size=%lu) : atomic Clean+Inval "
+           "(data now visible to IOMMU)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           (unsigned long)blk, (unsigned long)CPU_CACHE_BLOCK_SIZE);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_cbo_inval(uint64_t addr) {
+    const uint64_t blk = addr & ~(CPU_CACHE_BLOCK_SIZE - 1);
+    cpu_stats.cbo_inval++;
+    cpu_stats.blocks_processed++;
+    printf("[t=%llu ns][CPU_INSTR] CBO.INVAL blk=0x%lx (size=%lu) : drop all copies "
+           "in coherence domain (no writeback)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           (unsigned long)blk, (unsigned long)CPU_CACHE_BLOCK_SIZE);
+    fflush(stdout);
+    wait(cpu_instr_latency_ns, SC_NS);
+}
+
+void RP_Module::cpu_cbo_flush_range(uint64_t addr, uint64_t len) {
+    if (len == 0) return;
+    const uint64_t first = addr & ~(CPU_CACHE_BLOCK_SIZE - 1);
+    const uint64_t last  = (addr + len - 1) & ~(CPU_CACHE_BLOCK_SIZE - 1);
+    const uint64_t nblk  = (last - first) / CPU_CACHE_BLOCK_SIZE + 1;
+    printf("[t=%llu ns][CPU_INSTR] CBO.FLUSH range [0x%lx, 0x%lx) -> %lu blocks\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           (unsigned long)addr, (unsigned long)(addr + len), (unsigned long)nblk);
+    fflush(stdout);
+    for (uint64_t b = first; b <= last; b += CPU_CACHE_BLOCK_SIZE) {
+        cpu_stats.cbo_flush++;
+        cpu_stats.blocks_processed++;
+        wait(cpu_instr_latency_ns, SC_NS);
+    }
+}
+
+void RP_Module::cpu_pagetable_update_sequence(uint64_t pt_addr, uint64_t pt_len,
+                                              uint32_t asid, bool with_fence_i) {
+    printf("\n[t=%llu ns][CPU_INSTR] ===== OS page-table update sequence (CPU side) =====\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    fflush(stdout);
+    // 1) 把页表所在 Cache 块回写并失效, 确保 IOMMU 的隐式读能看到新页表
+    cpu_cbo_flush_range(pt_addr, pt_len);
+    // 2) 失效本 hart TLB(按 ASID; asid=0 表示全部)
+    cpu_sfence_vma(0, asid);
+    // 3) 若页表变更影响可执行页, 还需 FENCE.I
+    if (with_fence_i) cpu_fence_i();
+    printf("[t=%llu ns][CPU_INSTR] ===== CPU side done. NOTE: IOMMU IOATC still holds "
+           "stale entries until IOTINVAL is issued =====\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000);
+    fflush(stdout);
+}
+
+void RP_Module::print_cpu_instr_stats() {
+    printf("\n========== CPU-side Instruction Stats (modeled) ==========\n");
+    printf("  Cache block size:   %lu B (software-discovered, CBO.* granularity)\n",
+           (unsigned long)CPU_CACHE_BLOCK_SIZE);
+    printf("  Instr latency:      %.1f ns each (modeled)\n", cpu_instr_latency_ns);
+    printf("  ---\n");
+    printf("  FENCE.I:            %lu\n", (unsigned long)cpu_stats.fence_i);
+    printf("  SFENCE.VMA:         %lu\n", (unsigned long)cpu_stats.sfence_vma);
+    printf("  SFENCE.W.INVAL:     %lu\n", (unsigned long)cpu_stats.sfence_w_inval);
+    printf("  SINVAL.VMA:         %lu\n", (unsigned long)cpu_stats.sinval_vma);
+    printf("  SFENCE.INVAL.IR:    %lu\n", (unsigned long)cpu_stats.sfence_inval_ir);
+    printf("  CBO.CLEAN:          %lu\n", (unsigned long)cpu_stats.cbo_clean);
+    printf("  CBO.FLUSH:          %lu\n", (unsigned long)cpu_stats.cbo_flush);
+    printf("  CBO.INVAL:          %lu\n", (unsigned long)cpu_stats.cbo_inval);
+    printf("  Blocks processed:   %lu\n", (unsigned long)cpu_stats.blocks_processed);
+    printf("==========================================================\n");
+    fflush(stdout);
 }

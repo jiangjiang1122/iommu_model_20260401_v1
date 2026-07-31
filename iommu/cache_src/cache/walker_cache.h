@@ -65,24 +65,11 @@ public:
                            const WalkerData& ptwc2_data,
                            const WalkerData& ptwc3_data);
 
-    // 按 gscid 失效所有子表
-    uint32_t invalidate_by_gscid(gscid_t gscid, sc_time* latency = nullptr);
-
-    // 按 gscid + pscid 失效所有子表
-    uint32_t invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                       sc_time* latency = nullptr);
-
-    // 精确失效 (IOTINVAL.VMA 关联)
-    uint32_t invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
-                            bool has_gscid, bool has_pscid, bool has_iova,
-                            CacheInvalidateMode mode = CacheInvalidateMode::SCAN,
-                            sc_time* latency = nullptr);
-
-    // GVMA 关联失效
-    uint32_t invalidate_gvma(gscid_t gscid, bool has_gscid,
-                             CacheInvalidateMode mode = CacheInvalidateMode::SCAN,
-                             sc_time* latency = nullptr);
-    uint32_t invalidate_global(sc_time* latency = nullptr);
+    // 按 gscid 失效所有子表 —— [失效] 已删除(死代码)
+    // 旧的 invalidate_by_gscid / invalidate_by_gscid_pscid / invalidate_vma /
+    // invalidate_gvma / invalidate_global 绕过多RAM原子段与 LIB 语义,
+    // 由 CacheSubsystem::dispatch_walker_invalidate 拆分子失效后经
+    // invalidate_set_ram / invalidate_ram_range / lazy_sweep_ram 执行。
 
     // 设置时钟周期
     void set_clock_period(const sc_time& clk);
@@ -237,8 +224,7 @@ public:
     };
     // [S2] S2 Cache子表更新: 使用独立的s2_cache_array_
     UpdateResult update_entry_s2(const WalkerTag& tag, const WalkerData& data);
-    // [S2] S2 Cache失效
-    uint32_t invalidate_s2_by_gscid(gscid_t gscid);
+    // [S2] S2 Cache失效: 全局(供 invalidate_global 复用)
     uint32_t invalidate_s2_global();
     UpdateResult update_entry(const WalkerTag& tag, const WalkerData& data,
                               bool direct_write);
@@ -258,12 +244,9 @@ public:
     bool update_entry_ram(const WalkerTag& tag, const WalkerData& data,
                           bool direct_write, sc_time& ram_latency);
 
-    uint32_t invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
-                            bool has_gscid, bool has_pscid, bool has_iova,
-                            CacheInvalidateMode mode, sc_time* latency = nullptr);
-    uint32_t invalidate_by_gscid(gscid_t gscid, sc_time* latency = nullptr);
-    uint32_t invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                       sc_time* latency = nullptr);
+    // [失效] 子表旧失效接口 invalidate_vma / invalidate_by_gscid /
+    // invalidate_by_gscid_pscid 已删除(死代码)。invalidate_global 保留:
+    // WalkerCache 构造函数的上电复位仍需它清空三级子表与 S2 阵列。
     uint32_t invalidate_global(sc_time* latency = nullptr);
 
     // ============================================================
@@ -331,10 +314,8 @@ private:
     // [S2] 独立的S2 Cache存储阵列，与普通Walker Cache物理隔离
     std::vector<std::vector<CacheLine<WalkerTag, WalkerData>>> s2_cache_array_;
 
-    // [S2] S2阵列初始化和失效辅助方法
+    // [S2] S2阵列初始化
     void init_s2_cache_array();
-    uint32_t invalidate_s2_entries(
-        std::function<bool(const WalkerTag&)> predicate);
 };
 
 } // namespace iommu

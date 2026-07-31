@@ -129,12 +129,10 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       pc_invalidate_fifo(1),
       pt_invalidate_fifo(16),
       walker_invalidate_fifo(1),
-      msi_invalidate_fifo(1),
       dc_invalidate_response_fifo(1),
       pc_invalidate_response_fifo(1),
       pt_invalidate_response_fifo(16),
       walker_invalidate_response_fifo(1),
-      msi_invalidate_response_fifo(1),
       invalidation_request_fifo(1),
       invalidation_response_fifo(1)
 {
@@ -1729,20 +1727,12 @@ void CacheSubsystem::dispatch_walker_invalidate(const CacheMessage& cmd) {
 }
 
 // ============================================================
-// [失效] MSIPT Cache 合并调度线程 (invalidate > update > lookup)
+// [MSI] MSIPT Cache 调度线程 (update > lookup)
+// 当前性能模型不实现 MSI 处理路径, 故不含 invalidate 分支;
+// 保留 lookup/update 通道供后续实现 MSI 翻译时使用。
 // ============================================================
 void CacheSubsystem::msi_scheduler_thread() {
     while (true) {
-        if (msi_invalidate_fifo.num_available() > 0) {
-            CacheMessage req = msi_invalidate_fifo.read();
-            const sc_time start = sc_time_stamp();
-            trace_task_event("begin", "msipt_cache", "invalidate", req, start);
-            CacheMessage resp = execute_msi_invalidate_request(req);
-            record_task_completion("msipt_cache", start, sc_time_stamp());
-            trace_task_event("end", "msipt_cache", "invalidate", req, start, &resp);
-            push_fifo(msi_invalidate_response_fifo, resp);
-            continue;
-        }
         if (msi_update_fifo.num_available() > 0) {
             CacheMessage req = msi_update_fifo.read();
             const sc_time start = sc_time_stamp();
@@ -1762,8 +1752,7 @@ void CacheSubsystem::msi_scheduler_thread() {
             push_fifo(msi_response_fifo, resp);
             continue;
         }
-        wait(msi_invalidate_fifo.data_written_event() |
-             msi_update_fifo.data_written_event() |
+        wait(msi_update_fifo.data_written_event() |
              msi_request_fifo.data_written_event());
     }
 }
@@ -2196,62 +2185,15 @@ CacheMessage CacheSubsystem::execute_pc_invalidate_request(const CacheMessage& r
     return resp;
 }
 
-CacheMessage CacheSubsystem::execute_pt_invalidate_request(const CacheMessage& req) {
-    sc_time latency = SC_ZERO_TIME;
-    uint32_t affected = 0;
-    if (req.cmd_type == InvalidCmdType::IOTINVAL_GVMA) {
-        affected = pt_cache_->invalidate_gvma(req.gscid, req.iova,
-                                              req.has_gscid, req.has_iova,
-                                              req.invalidate_mode, &latency);
-    } else {
-        affected = pt_cache_->invalidate_vma(req.gscid, req.pscid, req.iova,
-                                             req.has_gscid, req.has_pscid,
-                                             req.has_iova, req.invalidate_mode,
-                                             &latency);
-    }
-    CacheMessage resp;
-    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
-    resp.task_id = req.task_id;
-    resp.affected_entries = affected;
-    resp.latency = latency;
-    return resp;
-}
-
-CacheMessage CacheSubsystem::execute_walker_invalidate_request(const CacheMessage& req) {
-    sc_time latency = SC_ZERO_TIME;
-    uint32_t affected = 0;
-    if (req.cmd_type == InvalidCmdType::IOTINVAL_GVMA) {
-        affected = walker_cache_->invalidate_gvma(req.gscid, req.has_gscid,
-                                                  req.invalidate_mode, &latency);
-    } else {
-        affected = walker_cache_->invalidate_vma(req.gscid, req.pscid, req.iova,
-                                                 req.has_gscid, req.has_pscid,
-                                                 req.has_iova,
-                                                 req.invalidate_mode, &latency);
-    }
-    CacheMessage resp;
-    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
-    resp.task_id = req.task_id;
-    resp.affected_entries = affected;
-    resp.latency = latency;
-    return resp;
-}
-
-CacheMessage CacheSubsystem::execute_msi_invalidate_request(const CacheMessage& req) {
-    sc_time latency = SC_ZERO_TIME;
-    uint32_t affected = 0;
-    if (req.invalidate_mode == CacheInvalidateMode::GLOBAL) {
-        affected = msipt_cache_->invalidate_global(&latency);
-    } else {
-        affected = msipt_cache_->invalidate_by_device(req.device_id, &latency);
-    }
-    CacheMessage resp;
-    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
-    resp.task_id = req.task_id;
-    resp.affected_entries = affected;
-    resp.latency = latency;
-    return resp;
-}
+// [失效] execute_pt_invalidate_request / execute_walker_invalidate_request
+// 已删除(死代码): 由 dispatch_pt_invalidate / dispatch_walker_invalidate 取代,
+// 后者在 hash 线程内拆分子失效到各 RAM worker, 保证与 in-flight lookup/fill
+// 的同 RAM 原子性, 并支持 SCAN_RANGE 枚举与 LIB 批量扫表。
+//
+// [MSI] execute_msi_invalidate_request 已删除: 当前 IOMMU 性能模型不实现
+// MSI 处理路径(msi_request_fifo/msi_update_fifo 无外部写入点), 因此不实现
+// MSIPT Cache 失效。MSIPTCache 实例与 lookup_msi/fill_msi 接口保留,
+// 待后续实现 MSI 翻译时再接入失效通路。
 
 CacheMessage CacheSubsystem::drive_invalidate_and_wait(
     sc_fifo<CacheMessage>& request_fifo,
@@ -2314,6 +2256,7 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
     };
 
     // GLOBAL_INVAL: 所有 cache 全清 + 清 LIB/VN
+    // [MSI] 不含 MSIPT: 当前性能模型不实现 MSI 处理路径
     if (msg.cmd_type == InvalidCmdType::GLOBAL_INVAL) {
         lib_.clear();
         CacheMessage req = msg;
@@ -2327,9 +2270,6 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
                                              pc_invalidate_response_fifo, req));
         drive_pt(msg, CacheInvalidateMode::GLOBAL, false);
         drive_walker(msg, CacheInvalidateMode::GLOBAL, false);
-        req.msg_type = CacheMsgType::MSI_INVALIDATE;
-        accumulate(drive_invalidate_and_wait(msi_invalidate_fifo,
-                                             msi_invalidate_response_fifo, req));
         return resp;
     }
 
@@ -2405,43 +2345,9 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
     return resp;
 }
 
-void CacheSubsystem::enqueue_cascade_invalidations(gscid_t gscid, pscid_t pscid,
-                                                   device_id_t device_id,
-                                                   bool has_gscid,
-                                                   bool has_pscid,
-                                                   bool include_msi) {
-    // 1. 关联 PT Cache 失效: 按 gscid (+ pscid) 失效
-    CacheMessage pt_cascade_msg;
-    pt_cascade_msg.msg_type = CacheMsgType::PT_INVALIDATE;
-    pt_cascade_msg.cmd_type = InvalidCmdType::IOTINVAL_VMA;
-    pt_cascade_msg.gscid = gscid;
-    pt_cascade_msg.pscid = pscid;
-    pt_cascade_msg.invalidate_mode = CacheInvalidateMode::SCAN;
-    pt_cascade_msg.has_gscid = has_gscid;
-    pt_cascade_msg.has_pscid = has_pscid;
-    pt_cascade_msg.has_iova = false;
-    push_fifo(pt_invalidate_fifo, pt_cascade_msg);
-
-    // 2. 关联 Walker Cache 失效: 按 gscid (+ pscid) 失效
-    CacheMessage walker_cascade_msg;
-    walker_cascade_msg.msg_type = CacheMsgType::WALKER_INVALIDATE;
-    walker_cascade_msg.cmd_type = InvalidCmdType::IOTINVAL_VMA;
-    walker_cascade_msg.gscid = gscid;
-    walker_cascade_msg.pscid = pscid;
-    walker_cascade_msg.invalidate_mode = CacheInvalidateMode::SCAN;
-    walker_cascade_msg.has_gscid = has_gscid;
-    walker_cascade_msg.has_pscid = has_pscid;
-    walker_cascade_msg.has_iova = false;
-    push_fifo(walker_invalidate_fifo, walker_cascade_msg);
-
-    // 3. 关联 MSIPT Cache 失效: 按 device_id 失效
-    if (include_msi) {
-        CacheMessage msi_cascade_msg;
-        msi_cascade_msg.msg_type = CacheMsgType::MSI_INVALIDATE;
-        msi_cascade_msg.device_id = device_id;
-        msi_cascade_msg.invalidate_mode = CacheInvalidateMode::SCAN;
-        push_fifo(msi_invalidate_fifo, msi_cascade_msg);
-    }
-}
+// [失效] enqueue_cascade_invalidations 已删除(死代码):
+// 按 spec V1.0.1, IODIR.INVAL_DDT/PDT 只失效 DDT/PDT 目录缓存, 不再级联
+// PT/Walker/MSIPT(那是 IOTINVAL 的职责)。DC→PC 硬件关联失效已由
+// execute_invalidation_pipeline 的 IODIR_INVAL_DDT 分支统一编排。
 
 } // namespace iommu

@@ -166,11 +166,76 @@ public:
     int8_t enable_disable_pq(iommu_top *iommu,uint32_t nppn, uint8_t enable_disable) ;
     int8_t enable_iommu(iommu_top *iommu,uint8_t iommu_mode);
     int8_t check_exp_pq_rec(iommu_top *iommu, uint32_t DID, uint32_t PID, uint8_t PV, uint8_t PRIV, uint8_t EXEC,uint16_t reserved0, uint8_t reserved1, uint64_t PLOAD);
-    void iotinval(iommu_top *iommu,uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address);
+    // [失效] NL 参数(默认0): 非叶PTE失效扩展位, 需 capabilities.NL=1 才合法。
+    // NL=1 且 AV=1 时 IOMMU 将联动失效 Walker Cache(非叶PTE缓存)全部级别。
+    void iotinval(iommu_top *iommu,uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address, uint8_t NL = 0);
     void ats_command(iommu_top *iommu,uint8_t f3, uint8_t DSV, uint8_t PV, uint32_t PID, uint8_t DSEG, uint16_t RID, uint64_t payload) ;
     void generic_any(iommu_top *iommu,command_t cmd);
     void iodir(iommu_top *iommu,uint8_t f3, uint8_t DV, uint32_t DID, uint32_t PID);
     void iofence(iommu_top *iommu,uint8_t f3, uint8_t PR, uint8_t PW, uint8_t AV, uint8_t WSI_bit, uint64_t addr, uint32_t data);
+
+    // ============================================================
+    // [CPU侧] RISC-V hart 侧 Cache/TLB 失效指令行为建模
+    //
+    // 本模型不含 CPU core, 这些方法用于在测试激励中**模拟 OS 更新页表时的
+    // 完整 CPU 侧序列**, 从而复现真实软件行为并验证一条关键规范语义:
+    //   CPU 侧的 SFENCE.VMA / SINVAL.VMA 只失效 hart 自己的 TLB,
+    //   **不会**失效 IOMMU 的 IOATC(DC/PC/PT/Walker) —— 后者必须由
+    //   IOTINVAL.VMA/GVMA 经命令队列显式失效。
+    //
+    // 建模口径(无 CPU core, 故为"行为记账 + 时序占位 + 日志"):
+    //   - 数据可见性: 测试用 write_memory_test_rp 直写 DDR, 页表对 IOMMU
+    //     天然可见, 故 CBO.CLEAN/FLUSH 的回写语义为空操作, 但仍记账与计时,
+    //     以便在时间轴上体现 OS 维护开销;
+    //   - 每条指令按 cpu_instr_latency_ns 推进仿真时间(默认 2ns/条);
+    //   - CBO.* 按 Cache 块粒度操作, 块大小由 CPU_CACHE_BLOCK_SIZE 声明
+    //     (对应规范"软件发现机制": 软件必须知道块大小才能正确使用 CBO)
+    // ============================================================
+
+    // Cache 块大小(字节): CBO.* 系列指令的操作粒度(软件发现机制)
+    static constexpr uint64_t CPU_CACHE_BLOCK_SIZE = 64;
+    // 每条 CPU 侧指令的建模延时(ns)
+    double cpu_instr_latency_ns = 2.0;
+
+    // FENCE.I: 刷新本地 I-cache 与取指流水线(保证数据写对取指可见)
+    void cpu_fence_i();
+    // SFENCE.VMA: 失效 hart 本地 TLB。rs1=addr(0=全部), rs2=asid(0=全部地址空间)
+    //   注意: 不影响 IOMMU IOATC
+    void cpu_sfence_vma(uint64_t addr = 0, uint32_t asid = 0);
+    // SINVAL.VMA (Svinval): 与 SFENCE.VMA 相同失效效果, 但不提供内存排序保证,
+    //   必须包裹在 SFENCE.W.INVAL ... SFENCE.INVAL.IR 之间
+    void cpu_sfence_w_inval();
+    void cpu_sinval_vma(uint64_t addr = 0, uint32_t asid = 0);
+    void cpu_sfence_inval_ir();
+    // CBO.CLEAN: 将脏块写回主存, 不失效该块
+    void cpu_cbo_clean(uint64_t addr);
+    // CBO.FLUSH: 原子地 Clean 后 Inval
+    void cpu_cbo_flush(uint64_t addr);
+    // CBO.INVAL: 失效(释放一致性域内该块的所有副本), 不回写
+    void cpu_cbo_inval(uint64_t addr);
+    // 对 [addr, addr+len) 覆盖的所有 Cache 块执行 CBO.FLUSH(页表区维护常用)
+    void cpu_cbo_flush_range(uint64_t addr, uint64_t len);
+
+    // [CPU侧] OS 更新页表后的标准维护序列:
+    //   CBO.FLUSH(页表区) -> SFENCE.VMA(失效本 hart TLB) -> FENCE.I(可选)
+    // 该序列**不含** IOTINVAL, 调用方随后需显式下发 IOMMU 失效命令。
+    void cpu_pagetable_update_sequence(uint64_t pt_addr, uint64_t pt_len,
+                                       uint32_t asid = 0, bool with_fence_i = false);
+
+    // [CPU侧] 指令执行计数(用于测试断言与统计报告)
+    struct CpuInstrStats {
+        uint64_t fence_i = 0;
+        uint64_t sfence_vma = 0;
+        uint64_t sinval_vma = 0;
+        uint64_t sfence_w_inval = 0;
+        uint64_t sfence_inval_ir = 0;
+        uint64_t cbo_clean = 0;
+        uint64_t cbo_flush = 0;
+        uint64_t cbo_inval = 0;
+        uint64_t blocks_processed = 0;   // CBO.* 实际处理的 Cache 块数
+    };
+    CpuInstrStats cpu_stats;
+    void print_cpu_instr_stats();
 };
 
 #endif

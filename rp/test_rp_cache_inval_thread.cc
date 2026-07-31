@@ -298,12 +298,88 @@ void RP_Module::send_translation_request_1_thread()
         run_batch("after C11 VN wrap sweep", &d);
         check("C11", d, true);
 
+        // ============================================================
+        // [NL] C12: IOTINVAL.VMA GV=1 AV=1 PSCV=1 NL=1
+        //   非叶PTE失效扩展(需 capabilities.NL=1)。NL=1 时除 PT Cache 外,
+        //   还联动失效 Walker Cache(非叶PTE缓存)的全部级别 ->
+        //   重新翻译时连中间级都要重走, DDR 读次数应高于 NL=0 的同类失效。
+        // ============================================================
+        printf("\n[INVAL_TEST] --- C12: IOTINVAL.VMA GV=1 AV=1 PSCV=1 NL=1 (non-leaf, PT+Walker) ---\n");
+        run_batch("re-warm before C12", &d);
+        {
+            // 先测 NL=0 基准: 只失效 PT Cache 的叶条目
+            const uint64_t ddr0 = iommu_ptr->ptw_total_ddr_reads;
+            iotinval(iommu_ptr, VMA, 1, 1, 1, TEST_GSCID, TEST_PSCID, IOVA_BASE, 0 /*NL=0*/);
+            iofence(iommu_ptr, IOFENCE_C, 0, 0, 0, 0, 0, 0);
+            uint64_t d_nl0 = 0;
+            run_batch("  C12a NL=0 (PT only)", &d_nl0);
+            const uint64_t ddr_nl0 = iommu_ptr->ptw_total_ddr_reads - ddr0;
+
+            // 再测 NL=1: PT + Walker 全级别失效
+            run_batch("  re-warm before C12b", &d);
+            const uint64_t ddr1 = iommu_ptr->ptw_total_ddr_reads;
+            iotinval(iommu_ptr, VMA, 1, 1, 1, TEST_GSCID, TEST_PSCID, IOVA_BASE, 1 /*NL=1*/);
+            iofence(iommu_ptr, IOFENCE_C, 0, 0, 0, 0, 0, 0);
+            uint64_t d_nl1 = 0;
+            run_batch("  C12b NL=1 (PT+Walker)", &d_nl1);
+            const uint64_t ddr_nl1 = iommu_ptr->ptw_total_ddr_reads - ddr1;
+
+            printf("[INVAL_TEST] C12 DDR reads: NL=0 -> %lu, NL=1 -> %lu\n",
+                   (unsigned long)ddr_nl0, (unsigned long)ddr_nl1);
+            // NL=1 命令未被判非法(说明 capabilities.NL=1 已生效) 且确实触发重填
+            const bool nl_ok = (d_nl1 > 0);
+            // NL=1 额外失效 Walker 非叶缓存 -> DDR 读次数应 >= NL=0
+            const bool nl_deeper = (ddr_nl1 >= ddr_nl0);
+            printf("[INVAL_TEST] %-10s %s (NL=1 refill=%lu, ddr_nl1=%lu >= ddr_nl0=%lu ? %d)\n",
+                   "C12", (nl_ok && nl_deeper) ? "PASS" : "FAIL",
+                   (unsigned long)d_nl1, (unsigned long)ddr_nl1,
+                   (unsigned long)ddr_nl0, nl_deeper ? 1 : 0);
+            if (nl_ok && nl_deeper) total_pass++; else total_fail++;
+            fflush(stdout);
+        }
+
+        // ============================================================
+        // [CPU侧] C13: 只执行 CPU hart 侧维护序列, 不下发 IOTINVAL
+        //   验证关键规范语义: SFENCE.VMA / SINVAL.VMA / CBO.* 只作用于
+        //   CPU 自己的 Cache/TLB, **不会**失效 IOMMU 的 IOATC。
+        //   预期: IOMMU 仍全命中 (delta == 0)。
+        // ============================================================
+        printf("\n[INVAL_TEST] --- C13: CPU-side only (SFENCE.VMA/CBO.*) -> IOMMU IOATC must NOT be invalidated ---\n");
+        run_batch("re-warm before C13", &d);
+        // 模拟 OS 改页表后的 CPU 侧完整维护序列(含 CBO.FLUSH + SFENCE.VMA + FENCE.I)
+        cpu_pagetable_update_sequence(IOVA_BASE, 0x1000, 0 /*asid*/, true /*with_fence_i*/);
+        // 再补一组 Svinval 序列: SFENCE.W.INVAL -> SINVAL.VMA xN -> SFENCE.INVAL.IR
+        cpu_sfence_w_inval();
+        for (int p = 0; p < TOTAL_IOVA_PAGES; p++) {
+            cpu_sinval_vma(IOVA_BASE + (uint64_t)p * 0x1000, 0);
+        }
+        cpu_sfence_inval_ir();
+        // 单块 CBO 语义演示
+        cpu_cbo_clean(IOVA_BASE);
+        cpu_cbo_inval(IOVA_BASE + 0x40);
+        run_batch("after C13 CPU-side only", &d);
+        check("C13", d, false);   // ★ 必须仍全命中: CPU 指令不影响 IOMMU
+
+        // ============================================================
+        // [CPU侧] C14: 完整 OS 流程 = CPU 侧序列 + IOMMU IOTINVAL + IOFENCE
+        //   这才是软件修改被 DMA 使用的页表时的正确做法。
+        //   预期: IOMMU 缓存被失效 (delta > 0)。
+        // ============================================================
+        printf("\n[INVAL_TEST] --- C14: full OS flow = CPU-side seq + IOTINVAL + IOFENCE ---\n");
+        run_batch("re-warm before C14", &d);
+        cpu_pagetable_update_sequence(IOVA_BASE, (uint64_t)TOTAL_IOVA_PAGES * 0x1000, 0, false);
+        iotinval(iommu_ptr, VMA, 1, 0, 0, TEST_GSCID, 0, 0);   // 补上 IOMMU 侧失效
+        iofence(iommu_ptr, IOFENCE_C, 0, 0, 0, 0, 0, 0);
+        run_batch("after C14 full OS flow", &d);
+        check("C14", d, true);   // ★ 有 IOTINVAL 才会真正失效 IOMMU 缓存
+
         printf("\n========== Cache Invalidation Test Summary ==========\n");
         printf("  Checks passed: %d\n", total_pass);
         printf("  Checks failed: %d\n", total_fail);
         printf("  Result: %s\n", (total_fail == 0) ? "ALL PASS" : "SOME FAILED");
         printf("====================================================\n");
 
+        print_cpu_instr_stats();
         iommu_ptr->print_cache_statistics();
         sc_core::sc_stop();
         return;

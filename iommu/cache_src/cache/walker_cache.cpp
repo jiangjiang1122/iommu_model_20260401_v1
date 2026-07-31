@@ -374,105 +374,15 @@ WalkerSubCache::update_entry(const WalkerTag& tag, const WalkerData& data,
     return result;
 }
 
-uint32_t WalkerSubCache::invalidate_vma(gscid_t gscid, pscid_t pscid,
-                                        iova_t iova, bool has_gscid,
-                                        bool has_pscid, bool has_iova,
-                                        CacheInvalidateMode mode,
-                                        sc_time* latency) {
-    auto predicate = [=](const WalkerTag& tag, const WalkerData&) {
-        if (has_gscid && tag.gscid != gscid) return false;
-        if (has_pscid && tag.pscid != pscid) return false;
-        if (has_iova && tag.va_segment != WalkerCache::extract_addr_segment(
-                            iova, tag.level, tag.va_pa_flag, tag.sv48_flag,
-                            tag.x4_mode_flag)) {
-            return false;
-        }
-        return true;
-    };
-
-    if (mode == CacheInvalidateMode::GLOBAL) {
-        uint32_t affected = invalidate_all_entries(latency);
-        // [S2] 全局失效时也失效S2阵列
-        affected += invalidate_s2_global();
-        return affected;
-    }
-
-    if (mode == CacheInvalidateMode::PRECISE && has_iova && has_gscid && has_pscid) {
-        uint32_t affected = 0;
-        std::vector<uint32_t> visited_sets;
-
-        for (bool addr_is_va : {false, true}) {
-            for (bool sv48 : {false, true}) {
-                if (!sv48 && level_ == 1) continue;
-                for (bool x4_mode : {false, true}) {
-                    WalkerTag hash_tag;
-                    hash_tag.gscid = gscid;
-                    hash_tag.pscid = pscid;
-                    hash_tag.level = level_;
-                    hash_tag.va_segment = WalkerCache::extract_addr_segment(
-                        iova, level_, addr_is_va, sv48, x4_mode);
-                    hash_tag.va_pa_flag = addr_is_va;
-                    hash_tag.sv48_flag = sv48;
-                    hash_tag.x4_mode_flag = x4_mode;
-
-                    const uint32_t set = hash_function(hash_tag);
-                    bool visited = false;
-                    for (uint32_t visited_set : visited_sets) {
-                        if (visited_set == set) {
-                            visited = true;
-                            break;
-                        }
-                    }
-                    if (visited) continue;
-                    visited_sets.push_back(set);
-
-                    affected += invalidate_precise_by_line(
-                        hash_tag,
-                        predicate,
-                        [](const WalkerTag&, const WalkerData&) {},
-                        latency);
-                }
-            }
-        }
-        return affected;
-    }
-
-    uint32_t affected = invalidate_scan_by_line(
-        predicate,
-        [](const WalkerTag&, const WalkerData&) {},
-        latency);
-    // [S2] VMA失效时也失效S2阵列中对应gscid的条目
-    if (has_gscid) {
-        affected += invalidate_s2_by_gscid(gscid);
-    }
-    return affected;
-}
-
-uint32_t WalkerSubCache::invalidate_by_gscid(gscid_t gscid, sc_time* latency) {
-    return invalidate_scan_by_line(
-        [gscid](const WalkerTag& tag, const WalkerData&) {
-            return tag.gscid == gscid;
-        },
-        [](const WalkerTag&, const WalkerData&) {},
-        latency);
-}
-
-uint32_t WalkerSubCache::invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                                   sc_time* latency) {
-    return invalidate_scan_by_line(
-        [gscid, pscid](const WalkerTag& tag, const WalkerData&) {
-            return tag.gscid == gscid && tag.pscid == pscid;
-        },
-        [](const WalkerTag&, const WalkerData&) {},
-        latency);
-}
-
+// [失效] 子表旧失效接口 invalidate_vma / invalidate_by_gscid /
+// invalidate_by_gscid_pscid 已删除(死代码): 它们绕过多RAM原子段与 LIB 语义,
+// 由 dispatch_walker_invalidate 拆分子失效后经 invalidate_set_ram /
+// invalidate_ram_range / lazy_sweep_ram 执行。
+// invalidate_global 保留: WalkerCache 构造函数上电复位需要它。
 uint32_t WalkerSubCache::invalidate_global(sc_time* latency) {
     uint32_t affected = invalidate_all_entries(latency);
     // [S2] 同时失效S2阵列
-    for (auto& s : s2_cache_array_)
-        for (auto& l : s)
-            if (l.valid) { l.invalidate(); affected++; }
+    affected += invalidate_s2_global();
     return affected;
 }
 
@@ -527,29 +437,14 @@ WalkerSubCache::update_entry_s2(const WalkerTag& tag, const WalkerData& data) {
     return result;
 }
 
-// [S2] S2 Cache按gscid失效
-uint32_t WalkerSubCache::invalidate_s2_by_gscid(gscid_t gscid) {
-    return invalidate_s2_entries([gscid](const WalkerTag& tag) {
-        return tag.gscid == gscid;
-    });
-}
-
-// [S2] S2 Cache全局失效
+// [S2] S2 Cache全局失效 (供 invalidate_global 与 GLOBAL 模式复用)
+// invalidate_s2_by_gscid / invalidate_s2_entries 已删除(死代码):
+// 按条件的 S2 失效现由 invalidate_s2_range(set区间 + cmd) 承担。
 uint32_t WalkerSubCache::invalidate_s2_global() {
     uint32_t affected = 0;
     for (auto& s : s2_cache_array_)
         for (auto& l : s)
             if (l.valid) { l.invalidate(); affected++; }
-    return affected;
-}
-
-// [S2] S2 Cache通用失效扫描
-uint32_t WalkerSubCache::invalidate_s2_entries(
-    std::function<bool(const WalkerTag&)> predicate) {
-    uint32_t affected = 0;
-    for (auto& s : s2_cache_array_)
-        for (auto& l : s)
-            if (l.valid && predicate(l.tag)) { l.invalidate(); affected++; }
     return affected;
 }
 
@@ -1208,65 +1103,13 @@ WalkerCache::UpdateResult WalkerCache::update_s2(gscid_t gscid, pscid_t pscid,
     return result;
 }
 
-uint32_t WalkerCache::invalidate_by_gscid(gscid_t gscid, sc_time* latency) {
-    uint32_t affected = 0;
-    affected += ptw_c1_->invalidate_by_gscid(gscid, latency);
-    affected += ptw_c2_->invalidate_by_gscid(gscid, latency);
-    affected += ptw_c3_->invalidate_by_gscid(gscid, latency);
-    // [S2] 同时失效S2阵列
-    affected += ptw_c1_->invalidate_s2_by_gscid(gscid);
-    affected += ptw_c2_->invalidate_s2_by_gscid(gscid);
-    affected += ptw_c3_->invalidate_s2_by_gscid(gscid);
-    return affected;
-}
-
-uint32_t WalkerCache::invalidate_by_gscid_pscid(gscid_t gscid, pscid_t pscid,
-                                                sc_time* latency) {
-    uint32_t affected = 0;
-    affected += ptw_c1_->invalidate_by_gscid_pscid(gscid, pscid, latency);
-    affected += ptw_c2_->invalidate_by_gscid_pscid(gscid, pscid, latency);
-    affected += ptw_c3_->invalidate_by_gscid_pscid(gscid, pscid, latency);
-    // [S2] S2阵列也按gscid失效（S2条目不含pscid，按gscid失效即可）
-    affected += ptw_c1_->invalidate_s2_by_gscid(gscid);
-    affected += ptw_c2_->invalidate_s2_by_gscid(gscid);
-    affected += ptw_c3_->invalidate_s2_by_gscid(gscid);
-    return affected;
-}
-
-uint32_t WalkerCache::invalidate_vma(gscid_t gscid, pscid_t pscid, iova_t iova,
-                                     bool has_gscid, bool has_pscid, bool has_iova,
-                                     CacheInvalidateMode mode,
-                                     sc_time* latency) {
-    uint32_t affected = 0;
-    affected += ptw_c1_->invalidate_vma(gscid, pscid, iova, has_gscid,
-                                        has_pscid, has_iova, mode, latency);
-    affected += ptw_c2_->invalidate_vma(gscid, pscid, iova, has_gscid,
-                                        has_pscid, has_iova, mode, latency);
-    affected += ptw_c3_->invalidate_vma(gscid, pscid, iova, has_gscid,
-                                        has_pscid, has_iova, mode, latency);
-    return affected;
-}
-
-uint32_t WalkerCache::invalidate_gvma(gscid_t gscid, bool has_gscid,
-                                      CacheInvalidateMode mode,
-                                      sc_time* latency) {
-    if (mode == CacheInvalidateMode::GLOBAL) {
-        return invalidate_global(latency);
-    }
-    if (has_gscid) {
-        return invalidate_by_gscid(gscid, latency);
-    }
-    return invalidate_global(latency);
-}
-
-uint32_t WalkerCache::invalidate_global(sc_time* latency) {
-    uint32_t affected = 0;
-    affected += ptw_c1_->invalidate_global(latency);
-    affected += ptw_c2_->invalidate_global(latency);
-    affected += ptw_c3_->invalidate_global(latency);
-    // invalidate_global已在WalkerSubCache内包含S2阵列失效
-    return affected;
-}
+// [失效] WalkerCache 旧单体失效接口 invalidate_by_gscid /
+// invalidate_by_gscid_pscid / invalidate_vma / invalidate_gvma /
+// invalidate_global 已全部删除(死代码): 唯一调用者
+// execute_walker_invalidate_request 已被 dispatch_walker_invalidate 取代,
+// 后者拆分 (级 x RAM) 子失效, 经 invalidate_set_ram / invalidate_ram_range /
+// lazy_sweep_ram 在各 worker 内串行执行, 满足多RAM原子性与 LIB 语义。
+// 三级子表的上电复位仍直接使用 WalkerSubCache::invalidate_global(构造函数)。
 
 void WalkerCache::set_clock_period(const sc_time& clk) {
     ptw_c1_->set_clock_period(clk);

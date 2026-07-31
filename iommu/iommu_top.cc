@@ -84,6 +84,13 @@ void iommu_top::before_end_of_elaboration()
     cap.Sv39 = cap.Sv48 = cap.Sv57 = cap.Sv39x4 = cap.Sv48x4 = cap.Sv57x4 = 1;
     cap.amo_hwad = cap.ats = cap.t2gpa = cap.hpm = cap.msi_flat = cap.msi_mrif = cap.amo_mrif = 1;
     cap.dbg = 1;
+    // [失效] 声明支持非叶PTE失效扩展(capabilities.NL=1):
+    // 使 IOTINVAL.VMA/GVMA 的 NL 位(bit34)成为有效域, 从而让
+    // execute_invalidation_pipeline 中 "NL=1 时联动 Walker Cache 全级别失效"
+    // 的路径可达。未声明时 CQ 会将 NL=1 的命令判为 command_illegal。
+    // 注: capabilities.S(地址范围/NAPOT 失效扩展)仍为 0, 性能模型未实现
+    // ADDR 范围展开, 保持 S=1 命令被判非法, 与能力声明自洽。
+    cap.nl = 1;
     cap.pas = 50;
     cap.pd20 = cap.pd17 = cap.pd8 = 1;
     cap.Svrsw60t59b = 1;
