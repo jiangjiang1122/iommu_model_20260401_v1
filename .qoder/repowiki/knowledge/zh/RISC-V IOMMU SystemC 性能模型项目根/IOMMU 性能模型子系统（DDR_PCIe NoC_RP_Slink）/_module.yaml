@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: device_models
+title: IOMMU 性能模型子系统（DDR/PCIe NoC/RP/Slink）
+scope:
+    - ddr/
+    - pcienoc/
+    - rp/
+    - slink/
+source_files: []
+depends_on: []
+related_to: []

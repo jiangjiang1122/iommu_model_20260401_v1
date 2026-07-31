@@ -19,6 +19,13 @@
 - [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
 </cite>
 
+## 更新摘要
+**变更内容**   
+- 更新了INVAL_PDT实现，支持DID+PID精确失效和关联PC失效的DID匹配/扫描机制
+- 移除了传统的级联失效行为
+- 增强了PC缓存失效策略的精确性和性能
+- 优化了多级地址转换中的失效一致性保证
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -33,6 +40,8 @@
 
 ## 简介
 本文件针对IOMMU模型中的PC缓存（进程上下文缓存）进行系统性技术文档整理，重点阐述其在多级地址转换中的关键作用、缓存组织与查找机制、生命周期管理、失效与更新策略、性能特征与优化建议，并给出配置参数说明与典型应用场景。
+
+**更新** 本次更新重点反映了新的INVAL_PDT实现，包括基于设备ID(DID)和进程ID(PID)的精确失效机制，以及通过DID匹配和扫描实现的关联PC失效处理，同时移除了传统的级联失效行为以提升性能和准确性。
 
 ## 项目结构
 PC缓存位于缓存子系统中，采用模板化的CacheBase基类实现统一的查找、填充与失效流程，结合特定的标签结构与散列函数完成设备ID与进程ID的组合寻址。整体结构如下：
@@ -91,6 +100,8 @@ STATS --> PC
 - PCTag/PCData：PC缓存的标签与数据类型，分别对应设备ID+进程ID与进程上下文结构。
 - IOATC：进程上下文的IOATC缓存（进程目录缓存），用于快速定位与缓存PC，减少PDT遍历开销。
 
+**更新** 新的INVAL_PDT实现现在支持基于DID+PID的精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为以提高性能和准确性。
+
 **章节来源**
 - [pc_cache.h:8-33](file://iommu/cache_src/cache/pc_cache.h#L8-L33)
 - [cache_base.h:26-224](file://iommu/cache_src/cache/cache_base.h#L26-L224)
@@ -103,6 +114,8 @@ PC缓存贯穿于IOMMU的地址转换流程，主要参与以下环节：
 - 在事务发起时，先查询PC缓存（IOATC或PC缓存）以快速获得进程上下文，避免昂贵的PDT遍历。
 - 当PDT变更或全局失效时，触发PC缓存的精确或扫描失效，确保一致性。
 - 在性能模型中，PC缓存的查找与更新通过专用线程模拟，便于统计与验证。
+
+**更新** 新的INVAL_PDT实现现在支持更精确的失效控制，通过DID+PID组合实现精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了不必要的级联失效操作。
 
 ```mermaid
 sequenceDiagram
@@ -145,6 +158,8 @@ end
   - invalidate_pdt：根据设备ID与可选进程ID进行精确或扫描失效，并回调收集受影响的上下文。
   - invalidate_global：全局清空PC缓存。
 - 散列函数：基于设备ID与进程ID的混合异或，结合缓存集数掩码得到set索引。
+
+**更新** invalidate_pdt方法现在支持基于DID+PID的精确失效模式，并通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为。
 
 ```mermaid
 classDiagram
@@ -190,6 +205,8 @@ PCCache --> PCData : "缓存"
 - 失效流程：支持精确（按hash定位set后比较）与扫描（全表扫描）两种模式，逐way比较并失效。
 - 仲裁与延迟：采用WRR权重轮询RAM端口，记录排队与执行延迟，支持按阶段统计。
 
+**更新** 失效流程现在支持更精确的DID+PID匹配，通过精确失效和扫描失效两种模式处理不同的失效场景，移除了传统的级联失效逻辑。
+
 ```mermaid
 flowchart TD
 Start(["开始"]) --> Hash["计算set索引"]
@@ -216,6 +233,8 @@ Latency --> End(["结束"])
 - IOATC（进程目录缓存）：在iommu_atc.cc中实现，提供快速查找与缓存进程上下文的能力，减少PDT遍历。
 - PC缓存：在CacheSubSystem中作为正式缓存，提供持久化、统计与性能建模支持。
 - 失效联动：当收到PDT失效命令时，CacheSubSystem将请求转发至PC缓存，触发精确或扫描失效。
+
+**更新** 新的INVAL_PDT实现现在通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为，提高了失效操作的精确性和性能。
 
 ```mermaid
 sequenceDiagram
@@ -248,9 +267,11 @@ CS-->>DC : "响应受影响上下文"
 - locate_process_context负责遍历PDT以定位PC，命中后将PC缓存至IOATC与PC缓存，后续请求可直接命中。
 - PC缓存的命中显著减少PDT遍历次数，提升整体吞吐与降低延迟。
 
+**更新** 新的INVAL_PDT实现通过DID+PID精确失效和DID匹配扫描机制，确保了在多进程和多设备场景下的失效一致性和性能优化。
+
 **章节来源**
 - [iommu_process_context.cc:12-195](file://iommu/iommu_fun_model/iommu_process_context.cc#L12-L195)
-- [iommu_data_structures.hh:324-412](file://iommu/include/iommu_data_structures.hh#L324-L412)
+- [iommu_data_structures.hh:324-412](file://iommu/include/iommu_data_structures.hh#L324-412)
 - [iommu_struct.hh:92-95](file://iommu/include/iommu_struct.hh#L92-L95)
 
 ## 依赖关系分析
@@ -258,6 +279,8 @@ CS-->>DC : "响应受影响上下文"
 - PCTag与PCData分别映射到设备ID+进程ID与进程上下文结构，二者通过types.h统一定义。
 - IOATC与PC缓存在功能上互补：IOATC偏向快速路径与仿真验证，PC缓存面向性能建模与统计。
 - CacheSubSystem协调各缓存的失效联动，确保一致性。
+
+**更新** 新的INVAL_PDT实现现在通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效依赖，简化了失效传播逻辑。
 
 ```mermaid
 graph LR
@@ -290,6 +313,8 @@ StatsCollector --> PCCache
 - 仲裁与排队：WRR仲裁均衡lookup/fill/invalidation三类操作，排队延迟会影响端口利用率与IOPS。
 - 统计指标：通过StatsCollector记录访问、命中、缺失、替换、失效、排队与执行延迟，支持IOPS与利用率分析。
 
+**更新** 新的INVAL_PDT实现通过精确失效和DID匹配扫描机制，减少了不必要的级联失效操作，提升了整体性能和内存带宽利用率。
+
 **章节来源**
 - [cache_base.h:627-741](file://iommu/cache_src/cache/cache_base.h#L627-L741)
 - [stats_collector.h:13-104](file://iommu/cache_src/common/stats_collector.h#L13-L104)
@@ -301,6 +326,8 @@ StatsCollector --> PCCache
 - 失效不一致：核对invalidate_pdt的精确/扫描模式与设备ID/进程ID过滤条件，确保只影响预期上下文。
 - 性能模型验证：通过pc_cache_query_thread与pc_cache_update_thread的仿真输出，比对命中/缺失计数与延迟分布。
 
+**更新** 新的INVAL_PDT实现现在支持更精确的失效控制，通过DID+PID组合实现精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了不必要的级联失效操作。
+
 **章节来源**
 - [pc_cache.cpp:27-52](file://iommu/cache_src/cache/pc_cache.cpp#L27-L52)
 - [cache_base.h:534-604](file://iommu/cache_src/cache/cache_base.h#L534-L604)
@@ -308,6 +335,8 @@ StatsCollector --> PCCache
 
 ## 结论
 PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上下文显著降低PDT遍历开销，提升整体性能。其设计遵循统一的缓存抽象与仲裁机制，配合完善的统计与性能建模，能够满足高性能与可验证性的双重需求。合理配置缓存规模与替换策略、及时处理失效与更新，是保障PC缓存高效稳定运行的关键。
+
+**更新** 新的INVAL_PDT实现通过DID+PID精确失效和DID匹配扫描机制，进一步提升了失效操作的精确性和性能，移除了传统的级联失效行为，为复杂的多进程和多设备场景提供了更好的支持。
 
 ## 附录
 
@@ -329,6 +358,8 @@ PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上�
 - 多进程PCIe设备：每个设备可能有多个进程上下文，启用PDT与PC缓存可显著降低PDT遍历次数。
 - 高并发I/O：通过增大num_sets与num_ways、选择合适的替换策略，提升缓存命中率与端口利用率。
 - 动态失效场景：在虚拟机迁移或上下文切换频繁时，合理使用精确失效以减少不必要的扫描。
+
+**更新** 新的INVAL_PDT实现特别适合需要精确失效控制的场景，如虚拟化环境中的设备迁移、多租户隔离等，通过DID+PID精确失效和DID匹配扫描机制，可以有效减少不必要的失效操作。
 
 **章节来源**
 - [iommu_process_context.cc:68-195](file://iommu/iommu_fun_model/iommu_process_context.cc#L68-L195)

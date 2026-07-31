@@ -1,0 +1,38 @@
+schema_version: 1
+module_path: ""
+title: RISC-V IOMMU SystemC 性能模型项目根
+scope:
+    - README.md
+    - Makefile
+    - main.cpp
+    - build_cpp.sh
+    - build_wsl.sh
+    - compile_and_test.sh
+    - link_and_run.sh
+    - gdb_debug.sh
+    - check_order.sh
+    - check_ports.sh
+    - check_result.sh
+    - check_slink.sh
+    - check_slink2.sh
+    - check_sv39.sh
+    - extract_iops.sh
+    - run_report.sh
+    - run_update_priority_test.sh
+    - test_1000req.sh
+    - test_access_path.sh
+    - test_critical.sh
+    - test_dedup_prefetch.sh
+    - test_integration_dedup_prefetch.sh
+    - test_precise.sh
+    - test_samples.sh
+    - test_simple.sh
+    - test_slink_critical.sh
+    - test_slink_latency.sh
+    - test_slink_verify.sh
+    - plot_ptw_charts.py
+    - plot_ptw_output_intervals.py
+    - .gitignore
+source_files: []
+depends_on: []
+related_to: []

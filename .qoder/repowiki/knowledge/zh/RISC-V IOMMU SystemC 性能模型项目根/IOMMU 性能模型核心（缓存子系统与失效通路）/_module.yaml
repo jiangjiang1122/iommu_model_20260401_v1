@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: iommu_core
+title: IOMMU 性能模型核心（缓存子系统与失效通路）
+scope:
+    - iommu/
+source_files: []
+depends_on: []
+related_to: []

@@ -14,6 +14,13 @@
 - [iommu_top.hh](file://iommu/iommu_top.hh)
 </cite>
 
+## 更新摘要
+**所做更改**
+- 更新了失效传播机制章节，反映IOMMU规范V1.0.1的精确失效机制
+- 新增INVAL_DDT实现与DV位支持说明
+- 移除了对PT/Walker/MSIPT缓存的传统级联失效描述
+- 更新了失效传播流程图以体现新的精确失效策略
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -28,6 +35,8 @@
 
 ## 简介
 本文件面向IOMMU中的DC缓存（设备上下文缓存），系统性阐述其在IOMMU地址翻译流水线中的关键作用：设备上下文的快速检索、存储组织与一致性维护。DC缓存以设备ID为索引，承载设备上下文（Device Context, DC）数据，支撑第一/第二阶段地址翻译所需的软上下文信息（如GSCID、PSCID、翻译控制与模式等）。本文将从数据结构、索引与查找策略、有效性检查与更新、失效传播机制、配置参数与性能调优等方面进行深入解析，并给出使用示例与常见问题解决方案。
+
+**更新** 根据IOMMU规范V1.0.1，DC缓存现在实现了精确的失效机制，支持INVAL_DDT命令和DV位验证，移除了传统的级联失效到PT/Walker/MSIPT缓存的机制。
 
 ## 项目结构
 围绕DC缓存的关键代码分布在以下模块：
@@ -103,7 +112,7 @@ Top --> ExCfg
 DC缓存在IOMMU中的位置与交互如下：
 - 查询路径：解析器将设备ID送入DC缓存查询线程，线程调用lookup_ioatc_dc进行查询，命中则返回DC，未命中则进入DDT/PDT/XDTW流程。
 - 更新路径：XDTW完成后，线程调用cache_ioatc_dc将DC写回缓存，确保后续请求命中。
-- 失效路径：当DDT命令触发无效化时，DC缓存按设备ID精确失效，返回受影响的(gscid, pscid)列表用于级联失效。
+- 失效路径：当DDT命令触发无效化时，DC缓存按设备ID精确失效，遵循IOMMU规范V1.0.1的精确失效机制，不再级联到PT/Walker/MSIPT缓存。
 
 ```mermaid
 sequenceDiagram
@@ -133,19 +142,19 @@ end
 **图表来源**
 - [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L64)
 - [dc_cache.cpp:11-22](file://iommu/cache_src/cache/dc_cache.cpp#L11-L22)
-- [iommu_top.hh:309-311](file://iommu/iommu_top.hh#L309-L311)
+- [iommu_top.hh:309-311](file://iommu/iommu_top.hh#L309-311)
 
 **章节来源**
 - [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L64)
 - [dc_cache.cpp:11-22](file://iommu/cache_src/cache/dc_cache.cpp#L11-L22)
-- [iommu_top.hh:309-311](file://iommu/iommu_top.hh#L309-L311)
+- [iommu_top.hh:309-311](file://iommu/iommu_top.hh#L309-311)
 
 ## 详细组件分析
 
 ### DCCache类与接口
 - 查询接口：lookup_dc(device_id, out_data, latency)基于设备ID进行缓存查找。
 - 填充接口：fill_dc(device_id, DCData)将新DC写入缓存。
-- 失效接口：invalidate_ddt(device_id, latency)按设备ID精确失效，返回受影响的(gscid, pscid)列表用于级联。
+- 失效接口：invalidate_ddt(device_id, latency)按设备ID精确失效，遵循IOMMU规范V1.0.1的精确失效机制。
 - 全局失效：invalidate_global(latency)清空所有DC缓存条目。
 - 散列函数：hash_function(tag)使用设备ID高16位与中8位的组合进行混合，掩码为set数量-1，确保均匀分布。
 
@@ -231,7 +240,11 @@ Hit --> |否| ReturnMiss["返回false"]
 - [cache_base.h:607-614](file://iommu/cache_src/cache/cache_base.h#L607-L614)
 
 ### 失效传播机制
+**更新** 根据IOMMU规范V1.0.1，DC缓存现在实现了精确的失效机制，支持INVAL_DDT命令和DV位验证。
+
 - 精确失效：invalidate_ddt按设备ID定位set，扫描该set内匹配的条目，回调收集(gscid, pscid)用于级联失效。
+- DV位支持：VAL_DDT命令现在支持DV位验证，确保失效操作的精确性。
+- 移除传统级联：不再级联失效到PT/Walker/MSIPT缓存，遵循规范的精确失效语义。
 - 全局失效：invalidate_all_entries遍历全表，清空所有有效条目并统计受影响数量。
 - 失效延迟：CacheBase对失效操作进行仲裁与延迟建模，确保多操作并发下的公平性与正确性。
 
@@ -245,15 +258,16 @@ DCCache->>Base : "invalidate_precise_by_line(hash_tag, predicate, on_invalidated
 Base->>Base : "定位set并扫描way"
 Base-->>DCCache : "返回affected_entries"
 DCCache-->>Caller : "返回(gscid, pscid)列表"
+Note over DCCache : 遵循IOMMU规范V1.0.1<br/>支持INVAL_DDT和DV位验证
 ```
 
 **图表来源**
 - [dc_cache.cpp:24-45](file://iommu/cache_src/cache/dc_cache.cpp#L24-L45)
-- [cache_base.h:571-604](file://iommu/cache_src/cache/cache_base.h#L571-L604)
+- [cache_base.h:571-604](file://iommu/cache_src/cache/cache_base.h#L571-604)
 
 **章节来源**
 - [dc_cache.cpp:24-45](file://iommu/cache_src/cache/dc_cache.cpp#L24-L45)
-- [cache_base.h:571-604](file://iommu/cache_src/cache/cache_base.h#L571-L604)
+- [cache_base.h:571-604](file://iommu/cache_src/cache/cache_base.h#L571-604)
 
 ### 性能模型与统计
 - 查询线程：dc_cache_query_thread读取任务，调用lookup_ioatc_dc，记录命中/未命中与延迟，更新命中/未命中计数。
@@ -279,12 +293,12 @@ end
 ```
 
 **图表来源**
-- [iommu_perf_dc_pc_cache.cc:11-42](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L42)
-- [dc_cache.cpp:11-16](file://iommu/cache_src/cache/dc_cache.cpp#L11-L16)
+- [iommu_perf_dc_pc_cache.cc:11-42](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-42)
+- [dc_cache.cpp:11-16](file://iommu/cache_src/cache/dc_cache.cpp#L11-16)
 
 **章节来源**
-- [iommu_perf_dc_pc_cache.cc:11-42](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L42)
-- [iommu_top.hh:34-42](file://iommu/iommu_top.hh#L34-L42)
+- [iommu_perf_dc_pc_cache.cc:11-42](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-42)
+- [iommu_top.hh:34-42](file://iommu/iommu_top.hh#L34-42)
 
 ## 依赖关系分析
 - DCCache依赖CacheBase提供的通用缓存框架（查找、填充、失效、替换与仲裁）。
@@ -306,14 +320,14 @@ Config --> DCCache
 - [dc_cache.h:8-31](file://iommu/cache_src/cache/dc_cache.h#L8-L31)
 - [cache_base.h:26-264](file://iommu/cache_src/cache/cache_base.h#L26-L264)
 - [types.h:266-288](file://iommu/cache_src/common/types.h#L266-L288)
-- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L64)
+- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-64)
 - [default_config.json:20-24](file://iommu/cache_config/default_config.json#L20-L24)
 
 **章节来源**
 - [dc_cache.h:8-31](file://iommu/cache_src/cache/dc_cache.h#L8-L31)
 - [cache_base.h:26-264](file://iommu/cache_src/cache/cache_base.h#L26-L264)
 - [types.h:266-288](file://iommu/cache_src/common/types.h#L266-L288)
-- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L64)
+- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-64)
 - [default_config.json:20-24](file://iommu/cache_config/default_config.json#L20-L24)
 
 ## 性能考量
@@ -322,8 +336,7 @@ Config --> DCCache
 - 延迟建模：hash_latency、read_set_latency、compare_latency、fill_compute_index_*、write_way_latency等参数直接影响命中/未命中延迟。合理设置可平衡吞吐与延迟。
 - 仲裁与公平性：Lookup/Fill/Invalidate三类操作采用WRR仲裁，避免饥饿；arbiter_latency_cycles影响排队等待时间。
 - 预取与命中：命中路径可区分预取命中，有助于统计预取效果；未命中路径需关注XDTW/DDT/PDT开销。
-
-[本节为通用性能指导，无需特定文件引用]
+- 失效性能：新的精确失效机制减少了不必要的级联失效，提升了整体性能。
 
 ## 故障排查指南
 - 命中率偏低
@@ -337,6 +350,9 @@ Config --> DCCache
   - 检查仲裁延迟与排队时间统计，避免瓶颈在RAM端口争用。
 - 配置不生效
   - 确认JSON配置文件路径与字段名称正确，GlobalConfig加载流程无误。
+- 失效问题
+  - 验证INVAL_DDT命令的DV位设置是否正确。
+  - 检查精确失效机制是否符合IOMMU规范V1.0.1要求。
 
 **章节来源**
 - [default_config.json:7-18](file://iommu/cache_config/default_config.json#L7-L18)
@@ -346,7 +362,7 @@ Config --> DCCache
 ## 结论
 DC缓存通过简洁而高效的索引与查找机制，显著降低了IOMMU地址翻译路径上的DC访问延迟。结合合理的容量与替换策略、完善的失效传播与性能建模，可在保证吞吐的同时维持稳定的命中率。通过JSON配置与性能线程，系统提供了灵活的调优手段与可观测性，便于在不同工作负载下获得最佳性能。
 
-[本节为总结性内容，无需特定文件引用]
+**更新** 最新的精确失效机制遵循IOMMU规范V1.0.1，提供了更高效和准确的失效处理，移除了不必要的级联失效，提升了整体性能和可靠性。
 
 ## 附录
 
@@ -367,8 +383,13 @@ DC缓存通过简洁而高效的索引与查找机制，显著降低了IOMMU地�
 ### 使用示例（概念性）
 - 查询DC：解析器将设备ID送入DC缓存查询线程，线程调用lookup_ioatc_dc，命中则继续翻译，未命中则走XDTW/DDT/PDT路径。
 - 更新DC：XDTW完成后，线程调用cache_ioatc_dc写回DC，确保后续命中。
-- 失效DC：当DDT命令触发无效化时，按设备ID精确失效，返回(gscid, pscid)列表用于级联。
+- 失效DC：当DDT命令触发无效化时，按设备ID精确失效，遵循IOMMU规范V1.0.1，不再级联到PT/Walker/MSIPT缓存。
 
 **章节来源**
-- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-L64)
-- [dc_cache.cpp:11-45](file://iommu/cache_src/cache/dc_cache.cpp#L11-L45)
+- [iommu_perf_dc_pc_cache.cc:11-64](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L11-64)
+- [dc_cache.cpp:11-45](file://iommu/cache_src/cache/dc_cache.cpp#L11-45)
+
+### IOMMU规范V1.0.1兼容性
+- INVAL_DDT支持：完全支持INVALIDATE_DEVICE_TLB命令，包括DV位验证。
+- 精确失效：实现了规范的精确失效语义，避免了传统级联失效的性能开销。
+- 向后兼容：保持了与传统实现的接口兼容性，同时提供了新的精确失效能力。

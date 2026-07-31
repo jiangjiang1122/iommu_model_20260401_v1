@@ -3,88 +3,53 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-07-07T03:41:29Z"
+exported_at: "2026-07-31T01:13:48Z"
 modules:
     "":
-        dir_name: RISC-V IOMMU SystemC_TLM-2.0 架构级性能模型
-        title: RISC-V IOMMU SystemC/TLM-2.0 架构级性能模型
+        dir_name: RISC-V IOMMU SystemC 仿真平台
+        title: RISC-V IOMMU SystemC 仿真平台
         scope: []
+        source_files: []
+        children:
+            - rp
+        depends_on: []
+        related_to: []
+    analysis_scripts:
+        dir_name: IOMMU 性能分析脚本集（tmp）
+        title: IOMMU 性能分析脚本集（tmp）
+        scope:
+            - tmp/
         source_files: []
         children: []
         depends_on: []
         related_to: []
-    build_system:
-        dir_name: 基于 Makefile 的 SystemC 仿真构建与多场景测试体系
-        title: 基于 Makefile 的 SystemC 仿真构建与多场景测试体系
-        scope: []
-        source_files:
-            - Makefile
-            - main.cpp
-            - build_cpp.sh
-            - compile_and_test.sh
-            - compile_wsl.sh
-            - run_wsl.sh
-            - compile_systemc.bat
-        children: []
-        depends_on: []
-        related_to: []
-    configuration_system:
-        dir_name: IOMMU 性能模型配置系统：JSON 驱动与编译期宏混合机制
-        title: IOMMU 性能模型配置系统：JSON 驱动与编译期宏混合机制
-        scope: []
-        source_files:
-            - iommu/cache_config/default_config.json
-            - iommu/cache_src/common/json_config.cpp
-            - iommu/cache_src/common/types.h
-            - iommu/iommu_perf_model/iommu_perf_params.hh
-            - Makefile
-            - iommu/iommu_top.hh
-        children: []
-        depends_on: []
-        related_to: []
-    dependency_management:
-        dir_name: 基于 Makefile 与 SystemC 的手动依赖管理
-        title: 基于 Makefile 与 SystemC 的手动依赖管理
-        scope: []
-        source_files:
-            - Makefile
-            - README.md
-            - compile_wsl.sh
-            - build_cpp.sh
-        children: []
-        depends_on: []
-        related_to: []
-    error_handling:
-        dir_name: IOMMU 错误处理与故障报告机制
-        title: IOMMU 错误处理与故障报告机制
-        scope: []
-        source_files:
-            - iommu/include/iommu_fault.hh
-            - iommu/iommu_fun_model/iommu_faults.cc
-            - iommu/iommu_perf_model/iommu_perf_forwarder_fault_cq.cc
-            - iommu/iommu_fun_model/iommu_translate.cc
-            - iommu/cache_src/common/json_config.cpp
-        children: []
-        depends_on: []
-        related_to: []
-    frontend_style:
-        dir_name: 前端样式系统：不适用
-        title: 前端样式系统：不适用
-        scope: []
+    device_models:
+        dir_name: IOMMU 性能模型子系统（DDR_PCIe NoC_RP_Slink）
+        title: IOMMU 性能模型子系统（DDR/PCIe NoC/RP/Slink）
+        scope:
+            - ddr/
+            - pcienoc/
+            - rp/
+            - slink/
         source_files: []
         children: []
         depends_on: []
         related_to: []
-    logging_system:
-        dir_name: 日志与统计输出系统
-        title: 日志与统计输出系统
-        scope: []
-        source_files:
-            - iommu/cache_src/common/stats_collector.h
-            - iommu/cache_src/common/stats_collector.cpp
-            - iommu/cache_src/subsystem/cache_subsystem.cpp
-            - iommu/iommu_perf_model/iommu_perf_collector.cc
-            - main.cpp
+    iommu_core:
+        dir_name: IOMMU 性能模型核心（缓存子系统与失效通路）
+        title: IOMMU 性能模型核心（缓存子系统与失效通路）
+        scope:
+            - iommu/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    rp:
+        dir_name: IOMMU 地址转换回归测试场景集（RP）
+        title: IOMMU 地址转换回归测试场景集（RP）
+        scope:
+            - rp/
+        source_files: []
         children: []
         depends_on: []
         related_to: []
