@@ -159,6 +159,9 @@ public:
     uint32_t lazy_sweep_ram(uint8_t level, uint32_t ram_id, uint8_t new_vn,
                             sc_time& ram_latency);
 
+    // [失效] 三级子表的延迟失效旁路丢弃次数合计
+    uint64_t lazy_inval_drops() const;
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -280,6 +283,9 @@ public:
     uint32_t lazy_sweep_ram(uint32_t ram_id, uint8_t new_vn,
                             sc_time& ram_latency);
 
+    // [失效] 延迟失效(LIB)查询旁路命中并丢弃失效数据的次数(本级子表)
+    uint64_t lazy_inval_drops() const { return lazy_inval_drops_; }
+
 protected:
     uint32_t hash_function(const WalkerTag& tag) const override;
 
@@ -292,6 +298,7 @@ private:
     uint32_t sets_per_ram_ = 0;
     uint32_t log2_num_sets_ = 0;  // [失效] log2(num_sets_), 新哈希移位量用
     bool     hash_v2_ = true;     // [失效] true=新哈希(支持addr枚举), false=legacy
+    uint64_t lazy_inval_drops_ = 0;  // [失效] LIB 旁路丢弃失效CL的次数
 
     // [多RAM] 未掩码原始hash
     uint32_t raw_hash(const WalkerTag& tag) const;

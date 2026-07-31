@@ -124,6 +124,7 @@ bool WalkerSubCache::lookup_ram(const WalkerTag& tag, WalkerData& out_data,
                 cache_array_[set][way].invalidate();
                 if (replacement_) replacement_->invalidate(set, static_cast<uint32_t>(way));
                 stats_.record_invalidation(cache_name_);
+                lazy_inval_drops_++;   // [失效] 量化延迟失效生效次数
                 stats_.record_miss(cache_name_);
                 stats_.record_lookup(cache_name_);
                 stats_.record_latency(cache_name_, op_latency_ns);
@@ -1163,6 +1164,12 @@ uint32_t WalkerCache::lazy_sweep_ram(uint8_t level, uint32_t ram_id,
     WalkerSubCache* sub = sub_cache(level);
     if (!sub) { ram_latency = SC_ZERO_TIME; return 0; }
     return sub->lazy_sweep_ram(ram_id, new_vn, ram_latency);
+}
+
+// [失效] 三级子表延迟失效旁路丢弃次数合计
+uint64_t WalkerCache::lazy_inval_drops() const {
+    return ptw_c1_->lazy_inval_drops() + ptw_c2_->lazy_inval_drops() +
+           ptw_c3_->lazy_inval_drops();
 }
 
 iova_t WalkerCache::extract_addr_segment(iova_t addr, uint8_t level,

@@ -54,6 +54,10 @@ public:
     uint32_t ram_fifo_depth() const { return cfg_.ram_fifo_depth; }
     uint32_t num_sets() const { return num_sets_; }
 
+    // [失效] 延迟失效(LIB)查询旁路命中并丢弃失效数据的次数。
+    // 仅在 LIB 非空时可能自增(冷路径), 用于量化验证延迟失效策略是否生效。
+    uint64_t lazy_inval_drops() const { return lazy_inval_drops_; }
+
     // ============================================================
     // [失效][多RAM] 失效原子段与候选 set 计算
     //   失效指令由 pt_hash_thread 拆分为子失效分发到各 RAM worker,
@@ -132,6 +136,7 @@ private:
     uint32_t sets_per_ram_ = 0;   // 每组RAM的set数
     uint32_t log2_num_sets_ = 0;  // [失效] log2(num_sets_), 新哈希移位量用
     bool     hash_v2_ = true;     // [失效] true=新哈希(inval_v2), false=legacy
+    uint64_t lazy_inval_drops_ = 0;  // [失效] LIB 旁路丢弃失效CL的次数
 };
 
 } // namespace iommu

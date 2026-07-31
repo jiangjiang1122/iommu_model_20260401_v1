@@ -162,6 +162,7 @@ bool PTCache::lookup_pt_ram(gscid_t gscid, pscid_t pscid, iova_t iova,
                 cache_array_[set][way].invalidate();
                 if (replacement_) replacement_->invalidate(set, static_cast<uint32_t>(way));
                 stats_.record_invalidation(cache_name_);
+                lazy_inval_drops_++;   // [失效] 量化延迟失效生效次数
                 stats_.record_miss(cache_name_);
                 stats_.record_lookup(cache_name_);
                 stats_.record_phase_lookup(cache_name_, phase_tracker_);

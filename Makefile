@@ -129,6 +129,25 @@ else ifeq ($(TEST), rand4k_twostage_s2on_128g)
                  -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE7_PTW) \
                  -DTEST_CFG_NUM_PAGES=1250
+else ifeq ($(TEST), rand4k_twostage_s2on_128g_inval)
+    # 场景10: 场景7 + 运行期随机穿插 DC/PC/PT/Walker 缓存失效命令
+    #   基础负载与场景7逐包等价(相同随机种子/相同IOVA序列), 便于直接对比性能;
+    #   失效注入独立RNG, 不扰动IOVA序列。
+    #   平均每 SCENE10_INVAL_PERIOD 个请求穿插一条失效指令(+IOFENCE),
+    #   类型按权重随机(VMA-LAZY/GVMA-LAZY/SCAN_RANGE/NL=1/IODIR.DDT/IODIR.PDT)
+    #   验证: 失效扰动下功能100%正确 + PT/Walker延迟失效(LIB/VN)是否生效 + 性能影响
+    SCENE10_PTW ?= 4
+    SCENE10_INVAL_PERIOD ?= 500
+    TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_inval_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE10_PTW) \
+                 -DTEST_CFG_NUM_PAGES=1250 \
+                 -DTEST_CFG_INVAL_PERIOD_REQS=$(SCENE10_INVAL_PERIOD)
 else
     # rand4k_singlestage (default)
     TEST_THREAD_SRC = rp/test_rp_rand4k_single_stage_thread.cc
