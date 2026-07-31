@@ -160,8 +160,8 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     stats_.set_latency_histogram_enabled(cfg.statistics.enable_latency_histogram);
     stats_.set_output_file(cfg.statistics.output_file);
 
-    SC_THREAD(dc_worker_thread);
-    SC_THREAD(pc_worker_thread);
+    SC_THREAD(dc_scheduler_thread);
+    SC_THREAD(pc_scheduler_thread);
     // [多RAM] PT Cache 多 RAM 改造: Hash单元线程 + 每组RAM独立worker(sc_spawn)
     pt_num_rams_ = pt_cache_->num_rams();
     assert(pt_num_rams_ >= 1 && pt_num_rams_ <= PT_MAX_RAMS);
@@ -209,14 +209,7 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     }
     SC_THREAD(walker_hash_thread);
     SC_THREAD(walker_join_thread);
-    SC_THREAD(msi_worker_thread);
-    SC_THREAD(dc_update_worker_thread);
-    SC_THREAD(pc_update_worker_thread);
-    SC_THREAD(msi_update_worker_thread);
-    SC_THREAD(dc_invalidate_worker_thread);
-    SC_THREAD(pc_invalidate_worker_thread);
-    SC_THREAD(pt_invalidate_worker_thread);
-    SC_THREAD(msi_invalidate_worker_thread);
+    SC_THREAD(msi_scheduler_thread);
     SC_THREAD(invalidation_worker_thread);
     
     // [NEW] 初始化PT Cache去重功能
@@ -243,6 +236,17 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u)\n",
            cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways,
            dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth);
+    fflush(stdout);
+
+    // [失效] 配置并注入共享 LIB: PT 与 Walker 共用同一个 LIB 与全局 VN
+    inval_enabled_ = cfg.invalidation.enable;
+    lazy_enabled_ = cfg.invalidation.lazy_enable;
+    lib_.configure(cfg.invalidation.lib_size, cfg.invalidation.vn_bits);
+    pt_cache_->set_lazy_invalid_buffer(&lib_);
+    walker_cache_->set_lazy_invalid_buffer(&lib_);
+    printf("[CACHE_SUBSYSTEM] Invalidation: enable=%d, lazy=%d, LIB size=%u, VN_MAX=%u, lib_match_cycles=%u\n",
+           inval_enabled_, lazy_enabled_, lib_.size(), lib_.vn_max(),
+           cfg.invalidation.lib_match_cycles);
     fflush(stdout);
 }
 
@@ -356,27 +360,84 @@ void CacheSubsystem::trace_task_event(const char* phase,
     stats_.write_log(oss.str());
 }
 
-void CacheSubsystem::dc_worker_thread() {
+// ============================================================
+// [失效] DC Cache 合并调度线程
+// 优先级: invalidate(最高) > update > lookup; 单线程串行避免阵列竞态。
+// ============================================================
+void CacheSubsystem::dc_scheduler_thread() {
     while (true) {
-        CacheMessage req = dc_request_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "dc_cache", "lookup", req, start);
-        CacheMessage resp = execute_dc_request(req);
-        record_task_completion("dc_cache", start, sc_time_stamp());
-        trace_task_event("end", "dc_cache", "lookup", req, start, &resp);
-        push_fifo(dc_response_fifo, resp);
+        if (dc_invalidate_fifo.num_available() > 0) {
+            CacheMessage req = dc_invalidate_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "dc_cache", "invalidate", req, start);
+            CacheMessage resp = execute_dc_invalidate_request(req);
+            record_task_completion("dc_cache", start, sc_time_stamp());
+            trace_task_event("end", "dc_cache", "invalidate", req, start, &resp);
+            push_fifo(dc_invalidate_response_fifo, resp);
+            continue;
+        }
+        if (dc_update_fifo.num_available() > 0) {
+            CacheMessage req = dc_update_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "dc_cache", "update", req, start);
+            CacheMessage resp = execute_dc_update_request(req);
+            record_task_completion("dc_cache", start, sc_time_stamp());
+            trace_task_event("end", "dc_cache", "update", req, start, &resp);
+            continue;
+        }
+        if (dc_request_fifo.num_available() > 0) {
+            CacheMessage req = dc_request_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "dc_cache", "lookup", req, start);
+            CacheMessage resp = execute_dc_request(req);
+            record_task_completion("dc_cache", start, sc_time_stamp());
+            trace_task_event("end", "dc_cache", "lookup", req, start, &resp);
+            push_fifo(dc_response_fifo, resp);
+            continue;
+        }
+        wait(dc_invalidate_fifo.data_written_event() |
+             dc_update_fifo.data_written_event() |
+             dc_request_fifo.data_written_event());
     }
 }
 
-void CacheSubsystem::pc_worker_thread() {
+// ============================================================
+// [失效] PC Cache 合并调度线程 (invalidate > update > lookup)
+// ============================================================
+void CacheSubsystem::pc_scheduler_thread() {
     while (true) {
-        CacheMessage req = pc_request_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pc_cache", "lookup", req, start);
-        CacheMessage resp = execute_pc_request(req);
-        record_task_completion("pc_cache", start, sc_time_stamp());
-        trace_task_event("end", "pc_cache", "lookup", req, start, &resp);
-        push_fifo(pc_response_fifo, resp);
+        if (pc_invalidate_fifo.num_available() > 0) {
+            CacheMessage req = pc_invalidate_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "pc_cache", "invalidate", req, start);
+            CacheMessage resp = execute_pc_invalidate_request(req);
+            record_task_completion("pc_cache", start, sc_time_stamp());
+            trace_task_event("end", "pc_cache", "invalidate", req, start, &resp);
+            push_fifo(pc_invalidate_response_fifo, resp);
+            continue;
+        }
+        if (pc_update_fifo.num_available() > 0) {
+            CacheMessage req = pc_update_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "pc_cache", "update", req, start);
+            CacheMessage resp = execute_pc_update_request(req);
+            record_task_completion("pc_cache", start, sc_time_stamp());
+            trace_task_event("end", "pc_cache", "update", req, start, &resp);
+            continue;
+        }
+        if (pc_request_fifo.num_available() > 0) {
+            CacheMessage req = pc_request_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "pc_cache", "lookup", req, start);
+            CacheMessage resp = execute_pc_request(req);
+            record_task_completion("pc_cache", start, sc_time_stamp());
+            trace_task_event("end", "pc_cache", "lookup", req, start, &resp);
+            push_fifo(pc_response_fifo, resp);
+            continue;
+        }
+        wait(pc_invalidate_fifo.data_written_event() |
+             pc_update_fifo.data_written_event() |
+             pc_request_fifo.data_written_event());
     }
 }
 
@@ -390,13 +451,21 @@ void CacheSubsystem::pc_worker_thread() {
 // ============================================================
 void CacheSubsystem::pt_hash_thread() {
     while (true) {
+        // [失效] 最高优先: 处理失效指令(拆分子失效到RAM worker + join, 阻塞等待)
+        if (pt_invalidate_fifo.num_available() > 0) {
+            CacheMessage inv = pt_invalidate_fifo.read();
+            dispatch_pt_invalidate(inv);
+            continue;
+        }
+
         // 乒乓调度: 根据 pt_sched_next_is_request_ 决定本轮优先处理哪类
         bool has_req = (pt_request_fifo.num_available() > 0);
         bool has_upd = (pt_update_fifo.num_available() > 0);
 
         if (!has_req && !has_upd) {
             wait(pt_request_fifo.data_written_event() |
-                 pt_update_fifo.data_written_event());
+                 pt_update_fifo.data_written_event() |
+                 pt_invalidate_fifo.data_written_event());
             continue;
         }
 
@@ -471,6 +540,32 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
         const sc_time dequeue_time = sc_time_stamp();
         const double start_ns = dequeue_time.to_seconds() * 1e9;
         const bool is_update = (req.msg_type == CacheMsgType::PT_UPDATE);
+
+        // [失效] 失效子任务: 在本 RAM 串行执行(与 in-flight lookup/fill 原子)
+        if (req.msg_type == CacheMsgType::PT_INVALIDATE) {
+            sc_time inv_latency = SC_ZERO_TIME;
+            uint32_t affected = 0;
+            if (req.inval_lazy_sweep) {
+                affected = pt_cache_->lazy_sweep_ram(static_cast<uint32_t>(ram_id),
+                                                     pt_inval_sweep_new_vn_, inv_latency);
+            } else if (req.inval_sub_has_set) {
+                affected = pt_cache_->invalidate_set_ram(req.inval_sub_set, req, inv_latency);
+            } else {
+                affected = pt_cache_->invalidate_ram_range(static_cast<uint32_t>(ram_id),
+                                                           req, inv_latency);
+            }
+            wait(inv_latency);
+            pt_inval_affected_ += affected;
+            if (pt_inval_remaining_ > 0) pt_inval_remaining_--;
+            pt_inval_sub_done_event_.notify(SC_ZERO_TIME);
+
+            const double iend_ns = sc_time_stamp().to_seconds() * 1e9;
+            pt_ram_task_count_[ram_id]++;
+            pt_ram_busy_ns_[ram_id] += (iend_ns - start_ns);
+            if (pt_ram_first_start_ns_ < 0.0) pt_ram_first_start_ns_ = start_ns;
+            if (iend_ns > pt_ram_last_end_ns_) pt_ram_last_end_ns_ = iend_ns;
+            continue;
+        }
 
         if (!is_update) {
             // =============================================================
@@ -806,6 +901,96 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
         dedup_ram_busy_ns_[ram_id] += (task_end_ns - start_ns);
         if (task_end_ns > dedup_ram_last_end_ns_) dedup_ram_last_end_ns_ = task_end_ns;
     }
+}
+
+// ============================================================
+// [失效] dispatch_pt_invalidate - PT Cache 失效拆分到 RAM worker + join
+// 由 pt_hash_thread 调用(hash 1拍后拆分); 本函数阻塞直至所有子失效完成,
+// 保证失效为最高优先(期间不下发新 lookup/update)。
+// 子失效写入对应 pt_ram_fifo_, 与已排队的 lookup/fill 在同 RAM 内串行(原子)。
+//   LAZY 扫表(VN回绕): 每 RAM 一个 sweep 子任务
+//   PRECISE:   单一候选 set -> 所属 RAM
+//   SCAN_RANGE:枚举8候选 set(legacy降级全扫) -> 各自 RAM
+//   SCAN/GLOBAL: 每 RAM 扫本区间
+// ============================================================
+void CacheSubsystem::dispatch_pt_invalidate(const CacheMessage& cmd) {
+    const sc_time start = sc_time_stamp();
+    trace_task_event("begin", "pt_cache", "invalidate", cmd, start);
+
+    // Hash 单元 1 拍
+    wait(pt_cache_->hash_stage_latency());
+
+    pt_inval_affected_ = 0;
+    pt_inval_sweep_new_vn_ = lib_.global_vn();  // VN回绕后 pipeline 已置0
+
+    std::vector<CacheMessage> subs;
+    auto make_sub = [&]() {
+        CacheMessage s = cmd;
+        s.msg_type = CacheMsgType::PT_INVALIDATE;
+        return s;
+    };
+
+    if (cmd.inval_lazy_sweep) {
+        for (uint32_t r = 0; r < pt_num_rams_; ++r) {
+            CacheMessage s = make_sub();
+            s.inval_sub_ram_id = r;
+            s.inval_sub_has_set = false;
+            subs.push_back(s);
+        }
+    } else if (cmd.invalidate_mode == CacheInvalidateMode::PRECISE) {
+        uint32_t set = pt_cache_->precise_candidate_set(cmd.gscid, cmd.pscid, cmd.iova);
+        CacheMessage s = make_sub();
+        s.inval_sub_set = set;
+        s.inval_sub_has_set = true;
+        s.inval_sub_ram_id = pt_cache_->ram_of_set(set);
+        subs.push_back(s);
+    } else if (cmd.invalidate_mode == CacheInvalidateMode::SCAN_RANGE) {
+        uint32_t cand[8];
+        uint32_t n = pt_cache_->enum_candidate_sets(cmd.iova, cand);
+        if (n == 0) {
+            // legacy 哈希无法枚举 -> 降级全表扫描
+            for (uint32_t r = 0; r < pt_num_rams_; ++r) {
+                CacheMessage s = make_sub();
+                s.invalidate_mode = CacheInvalidateMode::SCAN;
+                s.inval_sub_ram_id = r;
+                s.inval_sub_has_set = false;
+                subs.push_back(s);
+            }
+        } else {
+            for (uint32_t i = 0; i < n; ++i) {
+                CacheMessage s = make_sub();
+                s.inval_sub_set = cand[i];
+                s.inval_sub_has_set = true;
+                s.inval_sub_ram_id = pt_cache_->ram_of_set(cand[i]);
+                subs.push_back(s);
+            }
+        }
+    } else {
+        // SCAN / GLOBAL
+        for (uint32_t r = 0; r < pt_num_rams_; ++r) {
+            CacheMessage s = make_sub();
+            s.inval_sub_ram_id = r;
+            s.inval_sub_has_set = false;
+            subs.push_back(s);
+        }
+    }
+
+    pt_inval_remaining_ = static_cast<int>(subs.size());
+    for (auto& s : subs) {
+        pt_ram_fifo_[s.inval_sub_ram_id]->write(s);  // 阻塞写 = 反压
+    }
+    while (pt_inval_remaining_ > 0) {
+        wait(pt_inval_sub_done_event_);
+    }
+
+    CacheMessage resp;
+    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
+    resp.task_id = cmd.task_id;
+    resp.cmd_type = cmd.cmd_type;
+    resp.affected_entries = pt_inval_affected_;
+    record_task_completion("pt_cache", start, sc_time_stamp());
+    trace_task_event("end", "pt_cache", "invalidate", cmd, start, &resp);
+    push_fifo(pt_invalidate_response_fifo, resp);
 }
 
 // [STAT] PT Scheduler任务间隔分析报告
@@ -1156,8 +1341,14 @@ void CacheSubsystem::walker_hash_thread() {
         bool processed = false;
         CacheMessage req;
 
+        // 0. [失效] 最高优先: 失效指令(拆分子失效到RAM worker + join, 阻塞等待)
+        if (walker_invalidate_fifo.num_available() > 0) {
+            req = walker_invalidate_fifo.read();
+            dispatch_walker_invalidate(req);
+            processed = true;
+        }
         // 1. update优先: 保证Walker更新及时可见(后续同段任务二次校验可命中)
-        if (walker_update_fifo.num_available() > 0) {
+        else if (walker_update_fifo.num_available() > 0) {
             req = walker_update_fifo.read();
             if (req.walker_is_s2_lookup) {
                 // S2 Cache更新: 零延时, 内联执行
@@ -1197,17 +1388,6 @@ void CacheSubsystem::walker_hash_thread() {
             req.walker_origin = 1;
             walker_front_lookup_count_++;
             dispatch_walker_lookup(req);
-            processed = true;
-        }
-        // 4. invalidate
-        else if (walker_invalidate_fifo.num_available() > 0) {
-            req = walker_invalidate_fifo.read();
-            const sc_time start = sc_time_stamp();
-            trace_task_event("begin", "walker_cache", "invalidate", req, start);
-            CacheMessage resp = execute_walker_invalidate_request(req);
-            record_task_completion("walker_cache", start, sc_time_stamp());
-            trace_task_event("end", "walker_cache", "invalidate", req, start, &resp);
-            push_fifo(walker_invalidate_response_fifo, resp);
             processed = true;
         }
 
@@ -1362,6 +1542,32 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
         if (walker_ram_first_start_ns_ < 0.0) walker_ram_first_start_ns_ = start_ns;
 
         sc_time ram_latency = SC_ZERO_TIME;
+        if (sub.msg_type == CacheMsgType::WALKER_INVALIDATE) {
+            // [失效] 失效子任务: 在本(级xRAM)worker 串行执行(与 in-flight 子查询原子)
+            const uint8_t level = sub.walker_sub_level;
+            const uint32_t rid = sub.inval_sub_ram_id;
+            uint32_t affected = 0;
+            if (sub.inval_lazy_sweep) {
+                affected = walker_cache_->lazy_sweep_ram(level, rid,
+                                                         walker_inval_sweep_new_vn_,
+                                                         ram_latency);
+            } else if (sub.inval_sub_has_set) {
+                affected = walker_cache_->invalidate_set_ram(level, sub.inval_sub_set,
+                                                             sub, ram_latency);
+            } else {
+                affected = walker_cache_->invalidate_ram_range(level, rid, sub,
+                                                               ram_latency);
+            }
+            wait(ram_latency);
+            walker_inval_affected_ += affected;
+            if (walker_inval_remaining_ > 0) walker_inval_remaining_--;
+            walker_inval_sub_done_event_.notify(SC_ZERO_TIME);
+            const double iend_ns = sc_time_stamp().to_seconds() * 1e9;
+            walker_ram_task_count_[ram_id]++;
+            walker_ram_busy_ns_[ram_id] += (iend_ns - start_ns);
+            if (iend_ns > walker_ram_last_end_ns_) walker_ram_last_end_ns_ = iend_ns;
+            continue;
+        }
         if (sub.msg_type == CacheMsgType::WALKER_LOOKUP) {
             WalkerData data;
             bool hit = walker_cache_->lookup_level_ram(
@@ -1464,96 +1670,101 @@ void CacheSubsystem::walker_join_thread() {
     }
 }
 
-void CacheSubsystem::msi_worker_thread() {
-    while (true) {
-        CacheMessage req = msi_request_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "msipt_cache", "lookup", req, start);
-        CacheMessage resp = execute_msi_request(req);
-        record_task_completion("msipt_cache", start, sc_time_stamp());
-        trace_task_event("end", "msipt_cache", "lookup", req, start, &resp);
-        push_fifo(msi_response_fifo, resp);
+// ============================================================
+// [失效] dispatch_walker_invalidate - Walker Cache 失效拆分到 (级xRAM) worker + join
+// 由 walker_hash_thread 调用; 阻塞直至所有子失效完成。
+// 涉及级: C3/C2 必, C1 仅 Sv48(非 Sv39) 模式。
+// 非 LAZY 统一走 invalidate_ram_range(扫本级RAM区间, 内部按 line_matches_inval
+// 处理 GLOBAL/gscid/pscid/addr): Walker 子表仅 64 set, 扫描代价低且正确
+// 处理 va_pa/sv48/x4 多组合(按每条 tag 自身 flag 比较段)。
+// 小范围地址失效: 由于同一 addr 在不同 flag 组合下映射到不同 va_segment,
+// 这里以 SCAN 覆盖全部组合(与旧 invalidate_vma 的多组合枚举等效)。
+// ============================================================
+void CacheSubsystem::dispatch_walker_invalidate(const CacheMessage& cmd) {
+    const sc_time start = sc_time_stamp();
+    trace_task_event("begin", "walker_cache", "invalidate", cmd, start);
+
+    wait(clock_period_);  // Hash 1 拍
+
+    walker_inval_affected_ = 0;
+    walker_inval_sweep_new_vn_ = lib_.global_vn();
+
+    uint8_t levels[3];
+    uint8_t lc = 0;
+    levels[lc++] = 3;
+    levels[lc++] = 2;
+    if (!walker_cache_->sv39_mode()) levels[lc++] = 1;
+
+    std::vector<CacheMessage> subs;
+    for (uint8_t li = 0; li < lc; ++li) {
+        const uint8_t level = levels[li];
+        for (uint32_t r = 0; r < walker_num_rams_; ++r) {
+            CacheMessage s = cmd;
+            s.msg_type = CacheMsgType::WALKER_INVALIDATE;
+            s.walker_sub_level = level;
+            s.inval_sub_ram_id = r;
+            s.inval_sub_has_set = false;   // 扫本(级xRAM)区间
+            subs.push_back(s);
+        }
     }
+
+    walker_inval_remaining_ = static_cast<int>(subs.size());
+    for (auto& s : subs) {
+        const uint32_t worker_id =
+            (s.walker_sub_level - 1) * walker_num_rams_ + s.inval_sub_ram_id;
+        walker_ram_upd_fifo_[worker_id]->write(s);  // 高优先通道, 阻塞写=反压
+    }
+    while (walker_inval_remaining_ > 0) {
+        wait(walker_inval_sub_done_event_);
+    }
+
+    CacheMessage resp;
+    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
+    resp.task_id = cmd.task_id;
+    resp.cmd_type = cmd.cmd_type;
+    resp.affected_entries = walker_inval_affected_;
+    record_task_completion("walker_cache", start, sc_time_stamp());
+    trace_task_event("end", "walker_cache", "invalidate", cmd, start, &resp);
+    push_fifo(walker_invalidate_response_fifo, resp);
 }
 
-void CacheSubsystem::dc_update_worker_thread() {
+// ============================================================
+// [失效] MSIPT Cache 合并调度线程 (invalidate > update > lookup)
+// ============================================================
+void CacheSubsystem::msi_scheduler_thread() {
     while (true) {
-        CacheMessage req = dc_update_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "dc_cache", "update", req, start);
-        CacheMessage resp = execute_dc_update_request(req);
-        record_task_completion("dc_cache", start, sc_time_stamp());
-        trace_task_event("end", "dc_cache", "update", req, start, &resp);
-    }
-}
-
-void CacheSubsystem::pc_update_worker_thread() {
-    while (true) {
-        CacheMessage req = pc_update_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pc_cache", "update", req, start);
-        CacheMessage resp = execute_pc_update_request(req);
-        record_task_completion("pc_cache", start, sc_time_stamp());
-        trace_task_event("end", "pc_cache", "update", req, start, &resp);
-    }
-}
-
-void CacheSubsystem::msi_update_worker_thread() {
-    while (true) {
-        CacheMessage req = msi_update_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "msipt_cache", "update", req, start);
-        CacheMessage resp = execute_msi_update_request(req);
-        record_task_completion("msipt_cache", start, sc_time_stamp());
-        trace_task_event("end", "msipt_cache", "update", req, start, &resp);
-    }
-}
-
-void CacheSubsystem::dc_invalidate_worker_thread() {
-    while (true) {
-        CacheMessage req = dc_invalidate_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "dc_cache", "invalidate", req, start);
-        CacheMessage resp = execute_dc_invalidate_request(req);
-        record_task_completion("dc_cache", start, sc_time_stamp());
-        trace_task_event("end", "dc_cache", "invalidate", req, start, &resp);
-        push_fifo(dc_invalidate_response_fifo, resp);
-    }
-}
-
-void CacheSubsystem::pc_invalidate_worker_thread() {
-    while (true) {
-        CacheMessage req = pc_invalidate_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pc_cache", "invalidate", req, start);
-        CacheMessage resp = execute_pc_invalidate_request(req);
-        record_task_completion("pc_cache", start, sc_time_stamp());
-        trace_task_event("end", "pc_cache", "invalidate", req, start, &resp);
-        push_fifo(pc_invalidate_response_fifo, resp);
-    }
-}
-
-void CacheSubsystem::pt_invalidate_worker_thread() {
-    while (true) {
-        CacheMessage req = pt_invalidate_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "pt_cache", "invalidate", req, start);
-        CacheMessage resp = execute_pt_invalidate_request(req);
-        record_task_completion("pt_cache", start, sc_time_stamp());
-        trace_task_event("end", "pt_cache", "invalidate", req, start, &resp);
-        push_fifo(pt_invalidate_response_fifo, resp);
-    }
-}
-
-void CacheSubsystem::msi_invalidate_worker_thread() {
-    while (true) {
-        CacheMessage req = msi_invalidate_fifo.read();
-        const sc_time start = sc_time_stamp();
-        trace_task_event("begin", "msipt_cache", "invalidate", req, start);
-        CacheMessage resp = execute_msi_invalidate_request(req);
-        record_task_completion("msipt_cache", start, sc_time_stamp());
-        trace_task_event("end", "msipt_cache", "invalidate", req, start, &resp);
-        push_fifo(msi_invalidate_response_fifo, resp);
+        if (msi_invalidate_fifo.num_available() > 0) {
+            CacheMessage req = msi_invalidate_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "msipt_cache", "invalidate", req, start);
+            CacheMessage resp = execute_msi_invalidate_request(req);
+            record_task_completion("msipt_cache", start, sc_time_stamp());
+            trace_task_event("end", "msipt_cache", "invalidate", req, start, &resp);
+            push_fifo(msi_invalidate_response_fifo, resp);
+            continue;
+        }
+        if (msi_update_fifo.num_available() > 0) {
+            CacheMessage req = msi_update_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "msipt_cache", "update", req, start);
+            CacheMessage resp = execute_msi_update_request(req);
+            record_task_completion("msipt_cache", start, sc_time_stamp());
+            trace_task_event("end", "msipt_cache", "update", req, start, &resp);
+            continue;
+        }
+        if (msi_request_fifo.num_available() > 0) {
+            CacheMessage req = msi_request_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "msipt_cache", "lookup", req, start);
+            CacheMessage resp = execute_msi_request(req);
+            record_task_completion("msipt_cache", start, sc_time_stamp());
+            trace_task_event("end", "msipt_cache", "lookup", req, start, &resp);
+            push_fifo(msi_response_fifo, resp);
+            continue;
+        }
+        wait(msi_invalidate_fifo.data_written_event() |
+             msi_update_fifo.data_written_event() |
+             msi_request_fifo.data_written_event());
     }
 }
 
@@ -1952,12 +2163,9 @@ CacheMessage CacheSubsystem::execute_dc_invalidate_request(const CacheMessage& r
 
     auto contexts = dc_cache_->invalidate_ddt(req.device_id, &latency);
 
-    // DC 失效后，关联 PT/Walker/MSIPT 失效通过 FIFO 传递
-    for (auto& ctx : contexts) {
-        enqueue_cascade_invalidations(ctx.gscid, ctx.pscid, req.device_id,
-                                      true, ctx.pscid != 0, true);
-    }
-
+    // [失效] 按 spec V1.0.1: IODIR.INVAL_DDT 仅失效 DDT/PDT 目录缓存,
+    // 不再级联 PT/Walker/MSIPT(那是 IOTINVAL 的职责)。DC→PC 关联失效
+    // 由 execute_invalidation_pipeline 统一编排。
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
     resp.task_id = req.task_id;
@@ -1979,11 +2187,7 @@ CacheMessage CacheSubsystem::execute_pc_invalidate_request(const CacheMessage& r
 
     auto contexts = pc_cache_->invalidate_pdt(req.device_id, req.process_id,
                                              req.has_process_id, &latency);
-    for (auto& ctx : contexts) {
-        enqueue_cascade_invalidations(0, ctx.pscid, req.device_id,
-                                      false, true, false);
-    }
-
+    // [失效] 按 spec: PC 失效不再级联 PT/Walker(IOTINVAL 职责)。
     CacheMessage resp;
     resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
     resp.task_id = req.task_id;
@@ -2067,24 +2271,62 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
         resp.affected_entries += partial.affected_entries;
         resp.latency += partial.latency;
     };
+    // 向 PT + Walker 发送同一失效(可选含 Walker), 各自经 hash 线程拆分到 RAM worker
+    auto drive_pt = [&](const CacheMessage& base, CacheInvalidateMode mode,
+                        bool lazy_sweep) {
+        CacheMessage r = base;
+        r.msg_type = CacheMsgType::PT_INVALIDATE;
+        r.invalidate_mode = mode;
+        r.inval_lazy_sweep = lazy_sweep;
+        accumulate(drive_invalidate_and_wait(pt_invalidate_fifo,
+                                             pt_invalidate_response_fifo, r));
+    };
+    auto drive_walker = [&](const CacheMessage& base, CacheInvalidateMode mode,
+                            bool lazy_sweep) {
+        CacheMessage r = base;
+        r.msg_type = CacheMsgType::WALKER_INVALIDATE;
+        r.invalidate_mode = mode;
+        r.inval_lazy_sweep = lazy_sweep;
+        accumulate(drive_invalidate_and_wait(walker_invalidate_fifo,
+                                             walker_invalidate_response_fifo, r));
+    };
+    // [失效] LAZY 记录: 向共享 LIB 记录一次(递增全局VN); 未回绕则真正延迟(不下发),
+    //   回绕则向 PT+Walker 下发批量扫表; LIB满降级为立即 SCAN。
+    //   lazy_enabled_=false 时直接立即 SCAN。
+    auto handle_lazy = [&](LibMatchClass cls) {
+        if (!lazy_enabled_) {
+            drive_pt(msg, CacheInvalidateMode::SCAN, false);
+            drive_walker(msg, CacheInvalidateMode::SCAN, false);
+            return;
+        }
+        bool full = false;
+        const bool wrap = lib_.record(cls, msg.gscid, msg.pscid, full);
+        if (full) {
+            // LIB 满: 降级为立即扫表失效(保功能正确)
+            drive_pt(msg, CacheInvalidateMode::SCAN, false);
+            drive_walker(msg, CacheInvalidateMode::SCAN, false);
+        } else if (wrap) {
+            // VN 回绕: 批量扫表 PT + Walker
+            drive_pt(msg, CacheInvalidateMode::SCAN, true);
+            drive_walker(msg, CacheInvalidateMode::SCAN, true);
+        }
+        // else: 已记录到 LIB, 真正延迟失效(不下发, 查询旁路时生效)
+    };
 
-    if (msg.cmd_type == InvalidCmdType::GLOBAL_INVAL ||
-        msg.invalidate_mode == CacheInvalidateMode::GLOBAL) {
+    // GLOBAL_INVAL: 所有 cache 全清 + 清 LIB/VN
+    if (msg.cmd_type == InvalidCmdType::GLOBAL_INVAL) {
+        lib_.clear();
         CacheMessage req = msg;
         req.invalidate_mode = CacheInvalidateMode::GLOBAL;
-
+        req.inval_lazy_sweep = false;
         req.msg_type = CacheMsgType::DC_INVALIDATE;
         accumulate(drive_invalidate_and_wait(dc_invalidate_fifo,
                                              dc_invalidate_response_fifo, req));
         req.msg_type = CacheMsgType::PC_INVALIDATE;
         accumulate(drive_invalidate_and_wait(pc_invalidate_fifo,
                                              pc_invalidate_response_fifo, req));
-        req.msg_type = CacheMsgType::PT_INVALIDATE;
-        accumulate(drive_invalidate_and_wait(pt_invalidate_fifo,
-                                             pt_invalidate_response_fifo, req));
-        req.msg_type = CacheMsgType::WALKER_INVALIDATE;
-        accumulate(drive_invalidate_and_wait(walker_invalidate_fifo,
-                                             walker_invalidate_response_fifo, req));
+        drive_pt(msg, CacheInvalidateMode::GLOBAL, false);
+        drive_walker(msg, CacheInvalidateMode::GLOBAL, false);
         req.msg_type = CacheMsgType::MSI_INVALIDATE;
         accumulate(drive_invalidate_and_wait(msi_invalidate_fifo,
                                              msi_invalidate_response_fifo, req));
@@ -2093,117 +2335,68 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
 
     switch (msg.cmd_type) {
         case InvalidCmdType::IODIR_INVAL_DDT: {
-            CacheMessage req = msg;
-            req.msg_type = CacheMsgType::DC_INVALIDATE;
-            req.invalidate_mode = CacheInvalidateMode::PRECISE;
-            uint32_t pt_responses = 0;
-            uint32_t walker_responses = 0;
-            uint32_t msi_responses = 0;
-            auto drain_cascade_responses = [&]() {
-                CacheMessage partial;
-                while (pop_fifo(pt_invalidate_response_fifo, partial)) {
-                    accumulate(partial);
-                    pt_responses++;
-                }
-                while (pop_fifo(walker_invalidate_response_fifo, partial)) {
-                    accumulate(partial);
-                    walker_responses++;
-                }
-                while (pop_fifo(msi_invalidate_response_fifo, partial)) {
-                    accumulate(partial);
-                    msi_responses++;
-                }
-            };
-
-            push_fifo(dc_invalidate_fifo, req);
-            while (dc_invalidate_response_fifo.num_available() == 0) {
-                drain_cascade_responses();
-                wait(clock_period_);
-            }
-            CacheMessage dc_resp = dc_invalidate_response_fifo.read();
-            accumulate(dc_resp);
-            while (pt_responses < dc_resp.affected_entries ||
-                   walker_responses < dc_resp.affected_entries ||
-                   msi_responses < dc_resp.affected_entries) {
-                drain_cascade_responses();
-                if (pt_responses < dc_resp.affected_entries ||
-                    walker_responses < dc_resp.affected_entries ||
-                    msi_responses < dc_resp.affected_entries) {
-                    wait(clock_period_);
-                }
-            }
+            // [失效] DC 失效(DV=1精准/DV=0全清) + PC 关联失效; 不触及 PT/Walker
+            CacheMessage dc_req = msg;
+            dc_req.msg_type = CacheMsgType::DC_INVALIDATE;
+            dc_req.invalidate_mode = msg.has_device_id ?
+                CacheInvalidateMode::PRECISE : CacheInvalidateMode::GLOBAL;
+            accumulate(drive_invalidate_and_wait(dc_invalidate_fifo,
+                                                 dc_invalidate_response_fifo, dc_req));
+            // PC 关联: DV=1 扫 DID 匹配(SCAN, has_process_id=false), DV=0 全清
+            CacheMessage pc_req = msg;
+            pc_req.msg_type = CacheMsgType::PC_INVALIDATE;
+            pc_req.has_process_id = false;
+            pc_req.invalidate_mode = msg.has_device_id ?
+                CacheInvalidateMode::SCAN : CacheInvalidateMode::GLOBAL;
+            accumulate(drive_invalidate_and_wait(pc_invalidate_fifo,
+                                                 pc_invalidate_response_fifo, pc_req));
             break;
         }
         case InvalidCmdType::IODIR_INVAL_PDT: {
-            CacheMessage req = msg;
-            req.msg_type = CacheMsgType::PC_INVALIDATE;
-            req.invalidate_mode = msg.has_process_id ?
-                CacheInvalidateMode::PRECISE : CacheInvalidateMode::SCAN;
-            uint32_t pt_responses = 0;
-            uint32_t walker_responses = 0;
-            auto drain_cascade_responses = [&]() {
-                CacheMessage partial;
-                while (pop_fifo(pt_invalidate_response_fifo, partial)) {
-                    accumulate(partial);
-                    pt_responses++;
-                }
-                while (pop_fifo(walker_invalidate_response_fifo, partial)) {
-                    accumulate(partial);
-                    walker_responses++;
-                }
-            };
-
-            push_fifo(pc_invalidate_fifo, req);
-            while (pc_invalidate_response_fifo.num_available() == 0) {
-                drain_cascade_responses();
-                wait(clock_period_);
-            }
-            CacheMessage pc_resp = pc_invalidate_response_fifo.read();
-            accumulate(pc_resp);
-            while (pt_responses < pc_resp.affected_entries ||
-                   walker_responses < pc_resp.affected_entries) {
-                drain_cascade_responses();
-                if (pt_responses < pc_resp.affected_entries ||
-                    walker_responses < pc_resp.affected_entries) {
-                    wait(clock_period_);
-                }
-            }
+            // [失效] PC 精准失效(DID+PID); 不触及 PT/Walker
+            CacheMessage pc_req = msg;
+            pc_req.msg_type = CacheMsgType::PC_INVALIDATE;
+            pc_req.invalidate_mode = CacheInvalidateMode::PRECISE;
+            accumulate(drive_invalidate_and_wait(pc_invalidate_fifo,
+                                                 pc_invalidate_response_fifo, pc_req));
             break;
         }
         case InvalidCmdType::IOTINVAL_VMA: {
-            const bool mode1 = msg.has_gscid && msg.has_pscid && msg.has_iova;
-            const bool mode2 = !msg.has_gscid && msg.has_pscid && msg.has_iova;
-            CacheMessage pt_req = msg;
-            pt_req.msg_type = CacheMsgType::PT_INVALIDATE;
-            pt_req.invalidate_mode = (mode1 || mode2) ?
-                CacheInvalidateMode::PRECISE : CacheInvalidateMode::SCAN;
-            accumulate(drive_invalidate_and_wait(pt_invalidate_fifo,
-                                                 pt_invalidate_response_fifo,
-                                                 pt_req));
-
-            CacheMessage walker_req = msg;
-            walker_req.msg_type = CacheMsgType::WALKER_INVALIDATE;
-            walker_req.invalidate_mode = mode1 ?
-                CacheInvalidateMode::PRECISE : CacheInvalidateMode::SCAN;
-            accumulate(drive_invalidate_and_wait(walker_invalidate_fifo,
-                                                 walker_invalidate_response_fifo,
-                                                 walker_req));
+            // 方案 5.2 模式表, 位序(GV=has_gscid, AV=has_iova, PSCV=has_pscid)
+            const bool GV = msg.has_gscid;
+            const bool AV = msg.has_iova;
+            const bool PSCV = msg.has_pscid;
+            if (!AV) {
+                if (!GV && !PSCV) {
+                    // 000: 清表
+                    lib_.clear();
+                    drive_pt(msg, CacheInvalidateMode::GLOBAL, false);
+                    drive_walker(msg, CacheInvalidateMode::GLOBAL, false);
+                } else {
+                    // 001/100/101: 扫表 -> LAZY
+                    LibMatchClass cls =
+                        (GV && PSCV) ? LibMatchClass::GSCID_PSCID :
+                        (GV ? LibMatchClass::GSCID_ONLY : LibMatchClass::PSCID_ONLY);
+                    handle_lazy(cls);
+                }
+            } else {
+                // AV=1 (010/110/011/111): 小范围枚举扫表; PT 必, Walker 仅 NL=1
+                drive_pt(msg, CacheInvalidateMode::SCAN_RANGE, false);
+                if (msg.inval_nl) {
+                    drive_walker(msg, CacheInvalidateMode::SCAN_RANGE, false);
+                }
+            }
             break;
         }
         case InvalidCmdType::IOTINVAL_GVMA: {
-            CacheMessage pt_req = msg;
-            pt_req.msg_type = CacheMsgType::PT_INVALIDATE;
-            pt_req.invalidate_mode = CacheInvalidateMode::SCAN;
-            accumulate(drive_invalidate_and_wait(pt_invalidate_fifo,
-                                                 pt_invalidate_response_fifo,
-                                                 pt_req));
-
-            CacheMessage walker_req = msg;
-            walker_req.msg_type = CacheMsgType::WALKER_INVALIDATE;
-            walker_req.invalidate_mode = CacheInvalidateMode::SCAN;
-            accumulate(drive_invalidate_and_wait(walker_invalidate_fifo,
-                                                 walker_invalidate_response_fifo,
-                                                 walker_req));
+            // 方案 5.4: GV=0 清表; GV=1 转为按 GSCID 扫表 -> LAZY GSCID_ONLY
+            if (!msg.has_gscid) {
+                lib_.clear();
+                drive_pt(msg, CacheInvalidateMode::GLOBAL, false);
+                drive_walker(msg, CacheInvalidateMode::GLOBAL, false);
+            } else {
+                handle_lazy(LibMatchClass::GSCID_ONLY);
+            }
             break;
         }
         default:

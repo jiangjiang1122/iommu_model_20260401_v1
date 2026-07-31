@@ -13,6 +13,62 @@ uint64_t g_pt_cache_miss_count = 0;
 uint64_t g_msipt_cache_hit_count = 0;
 uint64_t g_msipt_cache_miss_count = 0;
 
+// ===================== [失效] CQ->性能模型失效桥接 =====================
+// 由功能模型 iommu_command_queue.cc 的 do_inval_*/do_iotinval_* 调用。
+// 将失效命令构造为 CacheMessage 送入 CacheSubsystem 失效 pipeline,
+// 并同步阻塞等待完成(保证后续命令/IOFENCE 前失效已生效)。
+// 基线场景不下发失效命令, 此路径不执行。
+void perf_enqueue_cache_invalidation(iommu_t *iommu, int cmd_type,
+    uint8_t dv, uint32_t did, uint32_t pid, uint8_t gv, uint8_t av,
+    uint8_t pscv, uint8_t nl, uint32_t gscid, uint32_t pscid, uint64_t addr_pn) {
+    if (iommu == nullptr || iommu->top == nullptr) return;
+    iommu_top* top = iommu->top;
+    if (!top->cache_sub.invalidation_enabled()) return;
+    // 必须在 SystemC 进程上下文(阻塞读写 FIFO)
+    if (!sc_get_current_process_handle().valid()) return;
+
+    iommu::CacheMessage cmd;
+    cmd.msg_type = iommu::CacheMsgType::CACHE_INVALIDATE_RESPONSE;  // 仅占位
+    cmd.task_id = 0;
+    switch (cmd_type) {
+        case 0:  // IODIR.INVAL_DDT
+            cmd.cmd_type = iommu::InvalidCmdType::IODIR_INVAL_DDT;
+            cmd.has_device_id = (dv != 0);
+            cmd.device_id = did;
+            break;
+        case 1:  // IODIR.INVAL_PDT
+            cmd.cmd_type = iommu::InvalidCmdType::IODIR_INVAL_PDT;
+            cmd.has_device_id = true;
+            cmd.device_id = did;
+            cmd.has_process_id = true;
+            cmd.process_id = pid;
+            break;
+        case 2:  // IOTINVAL.VMA
+            cmd.cmd_type = iommu::InvalidCmdType::IOTINVAL_VMA;
+            cmd.has_gscid = (gv != 0);
+            cmd.has_pscid = (pscv != 0);
+            cmd.has_iova = (av != 0);
+            cmd.gscid = static_cast<iommu::gscid_t>(gscid);
+            cmd.pscid = static_cast<iommu::pscid_t>(pscid);
+            cmd.iova = addr_pn << 12;
+            cmd.inval_nl = (nl != 0);
+            break;
+        case 3:  // IOTINVAL.GVMA
+            cmd.cmd_type = iommu::InvalidCmdType::IOTINVAL_GVMA;
+            cmd.has_gscid = (gv != 0);
+            cmd.has_iova = (av != 0);
+            cmd.gscid = static_cast<iommu::gscid_t>(gscid);
+            cmd.iova = addr_pn << 12;
+            cmd.inval_nl = (nl != 0);
+            break;
+        default:
+            return;
+    }
+    // 送入失效 pipeline 并同步等待完成
+    top->cache_sub.invalidation_request_fifo.write(cmd);
+    top->cache_sub.invalidation_response_fifo.read();
+}
+
 /**********************************************/
 // before_end_of_elaboration - IOMMU reset and initialization
 /**********************************************/

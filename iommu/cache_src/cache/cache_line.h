@@ -76,6 +76,10 @@ struct CacheLine {
     DataT   data;
     bool    from_prefetch = false;  // 是否由预取填充
     uint64_t access_count = 0;     // 访问计数（用于统计）
+    // [失效] 延迟失效版本号: 插入时记录当时的全局 VN, 查询/批量扫表时与
+    // 命中的 LIB entry VN 比较 (CL.VN < LIB.VN 表示该条目为失效数据)。
+    // 仅 PT Cache 与 Walker 子表使用; DC/PC/MSIPT 不参与延迟失效。
+    uint8_t vn = 0;
 
     void invalidate() {
         valid = false;

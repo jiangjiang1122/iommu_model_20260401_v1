@@ -28,6 +28,7 @@ static CacheConfig parse_cache_config(const json& j, const CacheConfig& defaults
     if (j.contains("srrip_m_bits"))              cfg.srrip_m_bits = static_cast<uint32_t>(j["srrip_m_bits"]);
     if (j.contains("num_rams"))                  cfg.num_rams = static_cast<uint32_t>(j["num_rams"]);
     if (j.contains("ram_fifo_depth"))            cfg.ram_fifo_depth = static_cast<uint32_t>(j["ram_fifo_depth"]);
+    if (j.contains("hash_mode"))                 cfg.hash_mode = static_cast<std::string>(j["hash_mode"]);
     parse_cache_timing_config(j, cfg);
     return cfg;
 }
@@ -125,6 +126,16 @@ GlobalConfig parse_config(const std::string& json_str) {
         } else {
             cfg.walker_ptw_c3 = wc3_def;
         }
+    }
+
+    // [失效] 失效处理与延迟失效(LIB/VN)配置
+    if (j.contains("invalidation")) {
+        const auto& iv = j["invalidation"];
+        if (iv.contains("enable"))           cfg.invalidation.enable = static_cast<bool>(iv["enable"]);
+        if (iv.contains("lazy_enable"))      cfg.invalidation.lazy_enable = static_cast<bool>(iv["lazy_enable"]);
+        if (iv.contains("lib_size"))         cfg.invalidation.lib_size = static_cast<uint32_t>(iv["lib_size"]);
+        if (iv.contains("vn_bits"))          cfg.invalidation.vn_bits = static_cast<uint32_t>(iv["vn_bits"]);
+        if (iv.contains("lib_match_cycles")) cfg.invalidation.lib_match_cycles = static_cast<uint32_t>(iv["lib_match_cycles"]);
     }
 
     // Statistics

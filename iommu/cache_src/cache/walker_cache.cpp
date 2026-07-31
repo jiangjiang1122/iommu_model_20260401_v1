@@ -34,10 +34,13 @@ void WalkerSubCache::init_s2_cache_array() {
 }
 
 uint32_t WalkerSubCache::hash_function(const WalkerTag& tag) const {
-    // LSB 低位有效策略: va_segment[5:0] XOR gscid[5:0] XOR pscid[5:0]
-    // [多RAM] 新映射: 低 log2(num_rams) 位选 RAM, 高位作 RAM 内索引
-    // global_set = ram_id * sets_per_ram + set_in_ram; num_rams=1 时退化原逻辑
-    uint32_t raw = raw_hash(tag);
+    return set_from_raw(raw_hash(tag));
+}
+
+// [多RAM] raw hash -> 全局 set 号
+// 低 log2(num_rams) 位选 RAM, 高位作 RAM 内索引;
+// global_set = ram_id * sets_per_ram + set_in_ram; num_rams=1 时退化原逻辑
+uint32_t WalkerSubCache::set_from_raw(uint32_t raw) const {
     if (num_rams_ <= 1) {
         return raw & (num_sets_ - 1);
     }
@@ -46,8 +49,28 @@ uint32_t WalkerSubCache::hash_function(const WalkerTag& tag) const {
     return ram_id * sets_per_ram_ + set_in_ram;
 }
 
-// [多RAM] 未掩码原始hash(原 hash_function 去掉 & mask)
+// [失效] 新哈希分量 (与 PT Cache 同构): temp1 仅由 gscid/pscid 得到(3bit),
+// 使得指定 addr 的小范围失效可枚举 8 个 temp1 覆盖全部可能的 set。
+uint32_t WalkerSubCache::hash_temp1(gscid_t gscid, pscid_t pscid) {
+    return (static_cast<uint32_t>(gscid) ^ pscid) & 0x7U;
+}
+
+uint32_t WalkerSubCache::hash_temp2(iova_t va_segment) {
+    return static_cast<uint32_t>(va_segment ^ (va_segment >> 22));
+}
+
+uint32_t WalkerSubCache::hash_combine(uint32_t temp1, uint32_t temp2) const {
+    const uint32_t shift = (log2_num_sets_ > 3) ? (log2_num_sets_ - 3) : 0;
+    return ((temp1 << shift) ^ temp2) & (num_sets_ - 1);
+}
+
+// [多RAM] 未掩码原始hash
 uint32_t WalkerSubCache::raw_hash(const WalkerTag& tag) const {
+    if (hash_v2_) {
+        return hash_combine(hash_temp1(tag.gscid, tag.pscid),
+                            hash_temp2(tag.va_segment));
+    }
+    // legacy: va_segment[5:0] XOR gscid[5:0] XOR pscid[5:0]
     uint32_t va_low = static_cast<uint32_t>(tag.va_segment);
     uint32_t gscid_low = static_cast<uint32_t>(tag.gscid);
     uint32_t pscid_low = tag.pscid;
@@ -62,8 +85,14 @@ void WalkerSubCache::configure_multi_ram(uint32_t num_rams) {
     sets_per_ram_ = num_sets_ / num_rams_;
     log2_num_rams_ = 0;
     for (uint32_t v = num_rams_; v > 1; v >>= 1) log2_num_rams_++;
-    printf("[WALKER_CACHE] %s Multi-RAM config: num_rams=%u, sets_per_ram=%u\n",
-           cache_name_.c_str(), num_rams_, sets_per_ram_);
+    // [失效] 新哈希需 log2(num_sets) 作为 temp1 移位量
+    assert((num_sets_ & (num_sets_ - 1)) == 0 && "walker num_sets must be power of 2");
+    log2_num_sets_ = 0;
+    for (uint32_t v = num_sets_; v > 1; v >>= 1) log2_num_sets_++;
+    hash_v2_ = (cfg_.hash_mode != "legacy");
+    printf("[WALKER_CACHE] %s Multi-RAM config: num_rams=%u, sets_per_ram=%u, hash_mode=%s\n",
+           cache_name_.c_str(), num_rams_, sets_per_ram_,
+           hash_v2_ ? "inval_v2" : "legacy");
 }
 
 uint32_t WalkerSubCache::compute_ram_id(const WalkerTag& tag) const {
@@ -87,6 +116,25 @@ bool WalkerSubCache::lookup_ram(const WalkerTag& tag, WalkerData& out_data,
 
     int way = find_way(set, tag);
     if (way >= 0) {
+        // [失效] 延迟失效旁路比对(与 PT Cache 同构, LIB 为空时 O(1) 短路)
+        if (lib_ != nullptr && !lib_->empty()) {
+            uint8_t lib_vn = 0;
+            const uint8_t cl_vn = cache_array_[set][way].vn;
+            if (lib_->match(tag.gscid, tag.pscid, lib_vn) && cl_vn < lib_vn) {
+                cache_array_[set][way].invalidate();
+                if (replacement_) replacement_->invalidate(set, static_cast<uint32_t>(way));
+                stats_.record_invalidation(cache_name_);
+                stats_.record_miss(cache_name_);
+                stats_.record_lookup(cache_name_);
+                stats_.record_latency(cache_name_, op_latency_ns);
+                printf("[WALKER_LAZY_INVAL] %s stale CL dropped on lookup (gscid=%u, pscid=%u, va_seg=0x%lx, CL.VN=%u < LIB.VN=%u)\n",
+                       cache_name_.c_str(), tag.gscid, tag.pscid,
+                       (unsigned long)tag.va_segment, cl_vn, lib_vn);
+                fflush(stdout);
+                return false;
+            }
+        }
+
         out_data = cache_array_[set][way].data;
         if (replacement_) replacement_->access(set, way);
         if (cache_array_[set][way].from_prefetch) {
@@ -126,6 +174,7 @@ bool WalkerSubCache::update_entry_ram(const WalkerTag& tag,
             stats_.record_eviction(cache_name_);
         }
         cache_array_[set][way].fill(tag, data, false);
+        cache_array_[set][way].vn = current_vn();  // [失效] 记录全局 VN
         if (replacement_) replacement_->access(set, way);
         ram_latency = cycles_to_time(cfg_.write_way_latency_cycles);
         stats_.record_latency(cache_name_,
@@ -142,6 +191,7 @@ bool WalkerSubCache::update_entry_ram(const WalkerTag& tag,
         cache_array_[set][existing_way].valid = true;
         cache_array_[set][existing_way].from_prefetch = false;
         cache_array_[set][existing_way].access_count = 0;
+        cache_array_[set][existing_way].vn = current_vn();  // [失效] 记录全局 VN
         if (replacement_) replacement_->access(set, static_cast<uint32_t>(existing_way));
         ram_latency = cycles_to_time(base_cycles + cfg_.fill_compute_index_hit_cycles);
         stats_.record_latency(cache_name_,
@@ -152,6 +202,7 @@ bool WalkerSubCache::update_entry_ram(const WalkerTag& tag,
     const int empty_way = find_empty_way(set);
     if (empty_way >= 0) {
         cache_array_[set][empty_way].fill(tag, data, false);
+        cache_array_[set][empty_way].vn = current_vn();  // [失效] 记录全局 VN
         if (replacement_) replacement_->access(set, static_cast<uint32_t>(empty_way));
         ram_latency = cycles_to_time(base_cycles + cfg_.fill_compute_index_invalid_cycles);
         stats_.record_latency(cache_name_,
@@ -167,6 +218,7 @@ bool WalkerSubCache::update_entry_ram(const WalkerTag& tag,
         stats_.record_eviction(cache_name_);
     }
     cache_array_[set][victim_way].fill(tag, data, false);
+    cache_array_[set][victim_way].vn = current_vn();  // [失效] 记录全局 VN
     if (replacement_) {
         auto* srrip = dynamic_cast<SRRIPPolicy*>(replacement_.get());
         if (srrip) {
@@ -442,6 +494,7 @@ WalkerSubCache::update_entry_s2(const WalkerTag& tag, const WalkerData& data) {
         if (s2_cache_array_[set][w].valid && s2_cache_array_[set][w].tag == tag) {
             s2_cache_array_[set][w].data = data;
             s2_cache_array_[set][w].valid = true;
+            s2_cache_array_[set][w].vn = current_vn();  // [失效] 记录全局 VN
             result.updated = true;
             result.latency = SC_ZERO_TIME;
             return result;
@@ -451,6 +504,7 @@ WalkerSubCache::update_entry_s2(const WalkerTag& tag, const WalkerData& data) {
     for (uint32_t w = 0; w < num_ways_; ++w) {
         if (!s2_cache_array_[set][w].valid) {
             s2_cache_array_[set][w].fill(tag, data, false);
+            s2_cache_array_[set][w].vn = current_vn();  // [失效] 记录全局 VN
             result.updated = true;
             result.latency = SC_ZERO_TIME;
             return result;
@@ -462,6 +516,7 @@ WalkerSubCache::update_entry_s2(const WalkerTag& tag, const WalkerData& data) {
         victim_way = replacement_->find_victim(set);
     }
     s2_cache_array_[set][victim_way].fill(tag, data, false);
+    s2_cache_array_[set][victim_way].vn = current_vn();  // [失效] 记录全局 VN
     if (replacement_) {
         auto* srrip = dynamic_cast<SRRIPPolicy*>(replacement_.get());
         if (srrip) srrip->on_insert(set, victim_way);
@@ -495,6 +550,145 @@ uint32_t WalkerSubCache::invalidate_s2_entries(
     for (auto& s : s2_cache_array_)
         for (auto& l : s)
             if (l.valid && predicate(l.tag)) { l.invalidate(); affected++; }
+    return affected;
+}
+
+// ============================================================
+// [失效][多RAM] WalkerSubCache 候选 set 枚举与失效原子段
+// ============================================================
+
+// 小范围枚举: 枚举 temp1=000..111, 与本级 addr 段的 temp2 异或得到
+// 8 个 Cache set 索引 (legacy 哈希下无法枚举 -> 返回0, 调用方降级全表扫描)
+uint32_t WalkerSubCache::enum_candidate_sets(iova_t addr, bool addr_is_va,
+                                             bool sv48, bool x4_mode,
+                                             uint32_t* out_sets) const {
+    if (!hash_v2_ || out_sets == nullptr) return 0;
+
+    const iova_t va_seg = WalkerCache::extract_addr_segment(
+        addr, level_, addr_is_va, sv48, x4_mode);
+    const uint32_t temp2 = hash_temp2(va_seg);
+    uint32_t count = 0;
+    for (uint32_t temp1 = 0; temp1 < 8; ++temp1) {
+        const uint32_t set = set_from_raw(hash_combine(temp1, temp2));
+        bool dup = false;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (out_sets[i] == set) { dup = true; break; }
+        }
+        if (!dup) out_sets[count++] = set;
+    }
+    return count;
+}
+
+// 失效谓词:
+//  - VMA: 按 gscid/pscid/addr(本级段) 匹配; is_s2 条目不属于 VMA 范围
+//  - GVMA: 按 gscid 匹配(两阶段下 GPA 无法精准索引, 统一转为 gscid 扫表)
+bool WalkerSubCache::line_matches_inval(const WalkerTag& tag,
+                                        const CacheMessage& cmd) const {
+    if (cmd.invalidate_mode == CacheInvalidateMode::GLOBAL) return true;
+
+    if (cmd.cmd_type == InvalidCmdType::IOTINVAL_GVMA) {
+        if (cmd.has_gscid && tag.gscid != cmd.gscid) return false;
+        return true;
+    }
+
+    if (cmd.has_gscid && tag.gscid != cmd.gscid) return false;
+    if (cmd.has_pscid && tag.pscid != cmd.pscid) return false;
+    if (cmd.has_iova) {
+        const iova_t seg = WalkerCache::extract_addr_segment(
+            cmd.iova, tag.level, tag.va_pa_flag, tag.sv48_flag, tag.x4_mode_flag);
+        if (tag.va_segment != seg) return false;
+    }
+    return true;
+}
+
+// 单 set 失效原子段 (PRECISE / SCAN_RANGE 子失效)
+uint32_t WalkerSubCache::invalidate_set_ram(uint32_t set, const CacheMessage& cmd,
+                                            sc_time& ram_latency) {
+    uint32_t affected = invalidate_set_functional(
+        set,
+        [&](const WalkerTag& tag, const WalkerData&) {
+            return line_matches_inval(tag, cmd);
+        },
+        ram_latency);
+    // S2 阵列与普通阵列共用 set 索引空间, 同步处理本 set
+    affected += invalidate_s2_range(set, set + 1, cmd);
+    return affected;
+}
+
+// 本 RAM set 区间扫描失效原子段 (SCAN / GLOBAL 子失效)
+uint32_t WalkerSubCache::invalidate_ram_range(uint32_t ram_id,
+                                              const CacheMessage& cmd,
+                                              sc_time& ram_latency) {
+    const uint32_t begin = ram_set_begin(ram_id);
+    const uint32_t end = ram_set_end(ram_id);
+
+    uint32_t affected = invalidate_range_functional(
+        begin, end,
+        [&](const WalkerTag& tag, const WalkerData&) {
+            return line_matches_inval(tag, cmd);
+        },
+        ram_latency);
+    affected += invalidate_s2_range(begin, end, cmd);
+    return affected;
+}
+
+// LIB 批量扫表原子段 (VN 回绕触发)
+uint32_t WalkerSubCache::lazy_sweep_ram(uint32_t ram_id, uint8_t new_vn,
+                                        sc_time& ram_latency) {
+    const uint32_t begin = ram_set_begin(ram_id);
+    const uint32_t end = ram_set_end(ram_id);
+    uint32_t affected = lazy_sweep_range_functional(
+        begin, end, new_vn,
+        [](const WalkerTag& tag) { return tag.gscid; },
+        [](const WalkerTag& tag) { return tag.pscid; },
+        ram_latency);
+    affected += lazy_sweep_s2_range(begin, end, new_vn);
+    return affected;
+}
+
+// [失效] S2 阵列区间失效 (S2 条目为 G-stage 显式第二阶段缓存, 按 gscid 失效)
+uint32_t WalkerSubCache::invalidate_s2_range(uint32_t set_begin, uint32_t set_end,
+                                             const CacheMessage& cmd) {
+    if (set_end > num_sets_) set_end = num_sets_;
+    uint32_t affected = 0;
+    const bool global = (cmd.invalidate_mode == CacheInvalidateMode::GLOBAL);
+    for (uint32_t s = set_begin; s < set_end; ++s) {
+        for (uint32_t w = 0; w < num_ways_; ++w) {
+            auto& line = s2_cache_array_[s][w];
+            if (!line.valid) continue;
+            if (!global && cmd.has_gscid && line.tag.gscid != cmd.gscid) continue;
+            line.invalidate();
+            stats_.record_invalidation(cache_name_);
+            affected++;
+        }
+    }
+    return affected;
+}
+
+// [失效] S2 阵列 LIB 批量扫表 (与普通阵列同一套 VN 语义)
+uint32_t WalkerSubCache::lazy_sweep_s2_range(uint32_t set_begin, uint32_t set_end,
+                                             uint8_t new_vn) {
+    if (lib_ == nullptr) return 0;
+    if (set_end > num_sets_) set_end = num_sets_;
+    uint32_t affected = 0;
+    for (uint32_t s = set_begin; s < set_end; ++s) {
+        for (uint32_t w = 0; w < num_ways_; ++w) {
+            auto& line = s2_cache_array_[s][w];
+            if (!line.valid) continue;
+            uint8_t lib_vn = 0;
+            if (!lib_->match(line.tag.gscid, line.tag.pscid, lib_vn)) {
+                line.vn = new_vn;
+                continue;
+            }
+            if (line.vn < lib_vn) {
+                line.invalidate();
+                stats_.record_invalidation(cache_name_);
+                affected++;
+            } else {
+                line.vn = new_vn;
+            }
+        }
+    }
     return affected;
 }
 
@@ -1078,6 +1272,54 @@ void WalkerCache::set_clock_period(const sc_time& clk) {
     ptw_c1_->set_clock_period(clk);
     ptw_c2_->set_clock_period(clk);
     ptw_c3_->set_clock_period(clk);
+}
+
+// ============================================================
+// [失效][多RAM] WalkerCache 失效子操作分发层 (按 level 选子表)
+// ============================================================
+
+void WalkerCache::set_lazy_invalid_buffer(const LazyInvalidBuffer* lib) {
+    ptw_c1_->set_lazy_invalid_buffer(lib);
+    ptw_c2_->set_lazy_invalid_buffer(lib);
+    ptw_c3_->set_lazy_invalid_buffer(lib);
+}
+
+uint32_t WalkerCache::enum_candidate_sets(uint8_t level, iova_t addr,
+                                          bool addr_is_va, bool sv48,
+                                          bool x4_mode,
+                                          uint32_t* out_sets) const {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) return 0;
+    return sub->enum_candidate_sets(addr, addr_is_va, sv48, x4_mode, out_sets);
+}
+
+uint32_t WalkerCache::ram_of_set(uint8_t level, uint32_t set) const {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) return 0;
+    return sub->ram_of_set(set);
+}
+
+uint32_t WalkerCache::invalidate_set_ram(uint8_t level, uint32_t set,
+                                         const CacheMessage& cmd,
+                                         sc_time& ram_latency) {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) { ram_latency = SC_ZERO_TIME; return 0; }
+    return sub->invalidate_set_ram(set, cmd, ram_latency);
+}
+
+uint32_t WalkerCache::invalidate_ram_range(uint8_t level, uint32_t ram_id,
+                                           const CacheMessage& cmd,
+                                           sc_time& ram_latency) {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) { ram_latency = SC_ZERO_TIME; return 0; }
+    return sub->invalidate_ram_range(ram_id, cmd, ram_latency);
+}
+
+uint32_t WalkerCache::lazy_sweep_ram(uint8_t level, uint32_t ram_id,
+                                     uint8_t new_vn, sc_time& ram_latency) {
+    WalkerSubCache* sub = sub_cache(level);
+    if (!sub) { ram_latency = SC_ZERO_TIME; return 0; }
+    return sub->lazy_sweep_ram(ram_id, new_vn, ram_latency);
 }
 
 iova_t WalkerCache::extract_addr_segment(iova_t addr, uint8_t level,

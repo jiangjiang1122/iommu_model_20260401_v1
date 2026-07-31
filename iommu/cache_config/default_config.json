@@ -81,5 +81,13 @@
     "enable_task_trace": true,
     "task_trace_level": "detail",
     "histogram_bin_width_ns": 1.0
+  },
+
+  "invalidation": {
+    "enable": true,
+    "lazy_enable": true,
+    "lib_size": 16,
+    "vn_bits": 4,
+    "lib_match_cycles": 2
   }
 }

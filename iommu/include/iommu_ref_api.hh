@@ -43,6 +43,14 @@ extern uint8_t handle_invalidation_completion(iommu_t *iommu, ats_msg_t *inv_cc)
 extern void do_ats_timer_expiry(iommu_t *iommu, uint32_t itag_vector);
 extern void process_commands(iommu_t *iommu);
 
+// [失效] CQ->性能模型失效桥接: 功能模型 do_inval_*/do_iotinval_* 在完成
+// 功能级失效后调用本函数, 将失效命令送入 CacheSubsystem 失效 pipeline
+// 并同步等待完成(保证 IOFENCE 语义)。cmd_type: 0=INVAL_DDT,1=INVAL_PDT,
+// 2=IOTINVAL_VMA,3=IOTINVAL_GVMA; addr_pn 为 ADDR[63:12] 页号。
+extern void perf_enqueue_cache_invalidation(iommu_t *iommu, int cmd_type,
+    uint8_t dv, uint32_t did, uint32_t pid, uint8_t gv, uint8_t av,
+    uint8_t pscv, uint8_t nl, uint32_t gscid, uint32_t pscid, uint64_t addr_pn);
+
 extern void iommu_to_hb_do_global_observability_sync(uint8_t PR, uint8_t PW);
 extern void send_msg_iommu_to_hb(iommu_t *iommu, ats_msg_t *prgr);
 extern void get_attribs_from_req(hb_to_iommu_req_t *req, uint8_t *read,

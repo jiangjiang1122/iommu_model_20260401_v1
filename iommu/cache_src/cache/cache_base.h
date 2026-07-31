@@ -8,6 +8,7 @@
 #include "replacement/srrip_policy.h"
 #include "common/stats_collector.h"
 #include "common/types.h"
+#include "common/lazy_invalid_buffer.h"
 
 #include <vector>
 #include <array>
@@ -61,6 +62,14 @@ public:
     void set_current_phase(int phase) { phase_tracker_ = phase; }
     int current_phase() const { return phase_tracker_; }
 
+    // ============================================================
+    // [失效] 延迟失效(LIB/VN)接入
+    //   由 CacheSubsystem 注入 PT Cache 与 Walker 子表共享的同一个 LIB;
+    //   未注入(nullptr)的 cache(DC/PC/MSIPT)不参与延迟失效。
+    // ============================================================
+    void set_lazy_invalid_buffer(const LazyInvalidBuffer* lib) { lib_ = lib; }
+    const LazyInvalidBuffer* lazy_invalid_buffer() const { return lib_; }
+
 protected:
     enum class CacheOpType : uint8_t {
         LOOKUP = 0,
@@ -101,6 +110,9 @@ protected:
     // 由PT Cache在调用lookup/fill前设置，lookup/fill内部读取并记录到阶段分类统计
     int phase_tracker_ = 0;
 
+    // [失效] 共享的延迟失效 buffer (只读; 记录/清空由 CacheSubsystem 负责)
+    const LazyInvalidBuffer* lib_ = nullptr;
+
     // ---- 内部方法 ----
 
     // 在指定 set 中查找匹配 tag 的 way，返回 -1 表示未命中
@@ -122,6 +134,40 @@ protected:
                                         Predicate&& predicate,
                                         OnInvalidated&& on_invalidated,
                                         sc_time* latency = nullptr);
+
+    // ============================================================
+    // [失效][多RAM] 纯功能失效原子段: 无 wait / 无仲裁, 由 RAM worker 线程
+    // 消耗返回的 ram_latency; 同 RAM 串行由单 worker 线程保证。
+    //   invalidate_set_functional:   对单个 set 逐 way 比较并失效
+    //   invalidate_range_functional: 扫描 [set_begin, set_end) 区间逐 way 比较
+    //   lazy_sweep_range_functional: LIB 批量扫表(VN 回绕)
+    // 延时口径与既有 invalidation_set_latency 一致: 每 set
+    //   read_set + invalidation_compare_per_way + (有命中时 write_way)。
+    // ============================================================
+    template <typename Predicate>
+    uint32_t invalidate_set_functional(uint32_t set, Predicate&& predicate,
+                                       sc_time& ram_latency);
+
+    template <typename Predicate>
+    uint32_t invalidate_range_functional(uint32_t set_begin, uint32_t set_end,
+                                        Predicate&& predicate,
+                                        sc_time& ram_latency);
+
+    // LIB 批量扫表: 对区间内每条 valid CL, 用 get_gscid/get_pscid 提取索引信息
+    // 在 LIB 中匹配; 命中且 CL.VN < LIB.VN 则 invalid, 否则 CL.VN 重置为 new_vn。
+    template <typename GetGscid, typename GetPscid>
+    uint32_t lazy_sweep_range_functional(uint32_t set_begin, uint32_t set_end,
+                                         uint8_t new_vn,
+                                         GetGscid&& get_gscid,
+                                         GetPscid&& get_pscid,
+                                         sc_time& ram_latency);
+
+    // [失效] 单 set 失效原子段延时(纯计算)
+    sc_time invalidation_set_ram_latency(bool matched) const {
+        return cycles_to_time(cfg_.read_set_latency_cycles +
+                              cfg_.invalidation_compare_per_way_cycles +
+                              (matched ? cfg_.write_way_latency_cycles : 0));
+    }
 
     bool lookup_with_hash_tag(const TagT& hash_tag, const TagT& compare_tag,
                               DataT& out_data, sc_time& latency);
@@ -554,6 +600,95 @@ uint32_t CacheBase<TagT, DataT>::invalidate_precise_by_line(
     });
 
     if (latency) *latency += total_latency;
+    return affected;
+}
+
+// ============================================================
+// [失效][多RAM] 纯功能失效原子段实现
+// ============================================================
+
+template <typename TagT, typename DataT>
+template <typename Predicate>
+uint32_t CacheBase<TagT, DataT>::invalidate_set_functional(
+    uint32_t set, Predicate&& predicate, sc_time& ram_latency) {
+    uint32_t affected = 0;
+    if (set >= num_sets_) {
+        ram_latency = SC_ZERO_TIME;
+        return 0;
+    }
+
+    bool matched = false;
+    for (uint32_t w = 0; w < num_ways_; ++w) {
+        auto& line = cache_array_[set][w];
+        if (!line.valid || !predicate(line.tag, line.data)) continue;
+        line.invalidate();
+        if (replacement_) replacement_->invalidate(set, w);
+        stats_.record_invalidation(cache_name_);
+        matched = true;
+        affected++;
+    }
+
+    ram_latency = invalidation_set_ram_latency(matched);
+    stats_.record_latency(cache_name_, ram_latency.to_seconds() * 1e9);
+    return affected;
+}
+
+template <typename TagT, typename DataT>
+template <typename Predicate>
+uint32_t CacheBase<TagT, DataT>::invalidate_range_functional(
+    uint32_t set_begin, uint32_t set_end, Predicate&& predicate,
+    sc_time& ram_latency) {
+    uint32_t affected = 0;
+    ram_latency = SC_ZERO_TIME;
+    if (set_end > num_sets_) set_end = num_sets_;
+
+    for (uint32_t s = set_begin; s < set_end; ++s) {
+        sc_time set_latency = SC_ZERO_TIME;
+        affected += invalidate_set_functional(s, predicate, set_latency);
+        ram_latency += set_latency;
+    }
+    return affected;
+}
+
+template <typename TagT, typename DataT>
+template <typename GetGscid, typename GetPscid>
+uint32_t CacheBase<TagT, DataT>::lazy_sweep_range_functional(
+    uint32_t set_begin, uint32_t set_end, uint8_t new_vn,
+    GetGscid&& get_gscid, GetPscid&& get_pscid, sc_time& ram_latency) {
+    uint32_t affected = 0;
+    ram_latency = SC_ZERO_TIME;
+    if (lib_ == nullptr) return 0;
+    if (set_end > num_sets_) set_end = num_sets_;
+
+    for (uint32_t s = set_begin; s < set_end; ++s) {
+        bool matched_in_set = false;
+        for (uint32_t w = 0; w < num_ways_; ++w) {
+            auto& line = cache_array_[s][w];
+            if (!line.valid) continue;
+
+            uint8_t lib_vn = 0;
+            const bool lib_hit = lib_->match(get_gscid(line.tag),
+                                             get_pscid(line.tag), lib_vn);
+            if (!lib_hit) {
+                // 未命中任何失效记录: 重置 CL.VN 为新的全局 VN
+                line.vn = new_vn;
+                continue;
+            }
+            if (line.vn < lib_vn) {
+                // 失效指令之前写入的数据: 失效
+                line.invalidate();
+                if (replacement_) replacement_->invalidate(s, w);
+                stats_.record_invalidation(cache_name_);
+                matched_in_set = true;
+                affected++;
+            } else {
+                // 失效指令之后写入的数据: 保留并重置 VN
+                line.vn = new_vn;
+            }
+        }
+        ram_latency += invalidation_set_ram_latency(matched_in_set);
+    }
+    stats_.record_latency(cache_name_, ram_latency.to_seconds() * 1e9);
     return affected;
 }
 

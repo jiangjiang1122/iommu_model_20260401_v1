@@ -127,7 +127,13 @@ enum class InvalidCmdType : uint8_t {
 enum class CacheInvalidateMode : uint8_t {
     PRECISE,    // hash 定位 set 后比较 way
     SCAN,       // 逐 set 扫描比较
-    GLOBAL      // 全表清空
+    GLOBAL,     // 全表清空
+    // [失效] 小范围枚举扫表: 已知 addr, 枚举 gscid/pscid 在哈希中的 8 种 temp1,
+    // 得到 8 个候选 set 后逐 way 比较(避免全表扫描)
+    SCAN_RANGE,
+    // [失效] 延迟失效: 仅指定 GSCID/PSCID 的扫表失效, 记录到 LIB 并递增全局 VN,
+    // 实际失效在查询旁路比对或 VN 回绕批量扫表时完成
+    LAZY
 };
 
 struct InvalidationCmd {
@@ -143,6 +149,10 @@ struct InvalidationCmd {
     bool            has_gscid      = false;
     bool            has_pscid      = false;
     bool            has_iova       = false;
+    // [失效] IOTINVAL 扩展位: NL=非叶PTE失效(需联动 Walker Cache),
+    // s_range=ADDR为NAPOT范围(本期仅解析, 不做范围展开)
+    bool            nl             = false;
+    bool            s_range        = false;
 };
 
 // ============================================================
@@ -533,6 +543,20 @@ struct CacheMessage {
     bool            has_gscid = false;
     bool            has_pscid = false;
     bool            has_iova = false;
+    // [失效] IOTINVAL NL/S 扩展位(语义见 InvalidationCmd)
+    bool            inval_nl = false;
+    bool            inval_s_range = false;
+    // [失效] 多RAM子失效路由: 由 hash 线程拆分后填充
+    //   inval_sub_ram_id: 目标 RAM 组号
+    //   inval_sub_set: SCAN_RANGE/PRECISE 时指定的候选 set(全局set号)
+    //   inval_sub_has_set: true=只处理 inval_sub_set; false=扫本RAM整个set区间
+    //   inval_sub_expected: 该失效指令拆分出的子失效总数(join收齐条件)
+    //   inval_lazy_sweep: LIB 批量扫表(VN回绕)标志
+    uint32_t        inval_sub_ram_id = 0;
+    uint32_t        inval_sub_set = 0;
+    bool            inval_sub_has_set = false;
+    uint8_t         inval_sub_expected = 0;
+    bool            inval_lazy_sweep = false;
 
 
     // 各 cache 的 payload 区。 输入输出共用
@@ -628,6 +652,25 @@ struct CacheConfig {
     uint32_t    fill_compute_index_replacement_cycles = 4;  // 需要替换算法
     uint32_t    write_way_latency_cycles = 1;
     uint32_t    invalidation_compare_per_way_cycles = 1;  // 失效时逐 way 串行比较，每 way 耗时
+    // [失效] set 索引哈希模式: "inval_v2"=新哈希(持 temp1/temp2 结构, 支持 addr 枚举失效);
+    //   "legacy"=旧哈希(gscid|iova|pscid 折叠), 仅用于回归对比与回退
+    std::string hash_mode = "inval_v2";
+};
+
+// ============================================================
+// [失效] 失效处理配置
+//   enable:     失效通路总开关(false 时 CQ 桥接不下发失效任务)
+//   lazy_enable:扫表类失效是否走 LIB 延迟失效; false 时降级为立即全表扫描
+//   lib_size:   LIB 条目数(CAM 容量), 满时降级为立即扫表
+//   vn_bits:    全局版本号位宽, VN_MAX = (1<<vn_bits)-1
+//   lib_match_cycles: LIB CAM 匹配拍数(与 RAM 读并行, 仅 LAZY 记录时单独计时)
+// ============================================================
+struct InvalidationConfig {
+    bool        enable            = true;
+    bool        lazy_enable       = true;
+    uint32_t    lib_size          = 16;
+    uint32_t    vn_bits           = 4;
+    uint32_t    lib_match_cycles  = 2;
 };
 
 struct StatsConfig {
@@ -653,6 +696,8 @@ struct GlobalConfig {
     CacheConfig walker_ptw_c1;
     CacheConfig walker_ptw_c2;
     CacheConfig walker_ptw_c3;
+    // [失效] 失效处理与延迟失效(LIB/VN)配置
+    InvalidationConfig invalidation;
     StatsConfig statistics;
 };
 

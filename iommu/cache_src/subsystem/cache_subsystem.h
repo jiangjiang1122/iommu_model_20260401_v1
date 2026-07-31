@@ -6,6 +6,7 @@
 #include "common/types.h"
 #include "common/stats_collector.h"
 #include "common/dedup_buffer.h"
+#include "common/lazy_invalid_buffer.h"
 #include "cache/dc_cache.h"
 #include "cache/pc_cache.h"
 #include "cache/msipt_cache.h"
@@ -138,6 +139,9 @@ public:
     // 获取配置
     const GlobalConfig& config() const { return cfg_; }
 
+    // [失效] 失效通路总开关(CQ 桥接依据; false 时不下发失效任务)
+    bool invalidation_enabled() const { return inval_enabled_; }
+
     // [STAT] 打印32任务组统计报告
     void print_pt_group_report() const;
 
@@ -173,33 +177,27 @@ private:
     sc_fifo<CacheMessage> walker_invalidate_response_fifo;
     sc_fifo<CacheMessage> msi_invalidate_response_fifo;
 
-    void dc_worker_thread();
-    void pc_worker_thread();
+    // [失效] DC/PC/MSI 合并为单一调度线程: 每轮先查 invalidate FIFO(最高优先),
+    //   再处理 update/lookup; 单线程串行消除 lookup/invalidate 对同一阵列的竞态。
+    void dc_scheduler_thread();
+    void pc_scheduler_thread();
     // [多RAM] PT Cache 多 RAM 改造: Hash单元线程 + 每组RAM独立worker
-    //   pt_hash_thread: 乒乓读 pt_request/pt_update, hash 1拍后按 ram_id 分发;
+    //   pt_hash_thread: 最高优先处理 pt_invalidate_fifo(拆分子失效到RAM worker+join),
+    //     否则乒乓读 pt_request/pt_update, hash 1拍后按 ram_id 分发;
     //   目标 RAM FIFO 满则阻塞(反压上游), Hash保持忙
     void pt_hash_thread();
     //   pt_ram_worker_thread: 同 RAM 串行消耗原子段延时, 跨 RAM 并发
     void pt_ram_worker_thread(int ram_id);
     // [dedup多RAM] 去重Cache多RAM改造: Scheduler(纯调度) + Hash单元 + 每组RAM独立worker
-    //   dedup_scheduler_thread: 轮询3入口FIFO(乒乓REQUEST/UPDATE, REQUEST类内inside优先),
-    //     阻塞写 dedup_hash_in_fifo(深度1, 写满=hash忙=反压)
-    //   dedup_hash_process_thread: 1cyc hash 后按 ram_id 分发到 dedup_ram_fifo_[i](满则阻塞保持忙)
-    //   dedup_ram_worker_thread(i): 原子段5cyc + 分支处理 + Buffer交互 + 响应路由
     void dedup_scheduler_thread();
     void dedup_hash_process_thread();
     void dedup_ram_worker_thread(int ram_id);
-    void msi_worker_thread();
-    void dc_update_worker_thread();
-    void pc_update_worker_thread();
+    void msi_scheduler_thread();
     void walker_update_worker_thread();
-    void msi_update_worker_thread();
-    void dc_invalidate_worker_thread();
-    void pc_invalidate_worker_thread();
-    void pt_invalidate_worker_thread();
-    void walker_invalidate_worker_thread();
-    void msi_invalidate_worker_thread();
     void invalidation_worker_thread();
+    // [失效] PT/Walker 失效拆分到 RAM worker 并 join(hash线程调用, 阻塞等待子失效完成)
+    void dispatch_pt_invalidate(const CacheMessage& cmd);
+    void dispatch_walker_invalidate(const CacheMessage& cmd);
     void end_of_simulation() override;
     void process_next_invalidation_request();
     void push_fifo(sc_fifo<CacheMessage>& fifo, const CacheMessage& msg);
@@ -249,6 +247,25 @@ private:
     DedupFlushCallback      dedup_flush_cb_;
     // [dedup多RAM] 乒乓调度状态(scheduler使用)
     bool     dedup_sched_next_is_request_ = true;
+
+    // ============================================================
+    // [失效] 延迟失效(LIB/VN) + PT/Walker 失效子任务 join 状态
+    // ============================================================
+    // PT 与 Walker 共享同一个 LIB 与全局 VN(同一条 PTE 失效指令需二者同步响应)
+    LazyInvalidBuffer lib_;
+    bool     inval_enabled_ = true;
+    bool     lazy_enabled_ = true;
+
+    // PT 失效 join: hash 线程一次只处理一条失效指令并阻塞等待, 故单一计数器安全
+    int      pt_inval_remaining_ = 0;
+    uint32_t pt_inval_affected_ = 0;
+    uint8_t  pt_inval_sweep_new_vn_ = 0;   // VN回绕批量扫表后的新全局VN
+    sc_event pt_inval_sub_done_event_;
+    // Walker 失效 join(同理)
+    int      walker_inval_remaining_ = 0;
+    uint32_t walker_inval_affected_ = 0;
+    uint8_t  walker_inval_sweep_new_vn_ = 0;
+    sc_event walker_inval_sub_done_event_;
 
     // [STAT] PT Scheduler任务间隔分析 (gap = 当前任务start - 上一任务end)
     double   pt_sched_first_start_ns_ = -1.0;   // 第一笔任务开始时刻

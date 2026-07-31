@@ -73,6 +73,16 @@ else ifeq ($(TEST), seq128k_twostage_s2on_128g)
                  -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=5 \
                  -DTEST_CFG_SKIP_PHASE1=1
+else ifeq ($(TEST), cache_inval)
+    # [失效] 缓存失效功能测试: DC/PC/PT/Walker 失效 + CQ 命令通路
+    #   复用场景5两阶段配置(D=3预取 + Walker Cache + S2), 小规模批次访问,
+    #   每轮下发一条失效指令+IOFENCE, 用 PTW 任务增量判定失效是否生效
+    TEST_THREAD_SRC = rp/test_rp_cache_inval_thread.cc
+    TEST_FLAGS = -DTEST_SEQ_128K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_SKIP_PHASE1=1
 else ifeq ($(TEST), rand4k_twostage)
     TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \

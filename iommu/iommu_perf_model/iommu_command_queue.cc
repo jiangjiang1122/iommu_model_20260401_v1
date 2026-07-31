@@ -302,6 +302,9 @@ do_inval_ddt(
     for ( i = 0; i < PDT_CACHE_SIZE; i++ )
         if ( ((iommu->pdt_cache[i].DID == DID && DV == 1) || (DV == 0)) &&iommu->pdt_cache[i].valid == 1)
             iommu->pdt_cache[i].valid = 0;
+    // [失效] 桥接性能模型: DC 失效 + PC 关联失效
+    perf_enqueue_cache_invalidation(iommu, 0 /*INVAL_DDT*/, DV, DID, 0,
+                                    0, 0, 0, 0, 0, 0, 0);
     return;
 }
 void
@@ -325,6 +328,9 @@ do_inval_pdt(
     for ( i = 0; i < PDT_CACHE_SIZE; i++ )
         if ( iommu->pdt_cache[i].DID == DID && iommu->pdt_cache[i].PID == PID && iommu->pdt_cache[i].valid == 1)
             iommu->pdt_cache[i].valid = 0;
+    // [失效] 桥接性能模型: PC 精准失效(DID+PID)
+    perf_enqueue_cache_invalidation(iommu, 1 /*INVAL_PDT*/, 1, DID, PID,
+                                    0, 0, 0, 0, 0, 0, 0);
     return;
 }
 
@@ -447,6 +453,9 @@ do_iotinval_vma(
     // if (AV == 1 && NL == 1) {
     //     invalidate_vs_stage_nl_pte_caches(GV, AV, NL, PSCV, GSCID, PSCID, ADDR_63_12);
     // }
+    // [失效] 桥接性能模型: IOTINVAL.VMA(阶段1页表失效)
+    perf_enqueue_cache_invalidation(iommu, 2 /*IOTINVAL_VMA*/, 0, 0, 0,
+                                    GV, AV, PSCV, NL, GSCID, PSCID, ADDR_63_12);
     return;
 }
 void
@@ -535,6 +544,9 @@ do_iotinval_gvma(
     // if (GV == 1 && AV == 1 && NL == 1) {
     //     invalidate_g_stage_NL_pte_caches(GV, AV, NL, GSCID, ADDR_63_12);
     // }
+    // [失效] 桥接性能模型: IOTINVAL.GVMA(阶段2页表失效)
+    perf_enqueue_cache_invalidation(iommu, 3 /*IOTINVAL_GVMA*/, 0, 0, 0,
+                                    GV, AV, 0 /*PSCV*/, NL, GSCID, 0, ADDR_63_12);
     return;
 }
 void

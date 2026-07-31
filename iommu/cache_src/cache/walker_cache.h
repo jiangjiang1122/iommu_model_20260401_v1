@@ -148,6 +148,30 @@ public:
     uint32_t num_rams() const { return num_rams_; }
     uint32_t ram_fifo_depth() const { return ram_fifo_depth_; }
 
+    // ============================================================
+    // [失效][多RAM] 失效子操作接口: 与 PT Cache 对齐
+    //   失效指令由 walker_hash_thread 拆分为 (级 x RAM) 子失效,
+    //   经高优先通道分发到对应 worker, 保证与 in-flight 子查询串行。
+    // ============================================================
+
+    // 将 LIB 注入三级子表(与 PT Cache 共享同一个 LIB)
+    void set_lazy_invalid_buffer(const LazyInvalidBuffer* lib);
+
+    // 本级子表的候选 set 枚举 / set->RAM 映射
+    uint32_t enum_candidate_sets(uint8_t level, iova_t addr, bool addr_is_va,
+                                 bool sv48, bool x4_mode,
+                                 uint32_t* out_sets) const;
+    uint32_t ram_of_set(uint8_t level, uint32_t set) const;
+
+    // 单 set / 本RAM 区间 / LIB 批量扫表 失效原子段
+    uint32_t invalidate_set_ram(uint8_t level, uint32_t set,
+                                const CacheMessage& cmd, sc_time& ram_latency);
+    uint32_t invalidate_ram_range(uint8_t level, uint32_t ram_id,
+                                  const CacheMessage& cmd,
+                                  sc_time& ram_latency);
+    uint32_t lazy_sweep_ram(uint8_t level, uint32_t ram_id, uint8_t new_vn,
+                            sc_time& ram_latency);
+
     // 从地址中提取对应 Walker level 的累计段字段。
     static iova_t extract_addr_segment(iova_t addr, uint8_t level,
                                        bool addr_is_va, bool sv48,
@@ -242,6 +266,37 @@ public:
                                        sc_time* latency = nullptr);
     uint32_t invalidate_global(sc_time* latency = nullptr);
 
+    // ============================================================
+    // [失效][多RAM] 失效原子段与候选 set 计算 (与 PT Cache 同构)
+    //   小范围枚举: 同样枚举关联于 gscid/pscid 的 8 个 temp1 值,
+    //   与本级 addr 段异或后得到 8 个 Cache set 索引。
+    // ============================================================
+    uint32_t num_sets_count() const { return num_sets_; }
+    uint32_t ram_of_set(uint32_t set) const {
+        return (num_rams_ <= 1) ? 0 : (set / sets_per_ram_);
+    }
+    uint32_t ram_set_begin(uint32_t ram_id) const {
+        return (num_rams_ <= 1) ? 0 : (ram_id * sets_per_ram_);
+    }
+    uint32_t ram_set_end(uint32_t ram_id) const {
+        return (num_rams_ <= 1) ? num_sets_ : ((ram_id + 1) * sets_per_ram_);
+    }
+
+    // 本级子表的候选 set 枚举 (返回去重后的数量, out_sets 容量需 >= 8)
+    uint32_t enum_candidate_sets(iova_t addr, bool addr_is_va, bool sv48,
+                                 bool x4_mode, uint32_t* out_sets) const;
+
+    // 失效谓词: 本级 cache line 是否属于本次失效范围
+    bool line_matches_inval(const WalkerTag& tag, const CacheMessage& cmd) const;
+
+    // 单 set / 本RAM 区间 / LIB 批量扫表 失效原子段 (均含 S2 阵列)
+    uint32_t invalidate_set_ram(uint32_t set, const CacheMessage& cmd,
+                                sc_time& ram_latency);
+    uint32_t invalidate_ram_range(uint32_t ram_id, const CacheMessage& cmd,
+                                  sc_time& ram_latency);
+    uint32_t lazy_sweep_ram(uint32_t ram_id, uint8_t new_vn,
+                            sc_time& ram_latency);
+
 protected:
     uint32_t hash_function(const WalkerTag& tag) const override;
 
@@ -252,9 +307,26 @@ private:
     uint32_t num_rams_ = 1;
     uint32_t log2_num_rams_ = 0;
     uint32_t sets_per_ram_ = 0;
+    uint32_t log2_num_sets_ = 0;  // [失效] log2(num_sets_), 新哈希移位量用
+    bool     hash_v2_ = true;     // [失效] true=新哈希(支持addr枚举), false=legacy
 
-    // [多RAM] 未掩码原始hash(va_seg ^ gscid ^ pscid)
+    // [多RAM] 未掩码原始hash
     uint32_t raw_hash(const WalkerTag& tag) const;
+    // [失效] raw hash -> 全局 set 号 (RAM 分组拆分)
+    uint32_t set_from_raw(uint32_t raw) const;
+    // [失效] 新哈希分量 (与 PT Cache 同构)
+    static uint32_t hash_temp1(gscid_t gscid, pscid_t pscid);
+    static uint32_t hash_temp2(iova_t va_segment);
+    uint32_t hash_combine(uint32_t temp1, uint32_t temp2) const;
+
+    // [失效] 插入时记录的全局 VN (LIB 未注入时为 0)
+    uint8_t current_vn() const { return lib_ ? lib_->global_vn() : 0; }
+
+    // [失效] S2 阵列的区间失效 / LIB 批量扫表 (S2 与普通阵列物理隔离, 单独处理)
+    uint32_t invalidate_s2_range(uint32_t set_begin, uint32_t set_end,
+                                 const CacheMessage& cmd);
+    uint32_t lazy_sweep_s2_range(uint32_t set_begin, uint32_t set_end,
+                                 uint8_t new_vn);
 
     // [S2] 独立的S2 Cache存储阵列，与普通Walker Cache物理隔离
     std::vector<std::vector<CacheLine<WalkerTag, WalkerData>>> s2_cache_array_;
