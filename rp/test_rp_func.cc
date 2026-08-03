@@ -1228,3 +1228,286 @@ void RP_Module::print_cpu_instr_stats() {
     printf("==========================================================\n");
     fflush(stdout);
 }
+
+// ============================================================
+// [虚拟化] 两级Stage 场景 Guest OS / vIOMMU / VMM 的 Cache Invalidate 建模
+// 对应规范 6.5.3(Lazy) / 6.5.4(Strict) 场景二
+// ============================================================
+
+// ---- Stage2 unmap: 清除叶级 gpte(V=0); 非叶级只读, 缺失即失败(不分配) ----
+uint64_t RP_Module::unmap_g_stage_pte(iommu_top* iommu, iohgatp_t iohgatp,
+                                      uint64_t gpa) {
+    uint16_t vpn[5];
+    uint64_t a;
+    uint8_t i, PTESIZE = 8, LEVELS = 0;
+    gpte_t nl_gpte;
+
+    if (iohgatp.MODE == IOHGATP_Sv32x4 && iommu->iommu_inst.reg_file.fctl.gxl == 1) {
+        vpn[0] = get_bits(21, 12, gpa); vpn[1] = get_bits(34, 22, gpa);
+        LEVELS = 2; PTESIZE = 4;
+    } else if (iohgatp.MODE == IOHGATP_Sv39x4 && iommu->iommu_inst.reg_file.fctl.gxl == 0) {
+        vpn[0] = get_bits(20, 12, gpa); vpn[1] = get_bits(29, 21, gpa);
+        vpn[2] = get_bits(40, 30, gpa); LEVELS = 3;
+    } else if (iohgatp.MODE == IOHGATP_Sv48x4) {
+        vpn[0] = get_bits(20, 12, gpa); vpn[1] = get_bits(29, 21, gpa);
+        vpn[2] = get_bits(38, 30, gpa); vpn[3] = get_bits(49, 39, gpa); LEVELS = 4;
+    } else if (iohgatp.MODE == IOHGATP_Sv57x4) {
+        vpn[0] = get_bits(20, 12, gpa); vpn[1] = get_bits(29, 21, gpa);
+        vpn[2] = get_bits(38, 30, gpa); vpn[3] = get_bits(47, 39, gpa);
+        vpn[4] = get_bits(58, 48, gpa); LEVELS = 5;
+    } else {
+        return (uint64_t)-1;
+    }
+
+    i = LEVELS - 1;
+    a = iohgatp.PPN * PAGESIZE;
+    while (i > 0) {
+        nl_gpte.raw = 0;
+        if (read_memory_test_rp((a | (vpn[i] * PTESIZE)), PTESIZE, (char*)&nl_gpte.raw))
+            return (uint64_t)-1;
+        if (nl_gpte.V == 0) return (uint64_t)-1;   // 非叶缺失: unmap 不分配页表
+        i = i - 1;
+        a = nl_gpte.PPN * PAGESIZE;
+    }
+    gpte_t zero_gpte;
+    zero_gpte.raw = 0;                             // V=0 -> unmap
+    if (write_memory_test_rp((char*)&zero_gpte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE))
+        return (uint64_t)-1;
+    return (a | (vpn[i] * PTESIZE));
+}
+
+// ---- Stage1 unmap: 清除叶级 spte(V=0); VS页表页位于GPA空间, 需 translate_gpa ----
+uint64_t RP_Module::unmap_vs_stage_pte(iommu_top* iommu, iosatp_t satp, uint64_t va,
+                                       iohgatp_t iohgatp, uint8_t SXL) {
+    uint16_t vpn[5];
+    uint64_t a;
+    uint8_t i, PTESIZE = 8, LEVELS = 0;
+    spte_t nl_pte;
+
+    if (satp.MODE == IOSATP_Sv32 && SXL == 1) {
+        vpn[0] = get_bits(21, 12, va); vpn[1] = get_bits(31, 22, va);
+        LEVELS = 2; PTESIZE = 4;
+    } else if (satp.MODE == IOSATP_Sv39 && SXL == 0) {
+        vpn[0] = get_bits(20, 12, va); vpn[1] = get_bits(29, 21, va);
+        vpn[2] = get_bits(38, 30, va); LEVELS = 3;
+    } else if (satp.MODE == IOSATP_Sv48) {
+        vpn[0] = get_bits(20, 12, va); vpn[1] = get_bits(29, 21, va);
+        vpn[2] = get_bits(38, 30, va); vpn[3] = get_bits(47, 39, va); LEVELS = 4;
+    } else if (satp.MODE == IOSATP_Sv57) {
+        vpn[0] = get_bits(20, 12, va); vpn[1] = get_bits(29, 21, va);
+        vpn[2] = get_bits(38, 30, va); vpn[3] = get_bits(47, 39, va);
+        vpn[4] = get_bits(56, 48, va); LEVELS = 5;
+    } else {
+        return (uint64_t)-1;
+    }
+
+    i = LEVELS - 1;
+    a = satp.PPN * PAGESIZE;
+    while (i > 0) {
+        if (translate_gpa(iommu, iohgatp, a, &a) == -1) return (uint64_t)-1;
+        nl_pte.raw = 0;
+        if (read_memory_test_rp((a | (vpn[i] * PTESIZE)), PTESIZE, (char*)&nl_pte.raw))
+            return (uint64_t)-1;
+        if (nl_pte.V == 0) return (uint64_t)-1;    // 非叶缺失: unmap 不分配页表
+        i = i - 1;
+        a = nl_pte.PPN * PAGESIZE;
+    }
+    if (translate_gpa(iommu, iohgatp, a, &a) == -1) return (uint64_t)-1;
+    spte_t zero_pte;
+    zero_pte.raw = 0;                              // V=0 -> unmap
+    if (write_memory_test_rp((char*)&zero_pte.raw, (a | (vpn[i] * PTESIZE)), PTESIZE))
+        return (uint64_t)-1;
+    return (a | (vpn[i] * PTESIZE));
+}
+
+// ---- 步骤2-3: Guest 把命令写入 vIOMMU 的虚拟CQ内存区 ----
+void RP_Module::guest_write_vcq(const VirtCQEntry& e) {
+    vcq_ring.push_back(e);
+    vcq_tail++;
+    virt_stats.vcq_writes++;
+}
+
+// ---- 步骤4: Guest 写虚拟CQ tail 寄存器(doorbell) ----
+void RP_Module::guest_ring_vcq_doorbell() {
+    virt_stats.vcq_doorbells++;
+    printf("[t=%llu ns][GUEST] ring vCQ doorbell (tail=%u, %zu cmds pending)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           vcq_tail, vcq_ring.size());
+    fflush(stdout);
+}
+
+// ---- 步骤5: VMM 拦截 Guest 对虚拟CQ tail 的写操作 ----
+void RP_Module::vmm_intercept() {
+    virt_stats.vmm_intercepts++;
+    const bool trap = (vmm_intercept_mode == VmmInterceptMode::TRAP_AND_EMULATE);
+    printf("[t=%llu ns][VMM] intercept via %s (modeled %.0f ns)\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           trap ? "trap-and-emulate (VM exit)" : "para-virt hypercall",
+           vmm_trap_latency_ns);
+    fflush(stdout);
+    virt_stats.vmm_trap_ns += vmm_trap_latency_ns;
+    wait(vmm_trap_latency_ns, SC_NS);
+}
+
+// ---- 步骤6-9: VMM 解析Guest命令 -> 转换为物理IOMMU命令 -> 写物理CQ ----
+void RP_Module::vmm_translate_and_forward(iommu_top* iommu) {
+    virt_stats.vmm_xlat_ns += vmm_translate_latency_ns;
+    wait(vmm_translate_latency_ns, SC_NS);
+
+    const double t0 = sc_core::sc_time_stamp().to_seconds() * 1e9;
+    for (const auto& e : vcq_ring) {
+        if (e.opcode == 0) {
+            // Guest 的 IOTINVAL.VMA -> 物理命令: GV=1 + GSCID标识该VM + PSCID + ADDR
+            printf("[t=%llu ns][VMM] translate IOTINVAL.VMA -> phys CQ "
+                   "(GV=1, GSCID=%u, PSCID=%u, AV=%u, ADDR=0x%lx)\n",
+                   (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+                   e.gscid, e.pscid, e.av, (unsigned long)e.addr);
+            fflush(stdout);
+            iotinval(iommu, VMA, e.gv, e.av, e.pscv, e.gscid, e.pscid, e.addr, e.nl);
+            virt_stats.guest_inval_cmds++;
+        } else {
+            // IOFENCE.C AV=1: 物理IOMMU经AXI写完成标志到内存, 供Guest轮询
+            iofence(iommu, IOFENCE_C, 0, 0, 1 /*AV*/, 0, iofence_flag_addr, 0x1);
+        }
+    }
+    virt_stats.iofence_wait_total_ns += sc_core::sc_time_stamp().to_seconds() * 1e9 - t0;
+    vcq_ring.clear();
+}
+
+// ---- 步骤10: VMM 更新虚拟CQ head 反馈 Guest ----
+void RP_Module::vmm_update_vcq_head() {
+    vcq_head = vcq_tail;
+}
+
+// ---- 步骤11: Guest 轮询确认 invalidation 完成 ----
+void RP_Module::guest_poll_completion() {
+    virt_stats.guest_poll_ns += guest_poll_latency_ns;
+    wait(guest_poll_latency_ns, SC_NS);
+    printf("[t=%llu ns][GUEST] poll completion OK (vCQ head=%u) -> safe to reclaim GPA\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000, vcq_head);
+    fflush(stdout);
+}
+
+// ---- 步骤2~11 完整封装: Guest 经 vIOMMU/VMM 发起一条 IOTINVAL.VMA ----
+void RP_Module::guest_issue_iotinval_vma(iommu_top* iommu, uint32_t gscid,
+                                        uint32_t pscid, uint8_t av,
+                                        uint64_t gva, uint8_t nl) {
+    VirtCQEntry inv{};
+    inv.opcode = 0;
+    inv.gv = 1;                 // 虚拟化场景: GV=1 标识该VM
+    inv.av = av;                // Lazy: 0(批量, 只GSCID/PSCID) / Strict: 1(带ADDR)
+    inv.pscv = 1;               // Stage1 由 Guest 管理 -> 指定 PSCID
+    inv.nl = nl;
+    inv.gscid = gscid;
+    inv.pscid = pscid;
+    inv.addr = (av ? gva : 0);
+    guest_write_vcq(inv);                       // 步骤2-3
+
+    VirtCQEntry fence{};
+    fence.opcode = 1;                           // IOFENCE.C (AV=1)
+    guest_write_vcq(fence);                     // 步骤3
+
+    guest_ring_vcq_doorbell();                  // 步骤4
+    vmm_intercept();                            // 步骤5
+    vmm_translate_and_forward(iommu);           // 步骤6-9
+    vmm_update_vcq_head();                      // 步骤10
+    guest_poll_completion();                    // 步骤11
+}
+
+// ---- VMM 发起 Stage2 失效: 直接写物理CQ, 无需拦截 ----
+void RP_Module::vmm_issue_iotinval_gvma(iommu_top* iommu, uint32_t gscid) {
+    printf("[t=%llu ns][VMM] issue IOTINVAL.GVMA (GV=1, GSCID=%u) for Stage2 unmap\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000, gscid);
+    fflush(stdout);
+    iotinval(iommu, GVMA, 1 /*GV*/, 0 /*AV*/, 0 /*PSCV*/, gscid, 0, 0, 0);
+    iofence(iommu, IOFENCE_C, 0, 0, 1 /*AV*/, 0, iofence_flag_addr, 0x1);
+    virt_stats.vmm_inval_cmds++;
+}
+
+// ---- Guest Flush Queue: 是否该 drain ----
+bool RP_Module::guest_fq_should_drain() const {
+    if (guest_fq.empty()) return false;
+    if (guest_fq.size() >= guest_fq_depth) return true;
+    const double now = sc_core::sc_time_stamp().to_seconds() * 1e9;
+    return (now - guest_fq_last_drain_ns) >= guest_fq_timeout_ns;
+}
+
+// ---- Guest Flush Queue Drain: 一条批量 IOTINVAL.VMA(AV=0) 覆盖全部累积GVA ----
+void RP_Module::guest_fq_drain(iommu_top* iommu, uint32_t gscid, uint32_t pscid) {
+    if (guest_fq.empty()) return;
+    const size_t n = guest_fq.size();
+    const bool by_depth = (n >= guest_fq_depth);
+    if (by_depth) virt_stats.fq_drain_by_depth++;
+    else          virt_stats.fq_drain_by_timeout++;
+
+    printf("[t=%llu ns][GUEST] Flush Queue DRAIN: %zu GVAs batched into ONE "
+           "IOTINVAL.VMA(AV=0, GSCID=%u, PSCID=%u) [trigger=%s]\n",
+           (unsigned long long)sc_core::sc_time_stamp().value() / 1000,
+           n, gscid, pscid, by_depth ? "depth" : "timeout");
+    fflush(stdout);
+
+    // Lazy 关键: 无论累积多少 GVA, 只发一条不带 ADDR 的失效命令
+    // -> 物理IOMMU侧走 LAZY(记录LIB + 全局VN++), PT/Walker 延迟失效
+    guest_issue_iotinval_vma(iommu, gscid, pscid, 0 /*AV=0*/, 0);
+
+    virt_stats.fq_drains++;
+    virt_stats.fq_batched_gvas += n;
+    guest_fq.clear();
+    guest_fq_last_drain_ns = sc_core::sc_time_stamp().to_seconds() * 1e9;
+}
+
+// ---- 虚拟化失效统计报告 ----
+void RP_Module::print_virt_inval_stats(const char* mode_name) {
+    const auto& s = virt_stats;
+    printf("\n========== Virtualized Cache Invalidation Report [%s] ==========\n",
+           mode_name);
+    printf("  [模型假设] 以下延时为建模值, 非实测(可经 Makefile 宏调整):\n");
+    printf("    VMM intercept(%s): %.0f ns/次\n",
+           vmm_intercept_mode == VmmInterceptMode::TRAP_AND_EMULATE
+               ? "trap-and-emulate" : "para-virt hypercall",
+           vmm_trap_latency_ns);
+    printf("    VMM translate: %.0f ns   Guest poll: %.0f ns   fence: %.0f ns\n",
+           vmm_translate_latency_ns, guest_poll_latency_ns, guest_fence_latency_ns);
+    printf("  ---- unmap 与失效命令 ----\n");
+    printf("    Guest unmaps (Stage1 GVA->GPA):     %lu\n", (unsigned long)s.guest_unmaps);
+    printf("    VMM   unmaps (Stage2 GPA->SPA):     %lu\n", (unsigned long)s.vmm_unmaps);
+    printf("    Guest IOTINVAL.VMA  cmds issued:    %lu\n", (unsigned long)s.guest_inval_cmds);
+    printf("    VMM   IOTINVAL.GVMA cmds issued:    %lu\n", (unsigned long)s.vmm_inval_cmds);
+    if (s.guest_unmaps > 0) {
+        printf("    每次 unmap 平均失效命令数:          %.4f  (Strict=1.0, Lazy=1/FQ深度)\n",
+               (double)s.guest_inval_cmds / s.guest_unmaps);
+    }
+    printf("  ---- Flush Queue (Lazy 批量合并) ----\n");
+    printf("    Drains: %lu  (depth触发=%lu, timeout触发=%lu, 收尾强制=%lu)\n",
+           (unsigned long)s.fq_drains, (unsigned long)s.fq_drain_by_depth,
+           (unsigned long)s.fq_drain_by_timeout, (unsigned long)s.fq_drain_forced);
+    printf("    合并 GVA 总数: %lu", (unsigned long)s.fq_batched_gvas);
+    if (s.fq_drains > 0) {
+        printf("   平均合并率: %.1f GVA/drain\n",
+               (double)s.fq_batched_gvas / s.fq_drains);
+    } else {
+        printf("   (Strict 模式无 Flush Queue)\n");
+    }
+    printf("  ---- 虚拟化开销分解 ----\n");
+    const double virt_total = s.vmm_trap_ns + s.vmm_xlat_ns + s.guest_poll_ns + s.fence_ns;
+    printf("    VMM intercept(trap/hypercall): %10.1f ns\n", s.vmm_trap_ns);
+    printf("    VMM translate+forward:         %10.1f ns\n", s.vmm_xlat_ns);
+    printf("    Guest poll completion:         %10.1f ns\n", s.guest_poll_ns);
+    printf("    Guest fence:                   %10.1f ns\n", s.fence_ns);
+    printf("    合计虚拟化开销:                %10.1f ns\n", virt_total);
+    printf("    其中 IOFENCE 同步等待:         %10.1f ns\n", s.iofence_wait_total_ns);
+    printf("  ---- unmap 关键路径延迟 (unmap -> 可回收GPA) ----\n");
+    if (s.unmap_path_samples > 0) {
+        printf("    样本数: %lu   平均: %.1f ns   最大: %.1f ns\n",
+               (unsigned long)s.unmap_path_samples,
+               s.unmap_path_total_ns / s.unmap_path_samples, s.unmap_path_max_ns);
+    } else {
+        printf("    (无样本)\n");
+    }
+    printf("  ---- vIOMMU 交互计数 ----\n");
+    printf("    vCQ writes: %lu   doorbells: %lu   VMM intercepts: %lu\n",
+           (unsigned long)s.vcq_writes, (unsigned long)s.vcq_doorbells,
+           (unsigned long)s.vmm_intercepts);
+    printf("================================================================\n");
+    fflush(stdout);
+}

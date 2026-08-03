@@ -148,6 +148,42 @@ else ifeq ($(TEST), rand4k_twostage_s2on_128g_inval)
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE10_PTW) \
                  -DTEST_CFG_NUM_PAGES=1250 \
                  -DTEST_CFG_INVAL_PERIOD_REQS=$(SCENE10_INVAL_PERIOD)
+else ifeq ($(TEST), virt_lazy_twostage)
+    # 场景11: 虚拟化两级Stage — Lazy 模式 Cache Invalidate (规范6.5.3 场景二)
+    #   Guest OS 管理Stage1, unmap后GVA入Flush Queue, Drain时批量发
+    #   IOTINVAL.VMA(GV=1,GSCID,PSCID,AV=0) 经vIOMMU->VMM拦截->物理CQ;
+    #   VMM 管理Stage2, 累积后批量发 IOTINVAL.GVMA。负载与场景7同源可对比。
+    VIRT_FQ_DEPTH ?= 32
+    VIRT_TRAP_NS ?= 2000
+    VIRT_FQ_TIMEOUT_NS ?= 10000
+    TEST_THREAD_SRC = rp/test_rp_virt_lazy_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=4 \
+                 -DTEST_CFG_NUM_PAGES=1250 \
+                 -DTEST_CFG_VIRT_FQ_DEPTH=$(VIRT_FQ_DEPTH) \
+                 -DTEST_CFG_VIRT_FQ_TIMEOUT_NS=$(VIRT_FQ_TIMEOUT_NS) \
+                 -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
+else ifeq ($(TEST), virt_strict_twostage)
+    # 场景12: 虚拟化两级Stage — Strict 模式 Cache Invalidate (规范6.5.4 场景二)
+    #   Guest OS 每次unmap立即发 IOTINVAL.VMA(GV=1,GSCID,PSCID,AV=1,ADDR=GVA)
+    #   并等IOFENCE.C完成后才回收GPA; VMM 每次Stage2 unmap后立即发 GVMA。
+    #   负载与unmap序列与场景11完全一致, 仅失效策略不同 -> 可直接A/B对比。
+    VIRT_TRAP_NS ?= 2000
+    TEST_THREAD_SRC = rp/test_rp_virt_strict_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=4 \
+                 -DTEST_CFG_NUM_PAGES=1250 \
+                 -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
 else
     # rand4k_singlestage (default)
     TEST_THREAD_SRC = rp/test_rp_rand4k_single_stage_thread.cc

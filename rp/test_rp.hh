@@ -8,6 +8,7 @@
 #include "param_trans_def.hh"
 #include "iommu_struct.hh"
 #include "../ddr/test_ddr.hh"
+#include <vector>       // [虚拟化] vIOMMU 虚拟CQ / Guest Flush Queue 容器
 
 using namespace std;
 using namespace sc_core;
@@ -236,6 +237,95 @@ public:
     };
     CpuInstrStats cpu_stats;
     void print_cpu_instr_stats();
+
+    // ============================================================
+    // [虚拟化] 两级Stage 场景下 Guest OS / vIOMMU / VMM 的 Cache Invalidate 建模
+    //
+    // 对应规范 6.5.3(Lazy) / 6.5.4(Strict) 的场景二(两级Stage均使能):
+    //   - Guest OS 管理 Stage1(GVA->GPA), 修改后经 vIOMMU 虚拟CQ 发起
+    //     IOTINVAL.VMA(GV=1,GSCID,PSCID); Guest 无法直接访问物理IOMMU,
+    //     须由 VMM 拦截(trap-and-emulate 或 para-virt hypercall)并转换后
+    //     写入物理IOMMU的CQ。
+    //   - VMM 管理 Stage2(GPA->SPA), 修改后直接发起 IOTINVAL.GVMA(GV=1,GSCID)。
+    //   - Lazy : Guest 把 GVA 累积到 Flush Queue, Drain 时批量失效(AV=0)
+    //   - Strict: 每次 unmap 立即完整失效(AV=1, ADDR=GVA)并等待完成
+    //
+    // 建模口径: 本平台无 CPU/VMM/Guest, 三者均为测试激励中的行为+时序建模,
+    //   即"按配置延时推进仿真时间 + 记账 + 日志", 无真实陷入与虚拟机切换。
+    // ============================================================
+
+    // ---- unmap: 清除叶级 PTE(V=0)。非叶级只读不分配(与 add_*_pte 的关键区别) ----
+    // 返回被清除的叶PTE地址; 失败(非叶级缺失)返回 (uint64_t)-1
+    uint64_t unmap_g_stage_pte(iommu_top* iommu, iohgatp_t iohgatp, uint64_t gpa);
+    uint64_t unmap_vs_stage_pte(iommu_top* iommu, iosatp_t satp, uint64_t va,
+                               iohgatp_t iohgatp, uint8_t SXL);
+
+    // ---- vIOMMU 虚拟命令队列(Guest 可见, VMM 拦截) ----
+    struct VirtCQEntry {
+        uint8_t  opcode;      // 0=IOTINVAL.VMA, 1=IOFENCE.C
+        uint8_t  gv, av, pscv, nl;
+        uint32_t gscid, pscid;
+        uint64_t addr;        // AV=1 时为 GVA
+    };
+    std::vector<VirtCQEntry> vcq_ring;
+    uint32_t vcq_tail = 0;
+    uint32_t vcq_head = 0;
+
+    // VMM 拦截方式
+    enum class VmmInterceptMode { TRAP_AND_EMULATE, PARA_VIRT_HYPERCALL };
+    VmmInterceptMode vmm_intercept_mode = VmmInterceptMode::TRAP_AND_EMULATE;
+
+    // 建模延时参数(ns); 由 Makefile 宏覆盖, 均为**建模假设值**非实测
+    double vmm_trap_latency_ns      = 2000.0;  // trap-and-emulate VM exit/entry
+    double vmm_translate_latency_ns = 200.0;   // 解析Guest命令并转换为物理命令
+    double guest_poll_latency_ns    = 300.0;   // Guest 轮询确认完成
+    double guest_fence_latency_ns   = 20.0;    // fence 内存屏障
+
+    // IOFENCE.C AV=1 的完成标志写入地址(物理IOMMU经AXI写此处通知完成)
+    uint64_t iofence_flag_addr = 0;
+
+    // 步骤2-3: Guest 写虚拟CQ
+    void guest_write_vcq(const VirtCQEntry& e);
+    // 步骤4: Guest 写虚拟CQ tail(doorbell)
+    void guest_ring_vcq_doorbell();
+    // 步骤5: VMM 拦截(trap-and-emulate 陷入 或 para-virt hypercall)
+    void vmm_intercept();
+    // 步骤6-9: VMM 解析+转换+写物理CQ(实际下发 iotinval/iofence)
+    void vmm_translate_and_forward(iommu_top* iommu);
+    // 步骤10: VMM 更新虚拟CQ head
+    void vmm_update_vcq_head();
+    // 步骤11: Guest 轮询确认完成
+    void guest_poll_completion();
+    // 步骤2~11 的完整封装: Guest 经 vIOMMU/VMM 发起一条 IOTINVAL.VMA
+    //   av=0 -> Lazy 批量(只GSCID/PSCID); av=1 -> Strict 精准(带ADDR=gva)
+    void guest_issue_iotinval_vma(iommu_top* iommu, uint32_t gscid, uint32_t pscid,
+                                  uint8_t av, uint64_t gva, uint8_t nl = 0);
+    // VMM 直接发起 IOTINVAL.GVMA(Stage2 失效, 无需拦截)
+    void vmm_issue_iotinval_gvma(iommu_top* iommu, uint32_t gscid);
+
+    // ---- Guest 侧 Flush Queue(仅 Lazy 使用) ----
+    std::vector<uint64_t> guest_fq;          // 累积待失效 GVA
+    double   guest_fq_last_drain_ns = 0.0;
+    uint32_t guest_fq_depth = 32;            // 达此深度触发 drain
+    double   guest_fq_timeout_ns = 10000.0;  // 或距上次 drain 超时触发
+    bool guest_fq_should_drain() const;
+    // Drain: 一条批量 IOTINVAL.VMA(AV=0) 覆盖队列中全部 GVA
+    void guest_fq_drain(iommu_top* iommu, uint32_t gscid, uint32_t pscid);
+
+    // ---- 虚拟化失效统计(两场景共用, 便于 A/B 对比) ----
+    struct VirtInvalStats {
+        uint64_t guest_unmaps = 0, vmm_unmaps = 0;
+        uint64_t guest_inval_cmds = 0, vmm_inval_cmds = 0;
+        uint64_t fq_drains = 0, fq_batched_gvas = 0;
+        uint64_t fq_drain_by_depth = 0, fq_drain_by_timeout = 0, fq_drain_forced = 0;
+        double   vmm_trap_ns = 0, vmm_xlat_ns = 0, guest_poll_ns = 0, fence_ns = 0;
+        double   unmap_path_total_ns = 0, unmap_path_max_ns = 0;
+        uint64_t unmap_path_samples = 0;
+        double   iofence_wait_total_ns = 0;
+        uint64_t vcq_writes = 0, vcq_doorbells = 0, vmm_intercepts = 0;
+    };
+    VirtInvalStats virt_stats;
+    void print_virt_inval_stats(const char* mode_name);
 };
 
 #endif

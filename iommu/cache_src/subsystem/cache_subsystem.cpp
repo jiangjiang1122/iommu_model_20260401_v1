@@ -71,6 +71,9 @@ const char* invalidate_mode_name(CacheInvalidateMode mode) {
         case CacheInvalidateMode::PRECISE: return "PRECISE";
         case CacheInvalidateMode::SCAN: return "SCAN";
         case CacheInvalidateMode::GLOBAL: return "GLOBAL";
+        // [失效] 补齐新增模式, 避免 task trace 打印 UNKNOWN
+        case CacheInvalidateMode::SCAN_RANGE: return "SCAN_RANGE";
+        case CacheInvalidateMode::LAZY: return "LAZY";
         default: return "UNKNOWN";
     }
 }
