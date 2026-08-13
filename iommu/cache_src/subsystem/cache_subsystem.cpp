@@ -113,6 +113,7 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       walker_front_request_fifo(16),
       walker_front_response_fifo(16),
       walker_join_fifo(64),
+      walker_serial_fifo(64),
       dedup_request_fifo(16),
       dedup_update_fifo(16),
       dedup_inside_request_fifo(32),
@@ -1363,7 +1364,15 @@ void CacheSubsystem::walker_hash_thread() {
             }
             processed = true;
         }
-        // 2. PTW关键路径lookup(S2/二次校验/旧路径): PTW在互斥锁内同步等待响应,
+        // 2. [串行查询] 续查优先: 完成 in-flight 查询的下一级(有界: 每lookup至多2次续查)
+        else if (walker_serial_fifo.num_available() > 0) {
+            req = walker_serial_fifo.read();
+            // 续查hash 1拍后分发单级子查询
+            wait(clock_period_);
+            dispatch_walker_sub_lookup(req, req.walker_sub_level);
+            processed = true;
+        }
+        // 3. PTW关键路径lookup(S2/二次校验/旧路径): PTW在互斥锁内同步等待响应,
         // 优先于前置lookup(前置不在关键路径, 结果早于dedup路径完成即可),
         // 避免高速前置流饿死PTW查询
         else if (walker_request_fifo.num_available() > 0) {
@@ -1383,7 +1392,7 @@ void CacheSubsystem::walker_hash_thread() {
             }
             processed = true;
         }
-        // 3. 前置lookup(主数据通路, 非关键路径)
+        // 4. 前置lookup(主数据通路, 非关键路径)
         else if (walker_front_request_fifo.num_available() > 0) {
             req = walker_front_request_fifo.read();
             req.walker_origin = 1;
@@ -1394,6 +1403,7 @@ void CacheSubsystem::walker_hash_thread() {
 
         if (!processed) {
             wait(walker_front_request_fifo.data_written_event() |
+                 walker_serial_fifo.data_written_event() |
                  walker_request_fifo.data_written_event() |
                  walker_update_fifo.data_written_event() |
                  walker_invalidate_fifo.data_written_event());
@@ -1401,62 +1411,64 @@ void CacheSubsystem::walker_hash_thread() {
     }
 }
 
-// [walker多RAM] lookup拆分分发: hash 1拍 + 注册join表项 + 按级分发子查询
+// [walker多RAM] lookup串行分发: hash 1拍 + 注册join表项 + 仅分发C3首级
+// [串行查询] C3→C2→C1 顺序查询: 首级仅查C3, miss后由join线程发续查
 void CacheSubsystem::dispatch_walker_lookup(CacheMessage& req) {
     const sc_time start = sc_time_stamp();
     const double start_ns = start.to_seconds() * 1e9;
     trace_task_event("begin", "walker_cache", "lookup", req, start);
 
-    // Hash 单元 1 拍(三级子表并行hash)
+    // Hash 单元 1 拍
     wait(clock_period_);
 
-    // 确定子查询级列表: C3/C2必查, C1仅Sv48且非Sv39模式
-    uint8_t levels[3];
-    uint8_t count = 0;
-    levels[count++] = 3;
-    levels[count++] = 2;
-    if (!walker_cache_->sv39_mode() && req.walker_sv48) {
-        levels[count++] = 1;
-    }
-
-    // 注册 join 表项
+    // 注册 join 表项: 串行模式每阶段仅1个子响应
     const uint64_t key = (static_cast<uint64_t>(req.walker_origin) << 56) |
                          req.task_id;
     WalkerJoinEntry entry;
     entry.base = req;
-    entry.expected = count;
+    entry.expected = 1;
+    entry.next_level = walker_serial_next_level(3, req);  // C3 miss后续查C2
     entry.start_time = start;
     walker_join_pending_[key] = entry;
 
-    // 按级分发子查询(目标RAM FIFO满则阻塞 = 反压)
-    // worker索引 = (level-1)*num_rams + ram_id: 三级子查询落在各自子表的独立RAM上并行
-    // [优先级] origin=0(PTW关键路径: S2后续/二次校验/旧路径)走高优先通道,
-    // 不被积压的前置子查询延迟; origin=1(前置)走普通通道
-    for (uint8_t i = 0; i < count; ++i) {
-        CacheMessage sub = req;
-        sub.walker_sub_level = levels[i];
-        sub.walker_sub_expected = count;
-        uint32_t ram_id = walker_cache_->compute_ram_id(
-            levels[i], req.gscid, req.pscid, req.iova,
-            req.walker_addr_is_va, req.walker_from_two_stage,
-            req.walker_sv48, req.walker_x4_mode);
-        uint32_t worker_id = (levels[i] - 1) * walker_num_rams_ + ram_id;
-        sc_fifo<CacheMessage>& target =
-            (req.walker_origin == 0) ? *walker_ram_upd_fifo_[worker_id]
-                                     : *walker_ram_fifo_[worker_id];
-        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
-        if (target.num_free() == 0) {
-            walker_hash_backpressure_cnt_++;
-        }
-        target.write(sub);  // 阻塞写 = 反压
-        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
-        walker_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
-        int occ = walker_ram_fifo_[worker_id]->num_available();
-        if (occ > walker_ram_fifo_peak_[worker_id]) walker_ram_fifo_peak_[worker_id] = occ;
-    }
+    // 仅分发C3首级子查询
+    CacheMessage sub = req;
+    sub.walker_sub_level = 3;
+    dispatch_walker_sub_lookup(sub, 3);
 
     walker_hash_task_count_++;
     walker_hash_busy_ns_ += (sc_time_stamp().to_seconds() * 1e9 - start_ns);
+}
+
+// [串行查询] 级链: 3→2→(1仅Sv48非Sv39)→0
+uint8_t CacheSubsystem::walker_serial_next_level(uint8_t level, const CacheMessage& req) {
+    if (level == 3) return 2;
+    if (level == 2) return (!walker_cache_->sv39_mode() && req.walker_sv48) ? 1 : 0;
+    return 0;
+}
+
+// [walker多RAM] 单级子查询分发: worker索引 = (level-1)*num_rams + ram_id
+// [优先级] origin=0(PTW关键路径)走高优先通道; origin=1(前置)走普通通道
+void CacheSubsystem::dispatch_walker_sub_lookup(const CacheMessage& req, uint8_t level) {
+    uint32_t ram_id = walker_cache_->compute_ram_id(
+        level, req.gscid, req.pscid, req.iova,
+        req.walker_addr_is_va, req.walker_from_two_stage,
+        req.walker_sv48, req.walker_x4_mode);
+    uint32_t worker_id = (level - 1) * walker_num_rams_ + ram_id;
+    sc_fifo<CacheMessage>& target =
+        (req.walker_origin == 0) ? *walker_ram_upd_fifo_[worker_id]
+                                 : *walker_ram_fifo_[worker_id];
+    const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+    if (target.num_free() == 0) {
+        walker_hash_backpressure_cnt_++;
+    }
+    CacheMessage sub = req;
+    sub.walker_sub_level = level;
+    target.write(sub);  // 阻塞写 = 反压
+    const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+    walker_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+    int occ = walker_ram_fifo_[worker_id]->num_available();
+    if (occ > walker_ram_fifo_peak_[worker_id]) walker_ram_fifo_peak_[worker_id] = occ;
 }
 
 // [walker多RAM] update拆分分发: hash 1拍 + 按kind/valid拆子更新(无响应)
@@ -1622,11 +1634,23 @@ void CacheSubsystem::walker_join_thread() {
             e.hit[jr.walker_sub_level] = jr.hit;
             e.data[jr.walker_sub_level] = jr.walker_data;
         }
-        if (jr.latency > e.max_ram_latency) e.max_ram_latency = jr.latency;
-        if (e.received < e.expected) continue;
+        // [串行查询] 累计各级原子段延时(原为取max的并行口径)
+        e.max_ram_latency = e.max_ram_latency + jr.latency;
 
-        // 收齐: C3 > C2 > C1 仲裁
-        uint8_t hit_level = e.hit[3] ? 3 : (e.hit[2] ? 2 : (e.hit[1] ? 1 : 0));
+        // [串行查询] C3→C2→C1 顺序短路: 命中即结束; miss且有下一级→发续查
+        uint8_t hit_level = 0;
+        if (jr.hit) {
+            hit_level = jr.walker_sub_level;
+        } else if (e.next_level != 0) {
+            CacheMessage cont = e.base;
+            cont.walker_sub_level = e.next_level;
+            e.next_level = walker_serial_next_level(e.next_level, e.base);
+            e.max_ram_latency = e.max_ram_latency + clock_period_;  // 续查hash 1拍
+            e.received = 0;   // 串行模式expected恒为1, 等待下一级子响应
+            push_fifo(walker_serial_fifo, cont);
+            continue;
+        }
+        // 否则: 全级miss, hit_level=0
         CacheMessage resp;
         resp.msg_type = CacheMsgType::CACHE_RESPONSE;
         resp.task_id = e.base.task_id;

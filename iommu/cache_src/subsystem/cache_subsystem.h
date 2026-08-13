@@ -378,15 +378,19 @@ private:
     std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> walker_ram_upd_fifo_;
     // RAM worker -> Join 线程的子响应汇聚FIFO
     sc_fifo<CacheMessage> walker_join_fifo;
+    // [串行查询] Join线程 miss 后续查请求 -> Hash线程 的续查FIFO
+    // (C3→C2→C1 顺序查询: 每级 miss 后才发起下一级, 每级各付1拍hash)
+    sc_fifo<CacheMessage> walker_serial_fifo;
 
     // Join 待聚合表项: 按 key=(origin<<56)|task_id 索引
     struct WalkerJoinEntry {
         CacheMessage base;                     // 原始lookup请求(携带origin/路由信息)
-        uint8_t  expected = 0;                 // 期望子响应数(2或3)
+        uint8_t  expected = 0;                 // 期望子响应数(串行模式恒为1)
         uint8_t  received = 0;                 // 已收子响应数
+        uint8_t  next_level = 0;               // [串行] 本级miss后待查询的下一级(0=结束)
         bool     hit[4] = {false, false, false, false};   // 按级命中标志[1..3]
         WalkerData data[4];                    // 按级命中数据[1..3]
-        sc_time  max_ram_latency = SC_ZERO_TIME;  // 子查询最大原子段延时
+        sc_time  max_ram_latency = SC_ZERO_TIME;  // [串行] 各级原子段延时+续查hash拍 累计
         sc_time  start_time = SC_ZERO_TIME;    // hash入队时刻(统计用)
     };
     std::map<uint64_t, WalkerJoinEntry> walker_join_pending_;
@@ -394,6 +398,10 @@ private:
     // 内部辅助: lookup/update 拆分分发(含hash 1拍与反压统计)
     void dispatch_walker_lookup(CacheMessage& req);
     void dispatch_walker_update(CacheMessage& req);
+    // [串行查询] 单级子查询分发(目标RAM FIFO满则阻塞反压)
+    void dispatch_walker_sub_lookup(const CacheMessage& req, uint8_t level);
+    // [串行查询] 级链: 3→2→(1仅Sv48非Sv39)→0
+    uint8_t walker_serial_next_level(uint8_t level, const CacheMessage& req);
 
     // [STAT] Walker Hash 单元统计
     uint64_t walker_hash_task_count_       = 0;
