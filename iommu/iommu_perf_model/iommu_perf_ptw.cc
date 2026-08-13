@@ -1470,6 +1470,10 @@ void iommu_top::ptw_rsp_process_thread() {
                 task->pa = ((gs_pte.PPN * PAGESIZE) & ~(task->gst_page_sz - 1)) |
                            (task->gpa & (task->gst_page_sz - 1));
                 task->g_pte = gs_pte;
+                // [FIX] G-stage大页(2MB/1GB)叶子: 原始PPN为大页对齐(不含GPA页内偏移),
+                // 统一归一化为最终4KB PPN(与S2 leaf hit/Front leaf路径一致),
+                // 否则预取组写入PT Cache后, 命中路径用g_pte.PPN重建PA会丢失偏移
+                task->g_pte.PPN = task->pa / PAGESIZE;
 
                 // Handle virtual interrupt file overlap
                 handle_virtual_interrupt_file_overlap(&task->DC, task->gpa,
