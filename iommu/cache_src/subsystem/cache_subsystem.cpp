@@ -631,6 +631,21 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
             if (resp.hit) {
                 // HIT 常规CL: 直接返回
                 push_fifo(pt_hit_response_fifo, resp);
+            } else if (req.dedup_bypass) {
+                // [MSI] MSI使能设备旁路dedup: 不插占位CL/不挂Buffer, 直接产生
+                // MISS响应送PTW; MSI命中后任务改道MSIPT路径, 不依赖Buffer刷新
+                CacheMessage bypass_resp;
+                bypass_resp.msg_type = CacheMsgType::CACHE_RESPONSE;
+                bypass_resp.task_id = req.task_id;
+                bypass_resp.iova = req.iova;
+                bypass_resp.gscid = req.gscid;
+                bypass_resp.pscid = req.pscid;
+                bypass_resp.stage = req.stage;
+                bypass_resp.dedup_bypass = true;
+                bypass_resp.dedup_head_index = 0xFFFF;
+                bypass_resp.prefetch_enabled = false;
+                bypass_resp.prefetch_depth = 0;
+                push_fifo(pt_miss_response_fifo, bypass_resp);
             } else {
                 // [重构] MISS: 转发到 dedup_request_fifo (携带原请求上下文与预取参数)
                 CacheMessage dedup_req = req;

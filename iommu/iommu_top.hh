@@ -98,6 +98,8 @@ public:
     sc_fifo<ddr_rsp_entry_t> ptw_rsp_ddr_fifo;
     sc_fifo<ddr_req_entry_t> msiptw_req_ddr_fifo;
     sc_fifo<ddr_rsp_entry_t> msiptw_rsp_ddr_fifo;
+        // [MSI] MRIF pending word写请求通道(经Master2/DDR端口, 响应静默丢弃)
+        sc_fifo<ddr_req_entry_t> msi_mrif_req_ddr_fifo;
     sc_fifo<ctrl_path_ddr_req_t> ctrl_path_req_ddr_fifo;
 
     // ===================== DDR Pending Queue =====================
@@ -436,6 +438,22 @@ public:
     void msiptw_req_thread();
     void msiptw_rsp_thread();
 
+    // [MSI] MSI处理辅助函数 (实现于 iommu_perf_msipt_cache.cc)
+    // msi_id_check: 按功能模型 step3-5 识别地址是否命中虚拟 interrupt file页,
+    //               命中时填充 task->gpa/is_msi/walk_ctx.msi_index
+    bool msi_id_check(iommu_task_t* task, uint64_t gpa);
+    // route_to_msipt: 将命中MSI的任务改道到独立的MSIPT路径
+    void route_to_msipt(iommu_task_t* task);
+    // msipte_decode: 解析16B MSI PTE并填充翻译结果(Flat/MRIF)或fault,
+    //                返回true表示fault(task->cause已设置)
+    bool msipte_decode(iommu_task_t* task, const msipte_t& msipte);
+
+    // [MSI] MSI专项统计
+    uint64_t msipt_flat_count;      // Flat模式MSI完成数
+    uint64_t msipt_mrif_count;      // MRIF模式MSI完成数
+    uint64_t msi_atomic_or_count;   // MRIF pending bit 原子OR写次数
+    uint64_t msi_notice_count;      // notice MSI发出次数
+
     // Forwarder (2 threads - split for PT and MSIPT paths)
     void pt_forwarder_thread();      // PT Cache -> axi_master_0_to_pcie_noc_socket
     void msipt_forwarder_thread();   // MSIPT Cache -> axi_stream or axi_master_1
@@ -497,6 +515,7 @@ public:
         ptw_rsp_ddr_fifo("ptw_rsp_ddr_fifo", FIFO_DEPTH_PTW_RSP_DDR),
         msiptw_req_ddr_fifo("msiptw_req_ddr_fifo", FIFO_DEPTH_MSIPTW_REQ_DDR),
         msiptw_rsp_ddr_fifo("msiptw_rsp_ddr_fifo", FIFO_DEPTH_MSIPTW_RSP_DDR),
+        msi_mrif_req_ddr_fifo("msi_mrif_req_ddr_fifo", FIFO_DEPTH_MSIPTW_REQ_DDR),
         ctrl_path_req_ddr_fifo("ctrl_path_req_ddr_fifo", FIFO_DEPTH_CTRL_PATH_REQ_DDR),
         // State initialization
         next_task_id(1),
@@ -608,7 +627,11 @@ public:
         steady_start_count(0),
         steady_end_count(0),
         ptw_steady_start_completed(0),
-        ptw_steady_end_completed(0)
+        ptw_steady_end_completed(0),
+        msipt_flat_count(0),
+        msipt_mrif_count(0),
+        msi_atomic_or_count(0),
+        msi_notice_count(0)
     {
         iommu_inst.top = this;
 

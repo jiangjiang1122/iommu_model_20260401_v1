@@ -300,8 +300,11 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
     
     // (4) 使用make_pt_data构造PTData
     // 根据task->pa和req.stage构造完整的PTData
+    // [MSI] MSI条目保存 iova->gpa 映射(S1结果, 无S2)并置位is_msi;
+    // 普通条目保存最终SPA
+    uint64_t upd_addr = task->is_msi ? task->gpa : task->pa;
     req.pt_data = iommu::make_pt_data(
-        task->pa,                          // SPA (System Physical Address)
+        upd_addr,                        // MSI: GPA(S1结果); 普通: SPA
         iommu::PageSize::PAGE_4K,          // 页大小 (默认4KB)
         0x07,                              // permissions (R|W|X)
         req.stage,                         // 翻译阶段
@@ -309,7 +312,8 @@ iommu::CacheMessage task_to_pt_update(iommu_task_t* task) {
         (req.stage == iommu::TransStage::STAGE2_ONLY) ? false : true,  // iova_is_va
         req.pt_sv48,                       // sv48标志
         req.pt_gstage_x4,                  // gstage_x4标志
-        ad_set                             // [AD] A/D位实际值
+        ad_set,                            // [AD] A/D位实际值
+        task->is_msi != 0                  // [MSI] MSI条目标记
     );
     
     printf("[CONVERT] task_id=%u -> PT_UPDATE request (gscid=%u, pscid=%u, iova=0x%lx, pa=0x%lx, stage=%d, sv48=%d, x4=%d, A=%d, D=%d)\n",
@@ -514,6 +518,13 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
         has_update = true;
     }
     
+    // [MSI] MSI任务条目: 三级数据均置位is_msi(仅VS侧中间结果, 无S2更新)
+    if (task->is_msi) {
+        req.walker_data_ptwc1.reserved.is_msi = 1;
+        req.walker_data_ptwc2.reserved.is_msi = 1;
+        req.walker_data_ptwc3.reserved.is_msi = 1;
+    }
+
     // 设置 update kind：根据 lookup 命中层级和 PTW 访问层级共同决定
     // 核心原则：只更新 lookup 未命中的层级，避免冗余更新
     //

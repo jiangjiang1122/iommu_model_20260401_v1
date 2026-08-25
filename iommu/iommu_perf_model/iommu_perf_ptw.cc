@@ -115,6 +115,9 @@ void iommu_top::ptw_req_process_thread() {
             task->gpa = task->iova;
             task->page_sz = get_bare_page_size(&iommu_inst);
 
+            // [MSI] S1=Bare的MSI识别已在configure_and_route前置完成(输入即GPA),
+            // 到达此处的均为非MSI请求, 无需重复判断。
+
             if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
                 // Need G-stage explicit translation
                 init_gstage_walk(task, task->gpa);
@@ -234,7 +237,10 @@ void iommu_top::ptw_req_process_thread() {
             bool walker_cache_enabled = PTW_WALKER_CACHE_ENABLED;  // 从PTW模块参数读取
             bool walker_hit = false;
             
-            if (walker_cache_enabled && WALKER_FRONT_ENABLED) {
+            // [MSI] 前置查询仅在configure_and_route实际发起时有效(walker_front_requested);
+            // MSI使能设备不发起前置查询, 走下方同步查询分支
+            if (walker_cache_enabled && WALKER_FRONT_ENABLED &&
+                task->walk_ctx.walker_front_requested) {
                 // [前置] 兜底等待: 正常时序下Walker查询(数拍)远快于dedup路径,
                 // 结果早已就绪; 极端反压场景下在此等待写回
                 while (!task->walk_ctx.walker_front_valid) {
@@ -347,7 +353,8 @@ void iommu_top::ptw_req_process_thread() {
             //   构造大页组(1+D_eff个4KB iova)交Monitor刷新去重Cache, 不写PT Cache
             // =====================================================================
             if (walker_cache_enabled && walker_hit &&
-                task->walk_ctx.walker_front_is_leaf) {
+                task->walk_ctx.walker_front_is_leaf &&
+                task->DC.msiptp.MODE == MSIPTP_Off) {  // [MSI] MSI设备不走端到端leaf短路(无GPA无法识别)
                 uint64_t leaf_page_sz = task->walk_ctx.walker_front_leaf_page_sz;
                 uint64_t leaf_pa_base = task->walk_ctx.walker_front_next_ppn * PAGESIZE;
                 task->pa = (leaf_pa_base & ~(leaf_page_sz - 1)) |
@@ -957,6 +964,21 @@ void iommu_top::ptw_rsp_process_thread() {
                 task->gpa = ((pte.PPN * PAGESIZE) & ~(task->page_sz - 1)) |
                             (task->iova & (task->page_sz - 1));
                 task->vs_pte = pte;
+
+                // [MSI] MSI地址识别 (S1完成得到GPA后, 对应功能模型 step18):
+                // 命中 -> 不执行S2翻译, 不执行预取(已在configure_and_route禁用);
+                // 进入完成回填流程: 刷新PT Cache/Walker Cache(is_msi=1) +
+                // 去重Cache置无效/刷dedup Buffer, 随后任务派发MSIPT大模块(点4)
+                if (msi_id_check(task, task->gpa)) {
+                    printf("[PTW_RSP] task_id=%u, VS leaf done -> MSI HIT (gpa=0x%lx, msi_index=%llu), skip S2/prefetch, refresh caches then MSIPT\n",
+                           task->task_id, task->gpa, (unsigned long long)task->walk_ctx.msi_index);
+                    fflush(stdout);
+                    task->pa = task->gpa;      // MSI条目无S2结果, pa占位为GPA
+                    task->gst_page_sz = PAGESIZE;
+                    task->state = TASK_PTW_DONE;
+                    walk_complete = true;
+                    break;
+                }
 
                 // Step 19: G-stage explicit translation
                 if (task->GV && task->iohgatp.MODE != IOHGATP_Bare) {
@@ -2491,9 +2513,13 @@ void iommu_top::ptw_rsp_process_thread() {
                 dedup_upd.gscid = task->GSCID;
                 dedup_upd.pscid = task->PSCID;
                 dedup_upd.iova = main_iova;
-                dedup_upd.dedup_pa_base = task->pa & ~0xFFFULL;
+                // [MSI] MSI任务: dedup_pa_base携带GPA页基址并置is_msi标记,
+                // flush回调据此将链上任务改道MSIPT模块(点6); 普通任务携带PA页基址
+                dedup_upd.dedup_pa_base = task->is_msi ? (task->gpa & ~0xFFFULL)
+                                                       : (task->pa & ~0xFFFULL);
                 dedup_upd.pt_data.vs_pte.raw = task->vs_pte.raw;
                 dedup_upd.pt_data.g_pte.raw = task->g_pte.raw;
+                dedup_upd.pt_data.reserved.is_msi = task->is_msi ? 1U : 0U;
                 dedup_upd.timestamp = sc_time_stamp();
                 cache_sub.dedup_update_fifo.write(dedup_upd);
                 main_task_flushed_via_chain = true;  // 任务将由 dedup flush 回调转发
@@ -2535,9 +2561,11 @@ void iommu_top::ptw_rsp_process_thread() {
                 fflush(stdout);
             }
             // [S2] S2 Walker Cache update (normal walk complete path)
+            // [MSI] MSI任务无S2结果, 不产生S2 walker更新
             if (PTW_WALKER_S2_CACHE_ENABLED && PTW_WALKER_CACHE_ENABLED
                 && task->GV && task->iohgatp.MODE != IOHGATP_Bare
-                && task->iosatp.MODE != IOSATP_Bare) {
+                && task->iosatp.MODE != IOSATP_Bare
+                && !task->is_msi) {
                 iommu::CacheMessage s2_req = task_to_s2_walker_update(task, task->gpa);
                 if (s2_req.walker_update_kind != iommu::WalkerUpdateKind::NONE) {
                     cache_sub.walker_update_fifo.write(s2_req);
@@ -2551,11 +2579,17 @@ void iommu_top::ptw_rsp_process_thread() {
             
             // Also route to forwarder after PT update
             // [FIX] 如果主任务已通过flush_dedup_buffer_chain转发，则跳过，避免double free
+            // [MSI] MSI任务改道MSIPT大模块(不经普通forwarder);
+            //       若已经dedup flush链转发, 回调内已改道, 此处跳过
             if (!main_task_flushed_via_chain) {
-                pt_cache_to_fwd_fifo.write(task);
+                if (task->is_msi) {
+                    route_to_msipt(task);
+                } else {
+                    pt_cache_to_fwd_fifo.write(task);
+                }
             } else {
-                printf("[PTW_FWD] task_id=%u -> skip duplicate forward (already flushed via buffer chain)\n",
-                       task->task_id);
+                printf("[PTW_FWD] task_id=%u -> skip duplicate forward (already flushed via buffer chain%s)\n",
+                       task->task_id, task->is_msi ? ", MSI route" : "");
                 fflush(stdout);
             }
             // VA Dedup: 恢复挂起的同页任务

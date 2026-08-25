@@ -18,13 +18,16 @@
 //
 // 参数:
 //   head_index: Buffer 链头索引(由 dedup_cache line 提供)
-//   upd:        dedup_update 消息, 携带该 iova 已解析的 PTE 与 dedup_pa_base
+//   upd:        dedup_update 消息, 携带该 iova 已解析的 PTE 与 dedup_pa_base;
+//               [MSI] pt_data.reserved.is_msi=1 时 dedup_pa_base 为 GPA 页基址,
+//               链上任务均为MSI, 改道MSIPT大模块(点4/点6)
 //
 // 流程(对应设计"任务2: 刷新 dedup buffer"):
 //   1. 从 head_index 沿 next_index 遍历链
-//   2. 为每个挂起任务计算 PA = pa_base | (iova & 0xFFF)
+//   2. 普通: PA = pa_base | (iova & 0xFFF) -> pt_cache_to_fwd_fifo
+//      MSI : GPA = gpa_base | (iova & 0xFFF) -> route_to_msipt
 //   3. 置 task->state = TASK_PTW_DONE
-//   4. 先 free_entry(释放 Buffer, 避免 FIFO 阻塞占用), 再转发到 pt_cache_to_fwd_fifo
+//   4. 先 free_entry(释放 Buffer, 避免 FIFO 阻塞占用), 再转发
 // ============================================================
 void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
                                      const iommu::CacheMessage& upd) {
@@ -39,7 +42,8 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
         return;
     }
 
-    const uint64_t pa_base = upd.dedup_pa_base & ~0xFFFULL;
+    const bool is_msi_flush = (upd.pt_data.reserved.is_msi != 0);
+    const uint64_t pa_base = upd.dedup_pa_base & ~0xFFFULL;  // MSI时为GPA页基址
     uint16_t cur = head_index;
     uint32_t flushed_count = 0;
 
@@ -55,9 +59,19 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
             pending_task->g_pte.raw = upd.pt_data.g_pte.raw;
             pending_task->page_sz = 0x1000ULL;  // 4KB(大页暂不实现)
             pending_task->state = TASK_PTW_DONE;
+            if (is_msi_flush) {
+                // [MSI] 同页任务均为MSI(点11保证), 置GPA后改道MSIPT模块
+                pending_task->gpa = pa_base | offset;
+                pending_task->is_msi = 1;
+                pending_task->walk_ctx.msi_index =
+                    msi_extract(pending_task->gpa >> 12,
+                                pending_task->DC.msi_addr_mask.mask &
+                                ((1ULL << (calculate_mgpaw(&iommu_inst) - 12)) - 1));
+            }
 
-            printf("[DEDUP_FLUSH_CB] task_id=%u -> PA=0x%lx (iova=0x%lx, page_base=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
-                   pending_task->task_id, pending_task->pa, pending_task->iova,
+            printf("[DEDUP_FLUSH_CB] task_id=%u -> %s=0x%lx (iova=0x%lx, page_base=0x%lx, offset=0x%lx) [buf_idx=%u]\n",
+                   pending_task->task_id, is_msi_flush ? "GPA(MSI)" : "PA",
+                   pending_task->pa, pending_task->iova,
                    pa_base, offset, cur);
             fflush(stdout);
         }
@@ -66,15 +80,19 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
         dedup_buf->free_entry(cur);
         flushed_count++;
 
-        // 转发到 forwarder(可能阻塞, 但 entry 已释放)
+        // 转发(可能阻塞, 但 entry 已释放): MSI改道MSIPT, 普通转发forwarder
         if (pending_task != nullptr) {
-            pt_cache_to_fwd_fifo.write(pending_task);
+            if (is_msi_flush) {
+                route_to_msipt(pending_task);
+            } else {
+                pt_cache_to_fwd_fifo.write(pending_task);
+            }
         }
 
         cur = next_idx;
     }
 
-    printf("[DEDUP_FLUSH_CB] head=%u -> chain flush completed (%u tasks flushed)\n",
-           head_index, flushed_count);
+    printf("[DEDUP_FLUSH_CB] head=%u -> chain flush completed (%u tasks flushed%s)\n",
+           head_index, flushed_count, is_msi_flush ? ", MSI routed" : "");
     fflush(stdout);
 }

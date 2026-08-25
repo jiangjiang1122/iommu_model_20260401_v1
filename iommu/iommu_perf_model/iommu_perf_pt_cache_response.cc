@@ -49,10 +49,28 @@ void iommu_top::collector_pt_response_thread() {
                         walker_front_mtx.unlock();
                     }
                     pt_hit_response_to_task(resp, task);
-                    printf("[PT_CACHE] task_id=%u -> HIT regular CL, routing to fwd_fifo (pa=0x%lx)\n",
-                           task->task_id, task->pa);
-                    fflush(stdout);
-                    pt_cache_to_fwd_fifo.write(task);
+
+                    // [MSI] 点8: HIT条目is_msi=1 -> 保存的是iova->gpa映射,
+                    // 恢复GPA后派发MSIPT大模块执行; is_msi=0 -> 直接forward(写保序)
+                    if (resp.pt_data.reserved.is_msi) {
+                        task->gpa = (resp.pt_data.vs_pte.PPN << 12) |
+                                    (task->iova & 0xFFFULL);
+                        task->is_msi = 1;
+                        task->walk_ctx.msi_index =
+                            msi_extract(task->gpa >> 12,
+                                        task->DC.msi_addr_mask.mask &
+                                        ((1ULL << (calculate_mgpaw(&iommu_inst) - 12)) - 1));
+                        printf("[PT_CACHE] task_id=%u -> HIT is_msi=1 (gpa=0x%lx, msi_index=%llu), dispatch to MSIPT module\n",
+                               task->task_id, task->gpa,
+                               (unsigned long long)task->walk_ctx.msi_index);
+                        fflush(stdout);
+                        route_to_msipt(task);
+                    } else {
+                        printf("[PT_CACHE] task_id=%u -> HIT regular CL, routing to fwd_fifo (pa=0x%lx)\n",
+                               task->task_id, task->pa);
+                        fflush(stdout);
+                        pt_cache_to_fwd_fifo.write(task);
+                    }
                 } else {
                     // dedup 占位CL HIT: 任务已在 execute_dedup_request 中挂接到 dedup Buffer
                     // 不发PTW, 等待 dedup_update 刷新 Buffer 时转发

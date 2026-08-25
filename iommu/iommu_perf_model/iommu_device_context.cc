@@ -406,13 +406,14 @@ do_device_context_configuration_checks(
         return 1;
     }
 
-    // When `DC.iohgatp.MODE` is `Bare`, `DC.msiptp.MODE` must be set to `Off` by
-    // software. All other settings are reserved. Implementations are recommended
-    // to stop and report "DDT entry misconfigured" (cause = 259) if a reserved
-    // setting is detected.
-    if ( (DC->iohgatp.MODE == IOHGATP_Bare) && (DC->msiptp.MODE != MSIPTP_Off) ) {
-        return 1;
-    }
+    // [MSI] 性能模型设计放宽: 允许 iohgatp.MODE=Bare(一级地址翻译)时配置
+    // msiptp.MODE != Off —— 一级翻译场景下MSI请求在获取DC/PC后直接分流到
+    // 独立的MSIPT模块处理(见 configure_and_route 分流决策)。
+    // 原始规范建议: When `DC.iohgatp.MODE` is `Bare`, `DC.msiptp.MODE` must be
+    // set to `Off`, otherwise "DDT entry misconfigured" (cause = 259)。
+    // if ( (DC->iohgatp.MODE == IOHGATP_Bare) && (DC->msiptp.MODE != MSIPTP_Off) ) {
+    //     return 1;
+    // }
 
     return 0;
 }

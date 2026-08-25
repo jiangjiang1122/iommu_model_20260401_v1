@@ -53,11 +53,13 @@ void iommu_top::pt_forwarder_thread() {
 }
 
 // ============================================================
-// 12.19b msipt_forwarder_thread - MSIPT Cache Translation Forwarding
-// Reads from msipt_cache_to_fwd_fifo, routes based on MSI/MRIF:
-//   - is_msi=1 && is_mrif=0 -> axi_stream_socket (IMSIC)
-//   - otherwise -> axi_master_1_to_cmn_rnd_socket (DDR/normal DMA)
-// Corresponds to iommu_translate.cc L494-613 (step 20)
+// 12.19b msipt_forwarder_thread - MSIPT Mode Dispatch + 出口执行 (PIPE7, 点10)
+// Reads from msipt_cache_to_fwd_fifo, 根据MSI PTE解码结果选择输出:
+//   Flat/IMSIC Access: translated_addr = (PTE.PPN<<12)|A[11:0] 已在MSIPTW算好,
+//                      从 AXI Master0 出口输出, 与普通地址翻译出口一致(写保序);
+//   MRIF Access      : pending word原子OR写(AMO_MRIF)从 AXI Master2(DDR端口)
+//                      输出, 写DDR即完成; 独立仲裁源DDR_SRC_MSI_MRIF,
+//                      响应静默丢弃, 与ctrl/PTW/MSIPTW配对机制隔离。
 // ============================================================
 void iommu_top::msipt_forwarder_thread() {
     while (true) {
@@ -68,14 +70,12 @@ void iommu_top::msipt_forwarder_thread() {
 
         iommu_task_t* task = msipt_cache_to_fwd_fifo.read();
 
-        printf("[MSIPT_FORWARDER] task_id=%u, iova=0x%lx, pa=0x%lx, is_msi=%d, is_mrif=%d -> routing\n",
-               task->task_id, task->iova, task->pa, task->is_msi, task->is_mrif);
+        printf("[MSIPT_FORWARDER] task_id=%u, iova=0x%lx, gpa=0x%lx, pa=0x%lx, is_msi=%d, is_mrif=%d -> dispatch\n",
+               task->task_id, task->iova, task->gpa, task->pa, task->is_msi, task->is_mrif);
         fflush(stdout);
 
-        // [PERF] msipt_forwarder 无需串行延时
         task->state = TASK_FORWARD;
 
-        // ========== Step 20: Response Generation ==========
         tlm::tlm_generic_payload* trans = task->tlm_trans_ptr;
         if (!trans) {
             // No TLM payload (should not happen in normal flow)
@@ -86,30 +86,51 @@ void iommu_top::msipt_forwarder_thread() {
 
         trans->set_response_status(tlm::TLM_OK_RESPONSE);
 
-        // Set translated PA into payload
-        trans->set_address(task->pa);
-
-        // MSIPT cache path: route based on MSI/MRIF flags
-        if (task->is_msi == 1 && task->is_mrif == 0) {
-            // MSI forwarding to IMSIC via axi_stream_socket
-            printf("[MSIPT_FORWARDER] task_id=%u -> MSI to IMSIC (axi_stream)\n", task->task_id);
+        if (task->is_mrif == 0) {
+            // ===== Flat/IMSIC Access: AXI Master0 出口, 与普通翻译出口一致 =====
+            // 写地址=translated_addr, 写数据=原始MSI写数据, 发往目标IMSIC
+            trans->set_address(task->pa);
+            msipt_flat_count++;
+            printf("[MSIPT_FORWARDER] task_id=%u -> FLAT/IMSIC MSI write, pa=0x%lx (master_0 exit)\n",
+                   task->task_id, task->pa);
             fflush(stdout);
-            tlm::tlm_phase phase = tlm::BEGIN_REQ;
-            sc_time delay = SC_ZERO_TIME;
-            axi_stream_socket->nb_transport_fw(*trans, phase, delay);
         } else {
-            // Normal DMA or MRIF: output via axi_master_1_to_cmn_rnd_socket (logical routing)
-            printf("[MSIPT_FORWARDER] task_id=%u -> normal DMA/MRIF (axi_master_1)\n", task->task_id);
+            // ===== MRIF Access: AXI Master2(DDR端口)写, 写DDR即完成 =====
+            // 1. 从原始MSI写数据提取 interrupt identity
+            uint32_t iid = 0;
+            if (trans->get_data_ptr() != nullptr && trans->get_data_length() >= 4) {
+                memcpy(&iid, trans->get_data_ptr(), 4);
+            }
+
+            // 2. MRIF pending word 地址与bit mask:
+            //    pending_addr = dest_mrif_addr + (iid/32)*4, bit = 1<<(iid%32)
+            uint64_t pending_addr = task->dest_mrif_addr + (uint64_t)(iid / 32) * 4;
+            uint32_t pending_bit  = 1u << (iid % 32);
+
+            // 3. 经DDR仲裁独立源发起4B写(建模AMO_MRIF原子OR), 响应静默丢弃;
+            //    仲裁器内的master_1带宽延时建模自动生效, 此处只记账不重复建模
+            ddr_req_entry_t mrif_req;
+            mrif_req.task_id = task->task_id;
+            mrif_req.addr = pending_addr;
+            mrif_req.size = 4;
+            mrif_req.is_write = true;
+            memcpy(mrif_req.write_data, &pending_bit, 4);
+            mrif_req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;
+            msi_mrif_req_ddr_fifo.write(mrif_req);
+            master_1_total_bytes += 4;  // [STAT]
+            msi_atomic_or_count++;
+            msipt_mrif_count++;
+            printf("[MSIPT_FORWARDER] task_id=%u -> MRIF Access: pending_addr=0x%lx, bit=0x%x (iid=%u), master_2 exit\n",
+                   task->task_id, pending_addr, pending_bit, iid);
             fflush(stdout);
-            // In the performance model, we directly send response to initiator
-            // The actual data path would go through axi_master_1_to_cmn_rnd_socket to DDR/CMN
+
+            // 原始请求的响应地址置为notice地址(NPPN<<12, 即task->pa)
+            trans->set_address(task->pa);
         }
 
-        // Send response to initiator
-        // 入口已注册 reorder_buf：此处仅标记 ready，由 reorder_output_thread 真正下发
-        task->state = TASK_FORWARD;
+        // 回响应给发起方: 经统一出口(写保序), 与正常翻译一致;
+        // task 释放与 outstanding 释放交由 reorder_output_thread
         reorder_mark_ready(task);
-        // 注意：task 释放与 outstanding 释放交由 reorder_output_thread
     }
 }
 

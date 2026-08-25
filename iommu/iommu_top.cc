@@ -320,6 +320,12 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
                 memcpy(ctrl_path_rsp_buf, rsp.data, rsp.data_length);
                 ctrl_path_rsp_event.notify(SC_ZERO_TIME);
                 break;
+            case DDR_SRC_MSI_MRIF:
+                // [MSI] MRIF写响应: 写DDR即完成, 响应静默丢弃(不进入任何等待方)
+                printf("[DDR_RSP] MSI_MRIF write response silently consumed (task_id=%u)\n",
+                       rsp.task_id);
+                fflush(stdout);
+                break;
         }
 
         // Free TLM payload allocated by arbiter
@@ -358,11 +364,13 @@ void iommu_top::ddr_arbiter_thread() {
         if (ctrl_path_req_ddr_fifo.num_available() == 0 &&
             xdtw_req_ddr_fifo.num_available() == 0 &&
             ptw_req_ddr_fifo.num_available() == 0 &&
-            msiptw_req_ddr_fifo.num_available() == 0) {
+            msiptw_req_ddr_fifo.num_available() == 0 &&
+            msi_mrif_req_ddr_fifo.num_available() == 0) {
             wait(ctrl_path_req_ddr_fifo.data_written_event() |
                  xdtw_req_ddr_fifo.data_written_event() |
                  ptw_req_ddr_fifo.data_written_event() |
-                 msiptw_req_ddr_fifo.data_written_event());
+                 msiptw_req_ddr_fifo.data_written_event() |
+                 msi_mrif_req_ddr_fifo.data_written_event());
         }
 
         // Process all available requests
@@ -397,16 +405,18 @@ void iommu_top::ddr_arbiter_thread() {
                 source_module = DDR_SRC_CTRL_PATH;
                 found = true;
             } else {
-                // Round-robin arbitration: xDTW(0), PTW(1), MSIPTW(2)
-                sc_fifo<ddr_req_entry_t>* fifos[3] = {
-                    &xdtw_req_ddr_fifo, &ptw_req_ddr_fifo, &msiptw_req_ddr_fifo
+                // Round-robin arbitration: xDTW(0), PTW(1), MSIPTW(2), MSI_MRIF(3)
+                sc_fifo<ddr_req_entry_t>* fifos[4] = {
+                    &xdtw_req_ddr_fifo, &ptw_req_ddr_fifo, &msiptw_req_ddr_fifo,
+                    &msi_mrif_req_ddr_fifo
                 };
-                for (int k = 0; k < 3; k++) {
-                    uint8_t idx = (rr_index + k) % 3;
+                for (int k = 0; k < 4; k++) {
+                    uint8_t idx = (rr_index + k) % 4;
                     if (fifos[idx]->num_available() > 0) {
                         req = fifos[idx]->read();
-                        source_module = idx;  // 0=XDTW, 1=PTW, 2=MSIPTW
-                        rr_index = (idx + 1) % 3;
+                        // 0=XDTW, 1=PTW, 2=MSIPTW, 3数组位->DDR_SRC_MSI_MRIF(4)
+                        source_module = (idx == 3) ? DDR_SRC_MSI_MRIF : idx;
+                        rr_index = (idx + 1) % 4;
                         found = true;
                         break;
                     }
@@ -418,7 +428,8 @@ void iommu_top::ddr_arbiter_thread() {
 
             const char* src_name = (source_module == DDR_SRC_XDTW) ? "XDTW" :
                                    (source_module == DDR_SRC_PTW) ? "PTW" :
-                                   (source_module == DDR_SRC_MSIPTW) ? "MSIPTW" : "CTRL";
+                                   (source_module == DDR_SRC_MSIPTW) ? "MSIPTW" :
+                                   (source_module == DDR_SRC_MSI_MRIF) ? "MSI_MRIF" : "CTRL";
             printf("[DDR_ARBITER] Route %s request: task_id=%u, addr=0x%lx, size=%d, is_write=%d -> DDR\n",
                    src_name, req.task_id, req.addr, req.size, req.is_write);
             fflush(stdout);
@@ -517,16 +528,38 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     task->check_access_perms =
         (task->TTYP != PCIE_ATS_TRANSLATION_REQUEST) ? 1 : 0;
 
-    // Check for MSI address
+    // ===================== [MSI] 分流决策 (获取DC/PC后, 点2) =====================
+    // MSI请求与普通数据翻译请求在此分流, MSI通路与PT Cache/Walker Cache/PTW完全独立:
+    // - S1=Bare(输入地址即GPA, 只开启一级翻译): 直接用当前地址做MSI识别,
+    //   命中 -> 分流到独立的MSIPT大模块(内部先查MSIPT Cache,
+    //          MISS由MSI PTW自行DDR walk, 与原始PTW无关);
+    // - S1非Bare(单级/两级): 无法在此判断(需S1得到GPA后才能判断),
+    //   task->DC已携带 msiptp.MODE/msi_addr_mask/msi_addr_pattern,
+    //   按原始流程走PT Cache/Walker/dedup/PTW, 由PTW在S1完成后识别(点4)。
     if (task->DC.msiptp.MODE != MSIPTP_Off) {
-        // MSI check happens after PTW, route to PT cache first
+        if (task->iosatp.MODE == IOSATP_Bare) {
+            if (msi_id_check(task, task->iova)) {
+                printf("[CONFIGURE] task_id=%u -> MSI hit at DC/PC (S1=Bare, addr=GPA), divert to MSIPT module\n",
+                       task->task_id);
+                fflush(stdout);
+                route_to_msipt(task);
+                return;
+            }
+        }
+        printf("[CONFIGURE] task_id=%u -> MSI-capable device (msiptp.MODE=%d, iosatp.MODE=%d)%s\n",
+               task->task_id, task->DC.msiptp.MODE, task->iosatp.MODE,
+               (task->iosatp.MODE == IOSATP_Bare) ? ", normal flow" :
+               ", identify after S1 in PTW");
+        fflush(stdout);
     }
 
     task->state = TASK_ROUTE_DECISION;
     
     // [NEW] Phase 1: 启用预取功能 (使用配置参数PT_DEDUP_PREFETCH_DEPTH)
     // D=0表示关闭预取，D>0表示启用预取
-    if (!task->walk_ctx.prefetch_enabled && PT_DEDUP_PREFETCH_DEPTH > 0) {
+    // [MSI] MSI使能设备禁用预取: MSI命中后跳过S2与PT回填, 预取组/dedup链无法正确flush
+    if (!task->walk_ctx.prefetch_enabled && PT_DEDUP_PREFETCH_DEPTH > 0 &&
+        task->DC.msiptp.MODE == MSIPTP_Off) {
         task->walk_ctx.prefetch_enabled = true;
         task->walk_ctx.prefetch_depth = PT_DEDUP_PREFETCH_DEPTH;
         printf("[CONFIGURE] task_id=%u -> Prefetch enabled (D=%u)\n",
@@ -545,7 +578,11 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     // [前置] Walker Cache前置查询: 与PT Cache查询同时发起, 结果由
     // walker_front_response_thread写回task->walk_ctx.walker_front_*字段,
     // 随任务透传经去重模块直到PTW直接使用
-    if (PTW_WALKER_CACHE_ENABLED && WALKER_FRONT_ENABLED) {
+    // [MSI] MSI使能设备不发起前置查询: 端到端leaf命中无GPA中间值,
+    // 无法做MSI识别; 此类设备走同步walker查询+完整walk路径
+    if (PTW_WALKER_CACHE_ENABLED && WALKER_FRONT_ENABLED &&
+        task->DC.msiptp.MODE == MSIPTP_Off) {
+        task->walk_ctx.walker_front_requested = true;
         walker_front_mtx.lock();
         walker_front_pending[task->task_id] = task;
         walker_front_mtx.unlock();
@@ -742,6 +779,20 @@ void iommu_top::print_cache_statistics() {
         printf("  PTW Tasks Saved:   %.1f%% reduction\n",
                100.0 * va_dedup_hit_count / (va_dedup_miss_count + va_dedup_hit_count));
     }
+    printf("==========================================\n\n");
+
+    // [MSI] MSI Path Statistics
+    printf("========== MSI Path Statistics ==========\n");
+    printf("  MSIPT Cache Hit:   %lu\n", (unsigned long)g_msipt_cache_hit_count);
+    printf("  MSIPT Cache Miss:  %lu (MSIPTW DDR walk)\n", (unsigned long)g_msipt_cache_miss_count);
+    if (g_msipt_cache_hit_count + g_msipt_cache_miss_count > 0) {
+        printf("  MSIPT Hit Rate:    %.1f%%\n",
+               100.0 * g_msipt_cache_hit_count / (g_msipt_cache_hit_count + g_msipt_cache_miss_count));
+    }
+    printf("  Flat MSI done:     %lu\n", (unsigned long)msipt_flat_count);
+    printf("  MRIF MSI done:     %lu\n", (unsigned long)msipt_mrif_count);
+    printf("  MRIF atomic OR:    %lu\n", (unsigned long)msi_atomic_or_count);
+    printf("  notice MSI sent:   %lu\n", (unsigned long)msi_notice_count);
     printf("==========================================\n\n");
 
     // Walker Cache Update Statistics

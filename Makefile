@@ -2,6 +2,7 @@
 #
 # Test scenario selection:
 #   make TEST=rand4k_singlestage      (default) 4KB随机读 + 仅一级地址翻译, 4000 requests, 16MB范围
+#   make TEST=msi_perf                MSI地址翻译(Flat+MRIF+故障+MSIPT Cache命中) 功能验证
 #   make TEST=seq128k_singlestage     128KB顺序读 + 仅一级地址翻译, 2000 requests, 1MB范围
 #   make TEST=sv48_bare               Sv48 + Bare, 1000 requests
 #   make TEST=seq128k_twostage        128KB顺序读 + Sv48/Sv48x4两阶段地址翻译, 5000 requests
@@ -184,6 +185,13 @@ else ifeq ($(TEST), virt_strict_twostage)
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=4 \
                  -DTEST_CFG_NUM_PAGES=1250 \
                  -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
+else ifeq ($(TEST), msi_perf)
+    # 场景13: MSI地址翻译性能模型功能验证 (方案修订v2)
+    #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)
+    #   / 场景C(单级S1-only)。请求数 make TEST=msi_perf MSI_N=1/10/100/1000 递增验证。
+    MSI_N ?= 10
+    TEST_THREAD_SRC = rp/test_rp_msi_perf_thread.cc
+    TEST_FLAGS = -DTEST_CFG_MSI_REQS=$(MSI_N)
 else
     # rand4k_singlestage (default)
     TEST_THREAD_SRC = rp/test_rp_rand4k_single_stage_thread.cc

@@ -142,15 +142,30 @@ static inline uint64_t get_gstage_bare_page_size(iommu_t* iommu) {
     return iommu->sv39x4_bare_pg_sz ? iommu->sv39x4_bare_pg_sz : PAGESIZE;
 }
 
+// ===================== MGPAW Calculation for MSI =====================
+// 与功能模型 iommu_msi_trans.cc L57-62 对齐: 按 capabilities 推导 MGPAW
+static inline uint64_t calculate_mgpaw(iommu_t* iommu) {
+    uint64_t pas = iommu->reg_file.capabilities.pas;
+    uint64_t mgpaw = (iommu->reg_file.capabilities.Sv57x4 ? 59 :
+                      iommu->reg_file.capabilities.Sv48x4 ? 50 :
+                      iommu->reg_file.capabilities.Sv39x4 ? 41 :
+                      iommu->reg_file.capabilities.Sv32x4 ? 34 :
+                      (pas > 12 ? pas : 12));
+    return mgpaw;
+}
+
 // ===================== MSI Address Check =====================
 // Check if a GPA is an MSI address for the given device context
+// 与功能模型 iommu_msi_trans.cc step3 对齐: 需叠加 MGPAW 位宽掩码
 static inline uint8_t check_is_msi_address(uint64_t gpa, device_context_t* DC, iommu_t* iommu) {
     if (DC->msiptp.MODE == MSIPTP_Off) return 0;
     // An incoming write to GPA is recognized as MSI if:
-    // (A >> 12) & ~msi_addr_mask = (msi_addr_pattern & ~msi_addr_mask)
+    // (A >> 12) & ~msi_addr_mask & mgpaw_mask = (msi_addr_pattern & ~msi_addr_mask & mgpaw_mask)
+    uint64_t mgpaw_bits = calculate_mgpaw(iommu) - 12;
+    uint64_t mgpaw_mask = (mgpaw_bits < 64) ? ((1ULL << mgpaw_bits) - 1) : ~0ULL;
     uint64_t a_shifted = gpa >> 12;
-    uint64_t mask = DC->msi_addr_mask.mask;
-    uint64_t pattern = DC->msi_addr_pattern.pattern;
+    uint64_t mask = DC->msi_addr_mask.mask & mgpaw_mask;
+    uint64_t pattern = DC->msi_addr_pattern.pattern & mgpaw_mask;
     return ((a_shifted & ~mask) == (pattern & ~mask)) ? 1 : 0;
 }
 
@@ -169,12 +184,6 @@ static inline void set_guest_fault_cause(iommu_task_t* task, uint8_t base_fault)
 // These are declared extern in the functional model headers
 extern uint8_t do_device_context_configuration_checks(iommu_t *iommu, device_context_t *DC);
 extern uint8_t do_process_context_configuration_checks(iommu_t *iommu, device_context_t *DC, process_context_t *PC);
-
-// ===================== MGPAW Calculation for MSI =====================
-static inline uint64_t calculate_mgpaw(iommu_t* iommu) {
-    // MGPAW = capabilities.pas (physical address size in bits)
-    return iommu->reg_file.capabilities.pas;
-}
 
 // ===================== MSI Extract Function =====================
 // Extract bits from a value using a mask pattern

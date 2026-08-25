@@ -221,6 +221,13 @@ struct walk_context_t {
     uint32_t ddr_log_size[8] = {0};       // DDR访问大小(字节)
     uint8_t  ddr_log_count = 0;           // 当前日志条目数
 
+    // [MSI] MSI地址识别结果 (msi_id_check命中时填充, 供MSIPTW/MSIPT Cache使用)
+    uint64_t msi_index = 0;             // interrupt file number I = extract(A>>12, mask)
+
+    // [MSI] Walker前置查询发起标志: configure_and_route发起前置查询时置true;
+    // MSI使能设备不发起前置查询, PTW据此走同步查询分支(避免死等前置结果)
+    bool     walker_front_requested = false;
+
     walk_context_t() = default;
 };
 
@@ -408,6 +415,7 @@ inline std::ostream& operator<<(std::ostream& os, const ctrl_path_ddr_req_t& e) 
 #define DDR_SRC_PTW        1
 #define DDR_SRC_MSIPTW     2
 #define DDR_SRC_CTRL_PATH  3
+#define DDR_SRC_MSI_MRIF   4  // [MSI] MRIF pending word写(响应静默丢弃)
 
 // ===================== Processing Delay Params =====================
 static const int XDTW_COMPUTE_DELAY  = 1;  // ns

@@ -177,7 +177,8 @@ struct InvalidationCmd {
 
 struct MSIPTData {
     bool        valid       = false;
-    uint64_t    pte         = 0;    // MSI page table entry
+    uint64_t    pte         = 0;    // MSI PTE 低64bit (V/M/PPN或MRIF地址低位)
+    uint64_t    pte_hi      = 0;    // MSI PTE 高64bit (MRIF模式: NPPN/NID等)
     spa_t       spa         = 0;
     bool        mrif_mode   = false;
 };
@@ -234,7 +235,10 @@ union pt_reserved_t {
         uint32_t replacement_info:2;
         // [重构] 去重+预取占位字段(is_ph/head_index/is_req)已迁移至独立的
         // dedup_cache(DedupCacheLine)。PT Cache现为纯常规缓存。
-        uint32_t reserved:20;
+        // [MSI] is_msi=1表示本条保存的是iova->gpa映射(无S2结果),
+        // HIT时需派发MSIPT大模块而非直接forward
+        uint32_t is_msi:1;
+        uint32_t reserved:19;
     };
     uint32_t raw = 0;
 };
@@ -338,6 +342,8 @@ inline bool pt_valid(const PTData& data) { return data.reserved.valid != 0; }
 inline bool pt_iova_is_va(const PTData& data) { return data.reserved.iova_is_va != 0; }
 inline bool pt_sv48_mode(const PTData& data) { return data.reserved.sv48 != 0; }
 inline bool pt_gstage_x4_mode(const PTData& data) { return data.reserved.gstage_x4 != 0; }
+// [MSI] PT Cache条目MSI标记: 1=保存iova->gpa映射, 需派发MSIPT模块
+inline bool pt_is_msi(const PTData& data) { return data.reserved.is_msi != 0; }
 inline bool pt_from_prefetch(const PTData&) { return false; }
 
 inline DCData make_dc_data(gscid_t gscid, bool en_ats = false,
@@ -387,7 +393,8 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
                            bool iova_is_va = true,
                            bool sv48 = true,
                            bool gstage_x4 = false,
-                           bool ad_bit_set = true) {  // [AD] A/D位是否已设置
+                           bool ad_bit_set = true,  // [AD] A/D位是否已设置
+                           bool is_msi = false) {   // [MSI] MSI条目(iova->gpa)标记
     PTData data;
     data.reserved.valid = 1;
     data.reserved.trans_type = static_cast<uint32_t>(stage);
@@ -396,6 +403,7 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
     data.reserved.iova_is_va = iova_is_va ? 1U : 0U;
     data.reserved.sv48 = sv48 ? 1U : 0U;
     data.reserved.gstage_x4 = gstage_x4 ? 1U : 0U;
+    data.reserved.is_msi = is_msi ? 1U : 0U;
 
     data.vs_pte.V = 1;
     data.vs_pte.R = (permissions & 0x1U) ? 1U : 0U;
@@ -433,6 +441,7 @@ inline PTData make_pt_data(spa_t spa, PageSize page_size,
 //   bit5: is_s2 标志（S2 Cache，G-stage显式第二阶段缓存）
 //   bit6: is_leaf 标志（[大页] 端到端大页leaf PTE: next_ppn=最终物理页帧PPN，
 //         区别于中间级next_ppn; 2MB存C3/1GB存C2/512GB存C1）
+//   bit7: is_msi 标志（[MSI] 该条目来自MSI任务S1完成, 仅含VS侧中间结果）
 union walker_reserved_t {
     struct {
         uint8_t valid:1;
@@ -442,7 +451,7 @@ union walker_reserved_t {
         uint8_t x4_mode_flag:1;
         uint8_t is_s2:1;       // [S2] S2 Cache标志
         uint8_t is_leaf:1;     // [大页] 端到端leaf PTE标志
-        uint8_t reserved:1;
+        uint8_t is_msi:1;      // [MSI] MSI任务条目标志
     };
     uint8_t raw = 0;
 };
@@ -459,6 +468,7 @@ inline bool walker_sv48_flag(const WalkerData& data) { return data.reserved.sv48
 inline bool walker_x4_mode_flag(const WalkerData& data) { return data.reserved.x4_mode_flag != 0; }
 inline bool walker_is_s2(const WalkerData& data) { return data.reserved.is_s2 != 0; }
 inline bool walker_is_leaf(const WalkerData& data) { return data.reserved.is_leaf != 0; }
+inline bool walker_is_msi(const WalkerData& data) { return data.reserved.is_msi != 0; }
 
 inline void walker_set_valid(WalkerData& data, bool valid) {
     data.reserved.valid = valid ? 1U : 0U;
@@ -471,7 +481,8 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
                                    bool is_sv48 = true,
                                    bool is_x4_mode = false,
                                    bool is_s2 = false,
-                                   bool is_leaf = false) {
+                                   bool is_leaf = false,
+                                   bool is_msi = false) {
     WalkerData data;
     data.next_ppn = next_ppn;
     data.reserved.valid = valid ? 1U : 0U;
@@ -481,6 +492,7 @@ inline WalkerData make_walker_data(ppn_t next_ppn,
     data.reserved.x4_mode_flag = is_x4_mode ? 1U : 0U;
     data.reserved.is_s2 = is_s2 ? 1U : 0U;
     data.reserved.is_leaf = is_leaf ? 1U : 0U;
+    data.reserved.is_msi = is_msi ? 1U : 0U;
     return data;
 }
 
