@@ -185,8 +185,24 @@ else ifeq ($(TEST), virt_strict_twostage)
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=4 \
                  -DTEST_CFG_NUM_PAGES=1250 \
                  -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
+else ifeq ($(TEST), rand4k_msi_mix_s2on_128g)
+    # 场景13(混合性能): 4KB随机读写 + MSI 混合负载, 两阶段 + S2开启
+    #   128GB/s入口/出口 + 全局并发512 + Buffer512 + PT/Dedup双多RAM(4组)
+    #   + PTW并发27(可 make SCENE13_PTW=N 覆盖) + D=3预取 + 10000包(8888 IO + 1112 MSI)
+    #   激励: 每组 = 1个4KB随机读写任务(8x512B连续) + 1个MSI任务(4B写, vector随机);
+    #   MSI IOVA随机不连续且与16MB普通IOVA范围完全不重合, MSI窗口GPA与普通GPA不重合。
+    SCENE13_PTW ?= 27
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+                 -DTEST_CFG_NUM_PAGES=1111
 else ifeq ($(TEST), msi_perf)
-    # 场景13: MSI地址翻译性能模型功能验证 (方案修订v2)
+    # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)
     #   / 场景C(单级S1-only)。请求数 make TEST=msi_perf MSI_N=1/10/100/1000 递增验证。
     MSI_N ?= 10
