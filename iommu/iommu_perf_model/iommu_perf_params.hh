@@ -14,27 +14,27 @@ static const uint32_t FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY = 4;
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_DC_CACHE_UPDATE = 4;
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PC_CACHE_UPDATE = 4;
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_PT_CACHE_QUERY = 4;
-static const uint32_t FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY = 4;
+static const uint32_t FIFO_DEPTH_COLLECTOR_TO_MSIPT_CACHE_QUERY = 1024;  // [防死锁] flush回调/PTW完成在释放路径写入, 需容纳全部在途任务
 
 // Collector到Walker
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_XDTW = 4;
 
 // Cache到Walker
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 256;
-static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 4;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_PTW = 1024;   // [防死锁] 旁路+MISS积压可超256, 需容纳全部在途任务
+static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_MSIPTW = 1024;   // [防死锁] 同上
 
 // Walker返回Collector/Cache
 static const uint32_t FIFO_DEPTH_XDTW_TO_COLLECTOR = 4;
 static const uint32_t FIFO_DEPTH_PTW_TO_PT_CACHE = 32;
-static const uint32_t FIFO_DEPTH_MSIPTW_TO_MSIPT_CACHE = 4;
+static const uint32_t FIFO_DEPTH_MSIPTW_TO_MSIPT_CACHE = 1024;   // [防死锁] 同上
 
 // Cache返回Collector
 static const uint32_t FIFO_DEPTH_DC_CACHE_TO_COLLECTOR = 4;
 static const uint32_t FIFO_DEPTH_PC_CACHE_TO_COLLECTOR = 4;
 
 // 最终输出路径
-static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 32;
-static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_FWD = 4;
+static const uint32_t FIFO_DEPTH_PT_CACHE_TO_FWD = 1024;    // [防死锁] dedup flush回调整链写入, 需容纳全部在途任务
+static const uint32_t FIFO_DEPTH_MSIPT_CACHE_TO_FWD = 1024;     // [防死锁] 同上
 static const uint32_t FIFO_DEPTH_COLLECTOR_TO_FAULT = 4;
 
 // DDR FIFO深度
@@ -159,10 +159,13 @@ static const bool PT_CACHE_VA_DEDUP_ENABLED = false;         // VA去重功能�
 
 // ===================== PT Cache去重+预取模块参数 =====================
 static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开关
-// Buffer必须 >= IOMMU_GLOBAL_MAX_OUTSTANDING: 否则挂起任务可致Buffer满,
-// RAM Worker阻塞 -> RAM FIFO满 -> Hash/Scheduler阻塞 -> UPDATE无法分发 -> 死锁环
-// [场景化] 跟随全局并发上限: 场景5=256, 场景6=512
-#ifndef TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING
+// Buffer默认跟随全局并发上限: 场景5=256, 场景6=512。
+// 允许经 Makefile -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=N 覆盖(如场景13调参为266):
+// Buffer < 全局outstanding时, execute_dedup_request在Buffer满时旁路直转PTW(不阻塞),
+// 避免 RAM Worker阻塞->RAM FIFO满->Hash/Scheduler阻塞->UPDATE无法分发 的死锁环。
+#if defined(TEST_CFG_PT_DEDUP_BUFFER_SIZE)
+static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_PT_DEDUP_BUFFER_SIZE;
+#elif !defined(TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING)
 static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
 #else
 static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
