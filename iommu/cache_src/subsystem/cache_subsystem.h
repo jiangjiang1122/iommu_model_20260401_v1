@@ -72,12 +72,13 @@ public:
 
 
     // invalidate 请求入口：外部模块把定点失效请求送到对应 cache。
-    // [MSI] 无 msi_invalidate_fifo: 当前性能模型不实现 MSI 处理路径,
-    //       因此不实现 MSIPT Cache 失效。
+    // [MSI] MSIPT Cache 失效由失效 pipeline 驱动: GLOBAL_INVAL 与
+    //       IODIR.INVAL_DDT 联动, msi_scheduler_thread 最高优先处理。
     sc_fifo<CacheMessage> dc_invalidate_fifo;
     sc_fifo<CacheMessage> pc_invalidate_fifo;
     sc_fifo<CacheMessage> pt_invalidate_fifo;
     sc_fifo<CacheMessage> walker_invalidate_fifo;
+    sc_fifo<CacheMessage> msi_invalidate_fifo;
 
     // 全局 invalidation pipeline：走失效控制器的专用请求/响应通道。
     sc_fifo<CacheMessage> invalidation_request_fifo;
@@ -174,6 +175,7 @@ private:
     sc_fifo<CacheMessage> pc_invalidate_response_fifo;
     sc_fifo<CacheMessage> pt_invalidate_response_fifo;
     sc_fifo<CacheMessage> walker_invalidate_response_fifo;
+    sc_fifo<CacheMessage> msi_invalidate_response_fifo;
 
     // [失效] DC/PC/MSI 合并为单一调度线程: 每轮先查 invalidate FIFO(最高优先),
     //   再处理 update/lookup; 单线程串行消除 lookup/invalidate 对同一阵列的竞态。
@@ -219,7 +221,8 @@ private:
     CacheMessage execute_dc_invalidate_request(const CacheMessage& req);
     CacheMessage execute_pc_invalidate_request(const CacheMessage& req);
     // [失效] execute_pt/walker_invalidate_request 已删除(由 dispatch_* 取代);
-    // [MSI] execute_msi_invalidate_request 已删除(不实现 MSI 失效)
+    // [MSI] MSIPT 失效: GLOBAL=全清, 其余=按 device_id 失效(由 msi_scheduler 执行)
+    CacheMessage execute_msi_invalidate_request(const CacheMessage& req);
     void record_task_completion(const std::string& cache_name,
                                 const sc_time& start_time,
                                 const sc_time& end_time);
@@ -336,6 +339,8 @@ private:
     double   dedup_ram_last_end_ns_    = 0.0;                 // 末任务结束(全RAM)
     // [STAT] 预取丢弃计数(inside_fifo满时nb_write失败, 保功能防死锁)
     uint64_t dedup_prefetch_dropped_ = 0;
+    // [STAT] Buffer满旁路计数: Buffer<全局outstanding时, Buffer满则任务旁路直转PTW(防死锁)
+    uint64_t dedup_buffer_full_bypass_count_ = 0;
 
     // ============================================================
     // [多RAM] PT Cache 多 RAM 方案状态与统计

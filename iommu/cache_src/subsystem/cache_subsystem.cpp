@@ -114,29 +114,31 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       walker_front_response_fifo(16),
       walker_join_fifo(64),
       walker_serial_fifo(64),
-      dedup_request_fifo(16),
-      dedup_update_fifo(16),
+      dedup_request_fifo(1024),
+      dedup_update_fifo(1024),
       dedup_inside_request_fifo(32),
       dedup_hash_in_fifo(1),
       dc_response_fifo(16),
       pc_response_fifo(16),
-      pt_hit_response_fifo(16),
-      pt_miss_response_fifo(16),
+      pt_hit_response_fifo(1024),
+      pt_miss_response_fifo(1024),
       walker_response_fifo(1),
-      msi_response_fifo(1),
+      msi_response_fifo(1024),
       dc_update_fifo(1),
       pc_update_fifo(1),
-      pt_update_fifo(16),
-      walker_update_fifo(1),
+      pt_update_fifo(1024),
+      walker_update_fifo(1024),
       msi_update_fifo(1),
       dc_invalidate_fifo(1),
       pc_invalidate_fifo(1),
       pt_invalidate_fifo(16),
       walker_invalidate_fifo(1),
+      msi_invalidate_fifo(1),
       dc_invalidate_response_fifo(1),
       pc_invalidate_response_fifo(1),
       pt_invalidate_response_fifo(16),
       walker_invalidate_response_fifo(1),
+      msi_invalidate_response_fifo(1),
       invalidation_request_fifo(1),
       invalidation_response_fifo(1)
 {
@@ -1277,6 +1279,8 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
     // 预取丢弃(inside_fifo满)
     printf("  [Prefetch]\n");
     printf("    Dropped (inside_fifo full): %lu\n", (unsigned long)dedup_prefetch_dropped_);
+    printf("  [Buffer Full Bypass]\n");
+    printf("    Bypass to PTW count:        %lu\n", (unsigned long)dedup_buffer_full_bypass_count_);
 
     // 并发吞吐
     if (window_ns > 0) {
@@ -1769,12 +1773,24 @@ void CacheSubsystem::dispatch_walker_invalidate(const CacheMessage& cmd) {
 }
 
 // ============================================================
-// [MSI] MSIPT Cache 调度线程 (update > lookup)
-// 当前性能模型不实现 MSI 处理路径, 故不含 invalidate 分支;
-// 保留 lookup/update 通道供后续实现 MSI 翻译时使用。
+// [MSI] MSIPT Cache 调度线程 (invalidate > update > lookup)
+// 失效由失效 pipeline 经 msi_invalidate_fifo 下发; 单线程串行处理,
+// 与 lookup/update 无阵列竞态, 失效响应经 msi_invalidate_response_fifo 返回。
 // ============================================================
 void CacheSubsystem::msi_scheduler_thread() {
     while (true) {
+        // 0. [失效] 最高优先: MSIPT 失效(GLOBAL全清 / 按device失效),
+        //    与 lookup/update 同线程串行, 消除阵列竞态并保证失效及时可见。
+        if (msi_invalidate_fifo.num_available() > 0) {
+            CacheMessage req = msi_invalidate_fifo.read();
+            const sc_time start = sc_time_stamp();
+            trace_task_event("begin", "msipt_cache", "invalidate", req, start);
+            CacheMessage resp = execute_msi_invalidate_request(req);
+            record_task_completion("msipt_cache", start, sc_time_stamp());
+            trace_task_event("end", "msipt_cache", "invalidate", req, start, &resp);
+            push_fifo(msi_invalidate_response_fifo, resp);
+            continue;
+        }
         if (msi_update_fifo.num_available() > 0) {
             CacheMessage req = msi_update_fifo.read();
             const sc_time start = sc_time_stamp();
@@ -1795,7 +1811,8 @@ void CacheSubsystem::msi_scheduler_thread() {
             continue;
         }
         wait(msi_update_fifo.data_written_event() |
-             msi_request_fifo.data_written_event());
+             msi_request_fifo.data_written_event() |
+             msi_invalidate_fifo.data_written_event());
     }
 }
 
@@ -1895,10 +1912,17 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 
             uint16_t new_idx = dedup_buffer_->allocate_entry();
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (main placeholder HIT), blocking...\n", (unsigned)req.task_id);
+                // [Buffer满旁路] Buffer < 全局outstanding时可能满: 不阻塞(防死锁环),
+                // 任务旁路直转PTW, PTW完成时不刷Buffer(链上已挂任务照常刷新)
+                dedup_buffer_full_bypass_count_++;
+                resp.hit = false;
+                resp.dedup_bypass = true;
+                resp.prefetch_enabled = false;
+                resp.prefetch_depth = 0;
+                printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (main placeholder HIT), bypass to PTW (bypass_count=%lu)\n",
+                       (unsigned)req.task_id, (unsigned long)dedup_buffer_full_bypass_count_);
                 fflush(stdout);
-                wait(dedup_buffer_->free_event);
-                new_idx = dedup_buffer_->allocate_entry();
+                return resp;
             }
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
                 auto& new_entry = dedup_buffer_->entries[new_idx];
@@ -1927,10 +1951,16 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             // -------- 分支2: 预取占位CL (is_req=0) 升级为主占位 --------
             uint16_t new_idx = dedup_buffer_->allocate_entry();
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (prefetch placeholder HIT), blocking...\n", (unsigned)req.task_id);
+                // [Buffer满旁路] 同主占位分支: 不阻塞, 旁路直转PTW(预取占位保持不变)
+                dedup_buffer_full_bypass_count_++;
+                resp.hit = false;
+                resp.dedup_bypass = true;
+                resp.prefetch_enabled = false;
+                resp.prefetch_depth = 0;
+                printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (prefetch placeholder HIT), bypass to PTW (bypass_count=%lu)\n",
+                       (unsigned)req.task_id, (unsigned long)dedup_buffer_full_bypass_count_);
                 fflush(stdout);
-                wait(dedup_buffer_->free_event);
-                new_idx = dedup_buffer_->allocate_entry();
+                return resp;
             }
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
                 auto& entry = dedup_buffer_->entries[new_idx];
@@ -1961,11 +1991,17 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         // ============ MISS ============
         uint16_t head_idx = dedup_buffer_->allocate_entry();
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
-            printf("[DEDUP_CACHE_BACKPRESSURE] task_id=%u -> Buffer full (%u/%u), blocking...\n",
-                   (unsigned)req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE);
+            // [Buffer满旁路] MISS不插占位/不发起预取, 直接转PTW(防死锁, 仅损失去重收益)
+            dedup_buffer_full_bypass_count_++;
+            resp.hit = false;
+            resp.dedup_bypass = true;
+            resp.prefetch_enabled = false;
+            resp.prefetch_depth = 0;
+            printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (%u/%u, MISS), bypass to PTW (bypass_count=%lu)\n",
+                   (unsigned)req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE,
+                   (unsigned long)dedup_buffer_full_bypass_count_);
             fflush(stdout);
-            wait(dedup_buffer_->free_event);
-            head_idx = dedup_buffer_->allocate_entry();
+            return resp;
         }
 
         if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
@@ -2227,15 +2263,32 @@ CacheMessage CacheSubsystem::execute_pc_invalidate_request(const CacheMessage& r
     return resp;
 }
 
+// [失效][MSI] MSIPT Cache 失效执行:
+//   GLOBAL  -> 全清(invalidate_global)
+//   其余    -> 按 device_id 失效(invalidate_by_device); 本模型 MSI 页表指针
+//             仅来自 DC(设备级), 故按设备失效即覆盖 spec 要求的关联失效范围。
+CacheMessage CacheSubsystem::execute_msi_invalidate_request(const CacheMessage& req) {
+    sc_time latency = SC_ZERO_TIME;
+    uint32_t affected = 0;
+    if (req.invalidate_mode == CacheInvalidateMode::GLOBAL) {
+        affected = msipt_cache_->invalidate_global(&latency);
+    } else {
+        affected = msipt_cache_->invalidate_by_device(req.device_id, &latency);
+    }
+    wait(latency);
+    CacheMessage resp;
+    resp.msg_type = CacheMsgType::CACHE_INVALIDATE_RESPONSE;
+    resp.task_id = req.task_id;
+    resp.cmd_type = req.cmd_type;
+    resp.affected_entries = affected;
+    resp.latency = latency;
+    return resp;
+}
+
 // [失效] execute_pt_invalidate_request / execute_walker_invalidate_request
 // 已删除(死代码): 由 dispatch_pt_invalidate / dispatch_walker_invalidate 取代,
 // 后者在 hash 线程内拆分子失效到各 RAM worker, 保证与 in-flight lookup/fill
 // 的同 RAM 原子性, 并支持 SCAN_RANGE 枚举与 LIB 批量扫表。
-//
-// [MSI] execute_msi_invalidate_request 已删除: 当前 IOMMU 性能模型不实现
-// MSI 处理路径(msi_request_fifo/msi_update_fifo 无外部写入点), 因此不实现
-// MSIPT Cache 失效。MSIPTCache 实例与 lookup_msi/fill_msi 接口保留,
-// 待后续实现 MSI 翻译时再接入失效通路。
 
 CacheMessage CacheSubsystem::drive_invalidate_and_wait(
     sc_fifo<CacheMessage>& request_fifo,
@@ -2274,6 +2327,14 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
         accumulate(drive_invalidate_and_wait(walker_invalidate_fifo,
                                              walker_invalidate_response_fifo, r));
     };
+    // [失效][MSI] 向 MSIPT Cache 下发失效(由 msi_scheduler_thread 最高优先执行)
+    auto drive_msi = [&](const CacheMessage& base, CacheInvalidateMode mode) {
+        CacheMessage r = base;
+        r.msg_type = CacheMsgType::MSI_INVALIDATE;
+        r.invalidate_mode = mode;
+        accumulate(drive_invalidate_and_wait(msi_invalidate_fifo,
+                                             msi_invalidate_response_fifo, r));
+    };
     // [失效] LAZY 记录: 向共享 LIB 记录一次(递增全局VN); 未回绕则真正延迟(不下发),
     //   回绕则向 PT+Walker 下发批量扫表; LIB满降级为立即 SCAN。
     //   lazy_enabled_=false 时直接立即 SCAN。
@@ -2298,7 +2359,6 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
     };
 
     // GLOBAL_INVAL: 所有 cache 全清 + 清 LIB/VN
-    // [MSI] 不含 MSIPT: 当前性能模型不实现 MSI 处理路径
     if (msg.cmd_type == InvalidCmdType::GLOBAL_INVAL) {
         lib_.clear();
         CacheMessage req = msg;
@@ -2312,12 +2372,17 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
                                              pc_invalidate_response_fifo, req));
         drive_pt(msg, CacheInvalidateMode::GLOBAL, false);
         drive_walker(msg, CacheInvalidateMode::GLOBAL, false);
+        // [MSI] MSIPT Cache 全清
+        drive_msi(msg, CacheInvalidateMode::GLOBAL);
         return resp;
     }
 
     switch (msg.cmd_type) {
         case InvalidCmdType::IODIR_INVAL_DDT: {
-            // [失效] DC 失效(DV=1精准/DV=0全清) + PC 关联失效; 不触及 PT/Walker
+            // [失效] DC 失效(DV=1精准/DV=0全清) + PC 关联失效 + MSIPT 关联失效;
+            // 不触及 PT/Walker。按 spec V1.0.1, INVAL_DDT 需同时失效与该设备关联的
+            // MSI 页表缓存条目; 本模型 MSI 页表指针仅来自 DC(设备级),
+            // 故按 device_id 失效即满足关联失效要求。
             CacheMessage dc_req = msg;
             dc_req.msg_type = CacheMsgType::DC_INVALIDATE;
             dc_req.invalidate_mode = msg.has_device_id ?
@@ -2332,10 +2397,16 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
                 CacheInvalidateMode::SCAN : CacheInvalidateMode::GLOBAL;
             accumulate(drive_invalidate_and_wait(pc_invalidate_fifo,
                                                  pc_invalidate_response_fifo, pc_req));
+            // MSIPT 关联: DV=1 按 DID 失效, DV=0 全清(同 DC 失效范围)
+            drive_msi(msg, msg.has_device_id ?
+                CacheInvalidateMode::PRECISE : CacheInvalidateMode::GLOBAL);
             break;
         }
         case InvalidCmdType::IODIR_INVAL_PDT: {
-            // [失效] PC 精准失效(DID+PID); 不触及 PT/Walker
+            // [失效] PC 精准失效(DID+PID); 不触及 PT/Walker。
+            // [MSI] spec 要求同时失效与进程上下文关联的 MSI 页表缓存条目;
+            // 本模型 MSI 页表指针仅来自 DC(设备级), 不存在进程级 MSI 页表,
+            // 故无对应 MSIPT 条目需失效(不动作即语义正确)。
             CacheMessage pc_req = msg;
             pc_req.msg_type = CacheMsgType::PC_INVALIDATE;
             pc_req.invalidate_mode = CacheInvalidateMode::PRECISE;

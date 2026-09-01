@@ -394,10 +394,47 @@ void RP_Module::send_translation_request_1_thread()
         printf("[TEST] All %d responses received!\n", NUM_REQUESTS);
 
         // ============================================================
+        // Phase3: MSIPT Cache 失效验证 (IODIR.INVAL_DDT 级联失效)
+        //   使能CQ -> IODIR.INVAL_DDT DV=1(DID=0x0B) + IOFENCE ->
+        //   重新注入 dev B 的 Flat MSI: MSIPT Cache 已失效, 应 MISS 重走,
+        //   miss 计数增长且翻译结果不变(验证失效通路功能正确)
+        // ============================================================
+        fail_if((enable_cq(iommu_ptr, 1) < 0));
+        const uint64_t miss_before_inval = g_msipt_cache_miss_count;
+        iodir(iommu_ptr, INVAL_DDT, 1, 0x0B, 0);
+        iofence(iommu_ptr, IOFENCE_C, 0, 0, 0, 0, 0, 0);
+        printf("[TEST] IODIR.INVAL_DDT(DV=1, DID=0x0B) + IOFENCE issued\n");
+        fflush(stdout);
+
+        const int INVAL_RETEST_N = (MSI_REQS < 8) ? MSI_REQS : 8;
+        for (int i = 0; i < INVAL_RETEST_N; i++) {
+            int v = i % 64;
+            if (v == 8 || v == 9 || v == 10) continue;
+            uint64_t offset = 0x40;
+            inject(0x0B, MSI_GPA_BASE + v * 0x1000 + offset, 4, v);
+            check_mode[idx-1] = 0;
+            expected_pa[idx-1] = ((FLAT_PPN_A + v) << 12) | offset;
+        }
+        const int NUM_REQUESTS_INV = idx;
+        for (int i = NUM_REQUESTS; i < NUM_REQUESTS_INV; i++) {
+            sc_time delay = SC_ZERO_TIME;
+            tlm::tlm_phase phase = tlm::BEGIN_REQ;
+            axi_master_to_pcie_noc_0_socket->nb_transport_fw(*trans_array[i], phase, delay);
+            wait(4, SC_NS);
+        }
+        while (response_count < NUM_REQUESTS_INV) {
+            wait(response_count_event);
+        }
+        const uint64_t miss_delta = g_msipt_cache_miss_count - miss_before_inval;
+        printf("[TEST] After INVAL_DDT retest: MSIPT miss_delta=%lu (expect >=1)\n",
+               (unsigned long)miss_delta);
+        fflush(stdout);
+
+        // ============================================================
         // 校验
         // ============================================================
         int pass_count = 0;
-        for (int i = 0; i < NUM_REQUESTS; i++) {
+        for (int i = 0; i < NUM_REQUESTS_INV; i++) {
             tlm::tlm_response_status status = trans_array[i]->get_response_status();
             uint64_t result_pa = trans_array[i]->get_address();
             bool ok = false;
@@ -426,22 +463,25 @@ void RP_Module::send_translation_request_1_thread()
             }
         }
 
-        printf("\n[TEST] Validation: %d/%d passed\n", pass_count, NUM_REQUESTS);
+        printf("\n[TEST] Validation: %d/%d passed\n", pass_count, NUM_REQUESTS_INV);
 
         // MSIPT Cache命中校验: 阶段2的Flat MSI应命中 (dev A/C/D各MSI_REQS笔上下)
         printf("[TEST] MSIPT Cache: hit=%lu, miss=%lu\n",
                (unsigned long)g_msipt_cache_hit_count, (unsigned long)g_msipt_cache_miss_count);
         bool cache_ok = (g_msipt_cache_hit_count >= (uint64_t)MSI_REQS);
+        // Phase3校验: 失效后重测必须产生 MSIPT Cache MISS(失效已生效)
+        bool inval_ok = (miss_delta >= 1);
 
-        if (pass_count == NUM_REQUESTS && cache_ok) {
-            printf("[TEST] PASS: MSI path (MSI_N=%d) all verified!\n", MSI_REQS);
+        if (pass_count == NUM_REQUESTS_INV && cache_ok && inval_ok) {
+            printf("[TEST] PASS: MSI path + MSIPT invalidation (MSI_N=%d) all verified!\n", MSI_REQS);
         } else {
-            printf("[TEST] FAIL: %d reqs failed, cache_ok=%d\n",
-                   NUM_REQUESTS - pass_count, cache_ok ? 1 : 0);
+            printf("[TEST] FAIL: %d reqs failed, cache_ok=%d, inval_ok=%d (miss_delta=%lu)\n",
+                   NUM_REQUESTS_INV - pass_count, cache_ok ? 1 : 0, inval_ok ? 1 : 0,
+                   (unsigned long)miss_delta);
         }
 
         // Cleanup
-        for (int i = 0; i < NUM_REQUESTS; i++) {
+        for (int i = 0; i < NUM_REQUESTS_INV; i++) {
             trans_array[i]->clear_extension(ext_array[i]);
             delete ext_array[i];
             if (trans_array[i]->get_data_ptr()) {
