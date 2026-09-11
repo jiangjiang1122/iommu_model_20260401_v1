@@ -8,7 +8,7 @@
 
 void iommu_top::parser_thread() {
     while (true) {
-        // 0. 全局 outstanding 反压：达到上限则等待 reorder 释放
+        // 0. 全局 outstanding 反压：达到上限则等待 reorder 释放（保留兼容）
         while (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING) {
             wait(iommu_global_outstanding_freed_event);
         }
@@ -18,6 +18,18 @@ void iommu_top::parser_thread() {
         task->timestamp = sc_time_stamp();  // [STAT] 记录IO入口时刻
         printf("[PARSER] task_id=%u popped from inbound_fifo\n", task->task_id);
         fflush(stdout);
+
+        // [场景13] 读写分离 outstanding 反压：按任务方向分别限流
+        bool is_write = (task->read_writeAMO == WRITE);
+        if (is_write) {
+            while (iommu_write_outstanding >= (int)IOMMU_WRITE_MAX_OUTSTANDING) {
+                wait(iommu_write_outstanding_freed_event);
+            }
+        } else {
+            while (iommu_read_outstanding >= (int)IOMMU_READ_MAX_OUTSTANDING) {
+                wait(iommu_read_outstanding_freed_event);
+            }
+        }
 
         // 1.1 入口注册到 reorder buffer，并申请全局 outstanding 槽
         reorder_register_task(task);

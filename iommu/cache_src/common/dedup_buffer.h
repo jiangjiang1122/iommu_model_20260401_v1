@@ -36,7 +36,10 @@ struct DedupBufferEntry {
     
     // 任务指针
     iommu_task_t* task_ptr = nullptr;
-    
+
+    // [STAT] entry申请时刻(ns): 统计buffer任务从申请到PTW完成释放的延时
+    double alloc_time_ns = 0.0;
+
     bool is_valid() const { return valid != 0; }
     
     void clear() {
@@ -47,6 +50,7 @@ struct DedupBufferEntry {
         next_index = 0xFFFF;
         tail_index = 0xFFFF;
         task_ptr = nullptr;
+        alloc_time_ns = 0.0;
     }
 };
 
@@ -63,6 +67,11 @@ struct DedupBuffer {
     uint16_t         valid_count = 0;       // 当前有效Entry数量
     uint16_t         peak_valid_count = 0;  // [STAT] 峰值有效Entry数量
     sc_event         free_event;            // [P3/P5] Buffer释放事件（反压通知）
+    // [STAT] buffer任务持有延时(申请allocate_entry → PTW完成free_entry)
+    double           total_hold_ns = 0.0;
+    uint64_t         hold_count = 0;
+    double           max_hold_ns = 0.0;
+    double           min_hold_ns = 1e18;
     
     /**
      * @brief 分配Entry（按顺序线性查找第一个空闲）
@@ -79,6 +88,7 @@ struct DedupBuffer {
             if (!entries[i].is_valid()) {
                 entries[i].clear();
                 entries[i].valid = 1;
+                entries[i].alloc_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT] 记录申请时刻
                 valid_count++;
                 if (valid_count > peak_valid_count) peak_valid_count = valid_count;
                 return static_cast<uint16_t>(i);  // 返回索引（0, 1, 2, ...顺序）
@@ -96,6 +106,14 @@ struct DedupBuffer {
     void free_entry(uint16_t idx) {
         if (idx == DEDUP_BUFFER_INVALID_IDX || idx >= PT_DEDUP_BUFFER_SIZE) return;
         if (entries[idx].is_valid()) {
+            // [STAT] 记录持有延时(申请→PTW完成释放)
+            double hold_ns = sc_time_stamp().to_seconds() * 1e9 - entries[idx].alloc_time_ns;
+            if (hold_ns >= 0.0) {
+                total_hold_ns += hold_ns;
+                hold_count++;
+                if (hold_ns > max_hold_ns) max_hold_ns = hold_ns;
+                if (hold_ns < min_hold_ns) min_hold_ns = hold_ns;
+            }
             entries[idx].clear();
             valid_count--;
             // [P5] 通知反压等待者：有Buffer Entry被释放
@@ -113,6 +131,11 @@ struct DedupBuffer {
      */
     uint16_t get_valid_count() const { return valid_count; }
     uint16_t get_peak_valid_count() const { return peak_valid_count; }
+    // [STAT] buffer任务持有延时(申请→PTW完成释放) getters
+    double   get_avg_hold_ns() const { return hold_count > 0 ? total_hold_ns / hold_count : 0.0; }
+    uint64_t get_hold_count() const { return hold_count; }
+    double   get_max_hold_ns() const { return max_hold_ns; }
+    double   get_min_hold_ns() const { return hold_count > 0 ? min_hold_ns : 0.0; }
     
     /**
      * @brief 重置Buffer（清空所有Entry）

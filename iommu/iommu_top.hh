@@ -178,8 +178,11 @@ public:
         // [大页] 大页组: 不写PT Cache, 仅按D+1个构造4KB iova刷新去重Cache;
         // slot_invalid标注D个无效结果槽(未真实预取, 仅用于占位清除)
         bool     is_hugepage = false;
+        // [bypass预取] bypass组建组标记: 主任务未挂dedup buffer, 刷新时跳过dedup_update并直接转发主任务
+        bool     is_bypass = false;
         bool     slot_invalid[17] = {false};
         double   group_start_ns = 0.0;        // [STAT] 组起始时间(主任务进入PTW时刻, ns)
+        uint32_t group_ddr_reads = 0;         // [STAT] 组内所有任务DDR读次数累加
         
         // 收集所有walk结果
         spte_t   vs_ptes[17];
@@ -192,6 +195,30 @@ public:
     std::map<uint32_t, PrefetchGroupState> prefetch_groups;  // key=group_id
     sc_mutex prefetch_group_mtx;
     sc_event prefetch_group_completed_event;  // [保留] 用于触发Monitor
+
+    // [聚合刷新PEQ] 待处理预取组数据: 持锁阶段收集, 经200ns PEQ延时后由
+    //   agg_flush_process_thread 刷新去重buffer/去重cache/PT Cache。
+    //   自包含字段(task_id/gscid/pscid/pa_bases)在收集时从main_task拷贝,
+    //   避免延时后解引用main_task导致use-after-free。
+    struct pending_group_update {
+        uint32_t group_id = 0;
+        iommu_task_t* main_task = nullptr;
+        iommu::TransStage stage = iommu::TransStage::STAGE1_AND_2;
+        bool sv48 = false;
+        bool gstage_x4 = false;
+        bool has_fault = false;
+        bool is_hugepage = false;  // [大页] 大页组: 不写PT Cache, 仅刷去重Cache
+        // [bypass预取] bypass组: 跳过dedup_update(不碰去重cache/buffer), 写PT Cache, 直接转发主任务
+        bool is_bypass = false;
+        std::vector<std::pair<uint64_t, iommu::PTData>> batch_updates;
+        std::vector<uint64_t> group_iovas;
+        uint32_t total_tasks = 0;
+        // [200ns PEQ 自包含] flush所需字段, 收集时从main_task拷贝
+        uint32_t task_id = 0;
+        uint32_t gscid = 0;
+        uint32_t pscid = 0;
+        std::vector<uint64_t> pa_bases;  // 每iova的PA基址(pt_updates[i].pa & ~0xFFF)
+    };
 
     // ===================== IOMMU/PTW IOPS Counters =====================
     uint64_t iommu_total_completed;  // IOMMU 出口完成翻译总数
@@ -211,6 +238,14 @@ public:
     int peak_collector_pc_walk_outstanding; // Collector PC walk outstanding峰值
     int peak_axi_master_1_outstanding;     // DDR端口outstanding峰值
     int peak_axi_master_0_outstanding;     // 出口端口outstanding峰值
+
+    // ===================== [STAT] 平均并发统计(Little's Law) =====================
+    // avg_concurrency = 驻留时间总和 / 仿真总时间
+    // IOMMU: 用e2e延时总和; PTW: 用ptw_total_exec_ns
+    double   iommu_read_e2e_total_ns;      // 读任务e2e延时总和(ns)
+    double   iommu_write_e2e_total_ns;     // 写任务e2e延时总和(ns)
+    uint64_t iommu_read_completed;         // 完成的读任务数
+    uint64_t iommu_write_completed;        // 完成的写任务数
 
     // ===================== PTW Per-Task Statistics =====================
     uint64_t ptw_total_ddr_reads;         // 所有PTW任务DDR读次数总和
@@ -246,6 +281,26 @@ public:
     // [STAT] 主任务/预取任务DDR reads汇总
     uint64_t ptw_main_total_ddr_reads;     // 主任务DDR读总数
     uint64_t ptw_prefetch_total_ddr_reads; // 预取任务DDR读总数
+    uint32_t ptw_main_max_ddr_reads;       // 主任务最大DDR读次数
+    uint32_t ptw_main_min_ddr_reads;       // 主任务最小DDR读次数
+    uint32_t ptw_prefetch_max_ddr_reads;   // 预取任务最大DDR读次数
+    uint32_t ptw_prefetch_min_ddr_reads;   // 预取任务最小DDR读次数
+    // [STAT] 预取分析统计
+    uint64_t ptw_late_spawn_triggered;     // 触发late-spawn的主任务数
+    uint64_t ptw_late_spawn_skipped_msi;   // 因MSI跳过late-spawn的主任务数
+    uint64_t ptw_late_spawn_skipped_bypass; // 因bypass跳过late-spawn的主任务数
+    uint64_t ptw_prefetch_spawned_total;   // 实际spawn的预取任务总数
+    // [STAT需求3] 主任务两阶段DDR分解(iova->gpa / gpa->spa) + 预取启动前DDR次数
+    uint64_t ptw_main_vs_ddr_sum = 0;       // 主任务第一阶段(VS_WALK)DDR读总和
+    uint64_t ptw_main_gs_ddr_sum = 0;       // 主任务第二阶段(GS_IMPLICIT+GS_EXPLICIT)DDR读总和
+    uint64_t ptw_main_ad_ddr_sum = 0;       // 主任务AD_UPDATE DDR访问总和
+    uint64_t ptw_main_stage_count = 0;      // 参与两阶段分解统计的主任务数
+    uint64_t ptw_spawn_start_ddr_sum = 0;   // 预取启动时主任务已访问DDR次数总和
+    uint64_t ptw_spawn_start_ddr_count = 0; // 预取启动次数(early+late)
+    uint64_t ptw_early_spawn_ddr_sum = 0;   // early-spawn启动前DDR总和
+    uint64_t ptw_early_spawn_cnt = 0;       // early-spawn次数
+    uint64_t ptw_late_spawn_ddr_sum = 0;    // late-spawn启动前DDR总和
+    uint64_t ptw_late_spawn_cnt = 0;        // late-spawn次数
     // [大页][STAT] 大页任务统计
     uint64_t ptw_hugepage_main_count;      // 大页主任务数(page_sz>4KB)
     uint64_t ptw_hugepage_pf_skipped;      // 大页跳过的预取spawn数
@@ -259,6 +314,28 @@ public:
     double   ptw_group_exec_min_ns;          // 单组最小执行时间(ns)
     uint64_t ptw_group_exec_count;           // 完成的组数
     std::vector<double> ptw_group_exec_values; // 每组执行时间(ns), 用于分布统计
+    // [STAT] PTW任务组DDR读次数统计 (1主+D预取为一组)
+    uint64_t ptw_group_total_ddr_reads;      // 所有组DDR读次数总和
+    uint32_t ptw_group_max_ddr_reads;        // 单组最大DDR读次数
+    uint32_t ptw_group_min_ddr_reads;        // 单组最小DDR读次数
+    std::vector<uint32_t> ptw_group_ddr_values; // 每组DDR读次数, 用于分布统计
+
+    // ===================== PT Cache 输出间隔统计 =====================
+    double   pt_cache_out_last_ns;          // 上一次PT Cache输出时刻(ns)
+    double   pt_cache_out_interval_total_ns; // 输出间隔总和(ns)
+    double   pt_cache_out_interval_max_ns;   // 最大输出间隔(ns)
+    double   pt_cache_out_interval_min_ns;   // 最小输出间隔(ns)
+    uint64_t pt_cache_out_interval_count;    // 输出间隔采样次数
+    uint64_t pt_cache_out_total_count;       // PT Cache输出总次数(HIT+MISS)
+
+    // ===================== SQ/CQ/MSI PT Cache命中路径统计 =====================
+    // 追踪is_ctrl=1的控制包(SQ/CQ/MSI)是否全部PT Cache命中,未进入dedup/PTW
+    uint64_t ctrl_total_count;             // 控制包总数(SQ+CQ+MSI)
+    uint64_t ctrl_pt_cache_hit_count;      // 控制包PT Cache命中(常规CL HIT,直接转发)
+    uint64_t ctrl_pt_cache_miss_count;     // 控制包PT Cache缺失(进入dedup/PTW)
+    uint64_t ctrl_sq_count;                // SQ请求数
+    uint64_t ctrl_cq_count;                // CQ请求数
+    uint64_t ctrl_msi_count;               // MSI请求数
 
     // ===================== End-to-End Latency Statistics =====================
     double   iommu_total_e2e_latency_ns;  // 所有IO端到端延时总和(ns)
@@ -281,6 +358,9 @@ public:
     double   iommu_out_interval_min_ns;     // 最小输出间隔(ns)
     uint64_t iommu_out_interval_count;      // 输出间隔采样次数
     std::vector<double> iommu_out_interval_values; // 所有输出间隔值(ns)
+    // [STAT需求1] 每个间隔对应的结束时刻(ns), 用于稳态窗口[#1000~#9000]内筛选
+    std::vector<double> iommu_in_interval_end_ns;
+    std::vector<double> iommu_out_interval_end_ns;
 
     // ===================== [MONITOR] 阻塞点监控统计 =====================
     // 监控点1: flush_dedup_buffer_by_iova 阻塞统计
@@ -354,6 +434,8 @@ public:
     // PTW PEQ for pipeline delay (non-blocking, parallel timing)
     tlm_utils::peq_with_get<iommu_task_t> ptw_req_peq;
     tlm_utils::peq_with_get<ddr_rsp_entry_t> ptw_rsp_peq;
+    // [聚合刷新] PEQ: PTW完成后聚合任务(刷新去重buffer/去重cache/PT Cache)200ns非阻塞延时
+    tlm_utils::peq_with_get<pending_group_update> agg_flush_peq;
 
     std::map<uint32_t, iommu_task_t*> msiptw_active_walks;
     sc_mutex msiptw_walks_mtx;
@@ -381,6 +463,14 @@ public:
     // 全局 outstanding：parser 入侧申请，reorder 出口释放
     int iommu_global_outstanding;
     sc_event iommu_global_outstanding_freed_event;
+
+    // [场景13] 读写分离 outstanding 计数器与峰值跟踪
+    int iommu_read_outstanding;
+    int iommu_write_outstanding;
+    int peak_iommu_read_outstanding;
+    int peak_iommu_write_outstanding;
+    sc_event iommu_read_outstanding_freed_event;
+    sc_event iommu_write_outstanding_freed_event;
 
     // 重排序辅助方法
     void reorder_register_task(iommu_task_t* task);    // 入口注册 + outstanding++
@@ -429,6 +519,8 @@ public:
     
     // NEW: 预取组监控线程
     void prefetch_group_monitor_thread();  // monitor prefetch group completion
+    // [聚合刷新] PEQ process线程: 200ns延时后执行去重buffer/去重cache/PT Cache刷新
+    void agg_flush_process_thread();
 
     // MSIPT Cache (2 threads)
     void msipt_cache_query_thread();
@@ -526,10 +618,15 @@ public:
         ptw_outstanding_task_count(0),
         ptw_req_peq("ptw_req_peq"),
         ptw_rsp_peq("ptw_rsp_peq"),
+        agg_flush_peq("agg_flush_peq"),
         msiptw_outstanding_task_count(0),
         axi_master_1_to_cmn_rnd_outstanding(0),
         axi_master_0_to_pcie_noc_outstanding(0),
         iommu_global_outstanding(0),
+        iommu_read_outstanding(0),
+        iommu_write_outstanding(0),
+        peak_iommu_read_outstanding(0),
+        peak_iommu_write_outstanding(0),
         va_dedup_hit_count(0),
         va_dedup_miss_count(0),
         iommu_total_completed(0),
@@ -569,6 +666,14 @@ public:
         ptw_prefetch_task_count(0),
         ptw_main_total_ddr_reads(0),
         ptw_prefetch_total_ddr_reads(0),
+        ptw_main_max_ddr_reads(0),
+        ptw_main_min_ddr_reads(999999),
+        ptw_prefetch_max_ddr_reads(0),
+        ptw_prefetch_min_ddr_reads(999999),
+        ptw_late_spawn_triggered(0),
+        ptw_late_spawn_skipped_msi(0),
+        ptw_late_spawn_skipped_bypass(0),
+        ptw_prefetch_spawned_total(0),
         ptw_hugepage_main_count(0),
         ptw_hugepage_pf_skipped(0),
         ptw_hugepage_invalid_slots(0),
@@ -577,6 +682,21 @@ public:
         ptw_group_exec_max_ns(0.0),
         ptw_group_exec_min_ns(999999999.0),
         ptw_group_exec_count(0),
+        ptw_group_total_ddr_reads(0),
+        ptw_group_max_ddr_reads(0),
+        ptw_group_min_ddr_reads(999999),
+        pt_cache_out_last_ns(0.0),
+        pt_cache_out_interval_total_ns(0.0),
+        pt_cache_out_interval_max_ns(0.0),
+        pt_cache_out_interval_min_ns(999999999.0),
+        pt_cache_out_interval_count(0),
+        pt_cache_out_total_count(0),
+        ctrl_total_count(0),
+        ctrl_pt_cache_hit_count(0),
+        ctrl_pt_cache_miss_count(0),
+        ctrl_sq_count(0),
+        ctrl_cq_count(0),
+        ctrl_msi_count(0),
         iommu_total_e2e_latency_ns(0.0),
         iommu_e2e_max_ns(0.0),
         iommu_e2e_min_ns(999999999.0),
@@ -665,6 +785,7 @@ public:
         SC_THREAD(ptw_rsp_thread);
         SC_THREAD(ptw_rsp_process_thread);
         SC_THREAD(prefetch_group_monitor_thread);  // NEW: 预取组监控
+        SC_THREAD(agg_flush_process_thread);       // [聚合刷新] PEQ 200ns延时刷新
         SC_THREAD(msipt_cache_query_thread);
         SC_THREAD(msipt_cache_result_thread);
         SC_THREAD(msiptw_req_thread);
@@ -682,11 +803,24 @@ public:
             [this](uint16_t head_index, const iommu::CacheMessage& upd) {
                 this->dedup_flush_chain_cb(head_index, upd);
             });
+        // [FIX] 绑定PTW并发容量检查回调: Buffer满时dedup worker通过此回调检查PTW是否有空闲槽位
+        cache_sub.set_ptw_capacity_check(
+            [this]() -> bool {
+                return this->ptw_outstanding_task_count < (int)PTW_MAX_OUTSTANDING_TASKS;
+            });
 
         memset(ctrl_path_rsp_buf, 0, sizeof(ctrl_path_rsp_buf));
     }
 
     ~iommu_top(){
+    }
+
+    // PTW完成后释放并发计数（无延时）
+    void ptw_release_outstanding() {
+        ptw_outstanding_task_count--;
+        assert(ptw_outstanding_task_count >= 0);
+        ptw_task_completed_event.notify(SC_ZERO_TIME);
+        cache_sub.get_dedup_buffer_full_event().notify(SC_ZERO_TIME);
     }
 };
 

@@ -221,6 +221,11 @@ struct walk_context_t {
     uint32_t ddr_log_size[8] = {0};       // DDR访问大小(字节)
     uint8_t  ddr_log_count = 0;           // 当前日志条目数
 
+    // [STAT需求3] 两阶段DDR访问分解计数(在DDR响应侧按walk_phase累加, 不受ddr_log 8条上限约束)
+    uint32_t vs_stage_ddr_reads = 0;      // 第一阶段(iova->gpa, PTW_VS_WALK)DDR读次数
+    uint32_t gs_stage_ddr_reads = 0;      // 第二阶段(gpa->spa, GS_IMPLICIT+GS_EXPLICIT)DDR读次数
+    uint32_t ad_update_ddr_writes = 0;    // AD_UPDATE阶段DDR访问次数
+
     // [MSI] MSI地址识别结果 (msi_id_check命中时填充, 供MSIPTW/MSIPT Cache使用)
     uint64_t msi_index = 0;             // interrupt file number I = extract(A>>12, mask)
 
@@ -291,6 +296,7 @@ struct iommu_task_t {
     uint64_t iotval2;
     uint8_t is_bare_translation;
     uint8_t is_b_transport;         // 1 if task created via b_transport (don't delete in forwarder)
+    uint8_t is_ctrl;                // [场景13] 1=SQ/CQ/MSI控制包(不计入IOPS), 0=Data数据包
 
     // NEW: 去重模块相关
     uint8_t dedup_head_index = 0xFF;  // Buffer任务链头指针（0-255，0xFF=无效）
@@ -322,7 +328,7 @@ struct iommu_task_t {
           vs_pte{}, g_pte{},
           is_msi(0), is_mrif(0), mrif_nid(0), dest_mrif_addr(0),
           cause(0), iotval(0), iotval2(0),
-          is_bare_translation(0), is_b_transport(0),
+          is_bare_translation(0), is_b_transport(0), is_ctrl(0),
           dedup_head_index(0xFF),
           state(TASK_INIT), dc_valid(0), dc_hit(0), pc_valid(0), pc_hit(0),
           need_pc(0), tlm_trans_ptr(nullptr), walk_ctx() {}

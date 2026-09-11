@@ -10,7 +10,7 @@
 using namespace std;
 
 // ============================================================
-// 场景13: 4KB随机读写 + MSI 混合负载 (两阶段翻译 + S2开启)
+// 场景13-v4: 4KB随机读写 + SQ/CQ/MSI 混合负载 (两阶段翻译 + S2开启)
 //
 // 基础负载沿用场景7地址布局与页表构造:
 //   IOVA范围 16MB (0x100000~0x10FFFFF), 全部4096个4KB页建立
@@ -27,20 +27,30 @@ using namespace std;
 //     两级模式下PTW在S1完成后识别MSI并跳过S2);
 //   - MSI PTE: 256个vector全部 Flat(M=3), 输出物理页基址16MB。
 //
-// 负载模式: 每组 = 1个4KB随机读写任务(8x512B连续, 前4读后4写)
-//           + 1个MSI任务(4B写, vector随机);
-//   1111组 x 9包 + 末尾补1个MSI = 10000包 (IO 8888 + MSI 1112)
+// [v4] 负载模式 (系统级任务奇读偶写交替):
+//   系统任务1: 8x512B Data读 + 1x32B SQ读 + 1x16B CQ写 + 1x4B MSI写 = 11包
+//   系统任务2: 8x512B Data写 + 1x32B SQ读 + 1x16B CQ写 + 1x4B MSI写 = 11包
+//   系统任务3: 8x512B Data读 + ... (交替)
+//   909组 x 11包 + 末尾补1个MSI = 10000包 (Data 7272 + SQ 909 + CQ 909 + MSI 910)
+//   SQ/CQ/MSI固定IOVA地址, 经预热后稳态100%命中PT Cache/MSIPT Cache,
+//   不进入去重cache及后续PTW模块。
 // ============================================================
 
 // ---- 场景13 MSI常量 ----
 static const uint64_t S13_MSI_MASK      = 0xFF;
 static const uint64_t S13_MSI_PATTERN   = 0x3000;
 static const uint64_t S13_MSI_GPA_BASE  = S13_MSI_PATTERN << 12;  // 0x3000000 (48MB)
-static const int      S13_MSI_VECTORS   = 256;                    // mask=0xFF -> 256 vectors, PTE表恰好4KB/1页
-static const uint64_t S13_FLAT_PPN_BASE = 0x1000;                 // Flat输出物理页基址(16MB, 32MB DDR内且避开页表分配区)
-static const uint64_t S13_MSI_IOVA_BASE = 0x2000000;              // MSI IOVA区基址(32MB, 与普通16MB IOVA范围不重合)
-static const int      S13_MSI_IOVA_CAND = 1024;                   // MSI IOVA候选页数(4MB区域), 从中随机挑256个不连续页
+static const int      S13_MSI_VECTORS   = 256;                    // mask=0xFF -> 256 vectors
+static const uint64_t S13_FLAT_PPN_BASE = 0x1000;                 // Flat输出物理页基址(16MB)
+static const uint64_t S13_MSI_IOVA_BASE = 0x2000000;              // MSI IOVA区基址(32MB)
+static const int      S13_MSI_IOVA_CAND = 1024;                   // MSI IOVA候选页数(4MB区域)
 static const uint64_t S13_MSI_OFFSET    = 0x40;                   // MSI写页内偏移
+
+// [场景13-v4] SQ/CQ 固定IOVA地址(稳态100%命中PT Cache)
+static const uint64_t S13_SQ_IOVA       = 0x5000000;              // SQ固定IOVA(32B读)
+static const uint64_t S13_CQ_IOVA       = 0x5001000;              // CQ固定IOVA(16B写)
+static const uint64_t S13_SQ_CQ_GPA     = 0x4000000;              // SQ/CQ共用GPA区(64MB, 避开Data/MSI)
+static const int      S13_MSI_FIXED_VEC = 0;                      // MSI固定vector=0(稳态命中)
 
 // 写一笔16字节MSI PTE到设备MSI页表
 static void s13_write_msi_pte(RP_Module* rp, uint64_t msipt_base, uint32_t vec, msipte_t pte) {
@@ -81,29 +91,33 @@ void RP_Module::send_translation_request_1_thread()
         const uint64_t SPA_OFFSET  = 0x80000000;       // SPA = GPA + 固定偏移(2MB对齐)
         const int NUM_GPA_HUGEPAGES = 20;              // 20个2MB大页GPA
         const int SLOTS_PER_HUGEPAGE = (int)(HUGE_PAGE_SZ / 0x1000);  // 512个4KB slot
-        // [场景化] 默认1111页; Makefile传入TEST_CFG_NUM_PAGES=1111(8888 IO请求)
+        // [场景化] 默认909组; Makefile传入TEST_CFG_NUM_PAGES=909
+        // 每组 = 8 Data(512B) + 1 SQ(32B) + 1 CQ(16B) + 1 MSI(4B) = 11包
+        // 909 × 11 = 9999, 末尾补1个MSI = 10000包
 #ifndef TEST_CFG_NUM_PAGES
-        const int PAGES_NEEDED     = 1111;             // 1111组 × 8 = 8888 IO请求
+        const int PAGES_NEEDED     = 909;              // 909组
 #else
         const int PAGES_NEEDED     = TEST_CFG_NUM_PAGES;
 #endif
-        const int REQ_PER_PAGE     = 8;                // 8 × 512B = 4KB
-        const int NUM_GROUPS       = PAGES_NEEDED;     // 每组1个4KB页 + 1个MSI
-        const int NUM_IO_REQS      = NUM_GROUPS * REQ_PER_PAGE;   // 8888
-        const int NUM_MSI_REQS     = NUM_GROUPS + 1;              // 1112 (末尾补1个)
-        const int NUM_REQUESTS     = NUM_IO_REQS + NUM_MSI_REQS;  // 10000
+        const int REQ_PER_PAGE     = 8;                // 8 × 512B = 4KB Data
+        const int NUM_GROUPS       = PAGES_NEEDED;     // 每组 = 8 Data + 1 SQ + 1 CQ + 1 MSI
+        const int NUM_IO_REQS      = NUM_GROUPS * REQ_PER_PAGE;   // Data请求数(计入IOPS)
+        const int NUM_SQ_REQS      = NUM_GROUPS;                  // SQ请求数(不计入IOPS)
+        const int NUM_CQ_REQS      = NUM_GROUPS;                  // CQ请求数(不计入IOPS)
+        const int NUM_MSI_REQS     = NUM_GROUPS + 1;              // MSI请求数(末尾补1个, 不计入IOPS)
+        const int NUM_REQUESTS     = NUM_IO_REQS + NUM_SQ_REQS + NUM_CQ_REQS + NUM_MSI_REQS;  // 总包数
         const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_16MB / 0x1000);  // 4096
 
-        printf("\n[TEST] Scene 13 Mixed Load Construction:\n");
+        printf("\n[TEST] Scene 13-v2 Mixed Load Construction (Data+SQ+CQ+MSI):\n");
         printf("[TEST]   Normal IOVA range: 0x%lx ~ 0x%lx (16MB, %d pages, ALL mapped)\n",
                IOVA_BASE, IOVA_BASE + RANGE_16MB, TOTAL_PAGES_IN_RANGE);
-        printf("[TEST]   MSI IOVA range:    0x%lx ~ 0x%lx (random %d of %d pages, NON-contiguous)\n",
-               S13_MSI_IOVA_BASE, S13_MSI_IOVA_BASE + (uint64_t)S13_MSI_IOVA_CAND * 0x1000,
-               S13_MSI_VECTORS, S13_MSI_IOVA_CAND);
-        printf("[TEST]   MSI window GPA:    0x%lx ~ 0x%lx (mask=0x%lx, pattern=0x%lx, Flat)\n",
-               S13_MSI_GPA_BASE, S13_MSI_GPA_BASE + 0xFFFFF, S13_MSI_MASK, S13_MSI_PATTERN);
-        printf("[TEST]   Pattern: %d groups x (8x512B R/W + 1 MSI) + 1 MSI = %d packets (%d IO + %d MSI)\n",
-               NUM_GROUPS, NUM_REQUESTS, NUM_IO_REQS, NUM_MSI_REQS);
+        printf("[TEST]   SQ fixed IOVA:     0x%lx (32B write, is_ctrl=1)\n", S13_SQ_IOVA);
+        printf("[TEST]   CQ fixed IOVA:     0x%lx (16B write, is_ctrl=1)\n", S13_CQ_IOVA);
+        printf("[TEST]   MSI fixed IOVA:    0x%lx (vector=%d, 4B write, is_ctrl=1)\n",
+               S13_MSI_IOVA_BASE + S13_MSI_OFFSET, S13_MSI_FIXED_VEC);
+        printf("[TEST]   Pattern: %d groups x (8x512B Data + 1 SQ + 1 CQ + 1 MSI) + 1 MSI = %d packets\n",
+               NUM_GROUPS, NUM_REQUESTS);
+        printf("[TEST]   IOPS counts only Data: %d packets (SQ/CQ/MSI excluded)\n", NUM_IO_REQS);
         printf("[TEST]   GPA = %d x 2MB hugepages, SPA = GPA + 0x%lx\n", NUM_GPA_HUGEPAGES, SPA_OFFSET);
 
         // GPPN offset: 避开测试GPA(40MB)与MSI窗口(48MB) -> 256MB
@@ -287,6 +301,32 @@ void RP_Module::send_translation_request_1_thread()
         printf("[TEST]   Mapped %d MSI VS-stage pages: IOVA 0x%lx+rand -> GPA window 0x%lx (no S2 mapping)\n",
                S13_MSI_VECTORS, S13_MSI_IOVA_BASE, S13_MSI_GPA_BASE);
 
+        // ============================================================
+        // [场景13-v2] SQ/CQ 固定地址映射 (稳态100%命中PT Cache)
+        //   SQ: IOVA 0x5000000 -> GPA 0x4000000 -> SPA = GPA + SPA_OFFSET
+        //   CQ: IOVA 0x5001000 -> GPA 0x4001000 -> SPA = GPA + SPA_OFFSET
+        // ============================================================
+        {
+            // SQ 映射
+            uint64_t sq_gpa = S13_SQ_CQ_GPA;  // 0x4000000
+            pte6.PPN = sq_gpa / PAGESIZE;
+            fail_if((add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, S13_SQ_IOVA, pte6, 0, DC6.iohgatp, 0) == (uint64_t)-1));
+            // SQ G-stage 映射 (4KB页)
+            gpte.PPN = (sq_gpa + SPA_OFFSET) / PAGESIZE;
+            fail_if((add_g_stage_pte(iommu_ptr, DC6.iohgatp, sq_gpa, gpte, 0) == (uint64_t)-1));
+
+            // CQ 映射
+            uint64_t cq_gpa = S13_SQ_CQ_GPA + 0x1000;  // 0x4001000
+            pte6.PPN = cq_gpa / PAGESIZE;
+            fail_if((add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, S13_CQ_IOVA, pte6, 0, DC6.iohgatp, 0) == (uint64_t)-1));
+            // CQ G-stage 映射 (4KB页)
+            gpte.PPN = (cq_gpa + SPA_OFFSET) / PAGESIZE;
+            fail_if((add_g_stage_pte(iommu_ptr, DC6.iohgatp, cq_gpa, gpte, 0) == (uint64_t)-1));
+
+            printf("[TEST]   SQ/CQ fixed mapping: SQ IOVA=0x%lx->GPA=0x%lx, CQ IOVA=0x%lx->GPA=0x%lx\n",
+                   S13_SQ_IOVA, sq_gpa, S13_CQ_IOVA, cq_gpa);
+        }
+
         // Invalidate caches
         printf("\n[TEST] Invalidating IOMMU caches for scene 13 mixed test...\n");
         iodir(iommu_ptr, INVAL_DDT, 1, 0x0A, 0);
@@ -301,35 +341,135 @@ void RP_Module::send_translation_request_1_thread()
         g_msipt_cache_miss_count = 0;
 
         // ============================================================
-        // 混合负载注入: 每组 = 8x512B读写(前4读后4写) + 1 MSI(4B写)
+        // [场景13-v3] MSIPT Cache 预热: 发送几个MSI请求填充Cache
+        //   固定vector=0, 预热后稳态MSIPT命中率=100%
         // ============================================================
-        printf("\n========== %d-Packet Mixed Test (%d IO + %d MSI) ==========\n",
-               NUM_REQUESTS, NUM_IO_REQS, NUM_MSI_REQS);
+        {
+            const int WARMUP_MSI = 8;
+            printf("[WARMUP] Sending %d MSI requests to warm up MSIPT Cache (vector=%d)...\n",
+                   WARMUP_MSI, S13_MSI_FIXED_VEC);
+            int warmup_resp = 0;
+            for (int w = 0; w < WARMUP_MSI; w++) {
+                int v = S13_MSI_FIXED_VEC;
+                uint64_t msi_iova = S13_MSI_IOVA_BASE + (uint64_t)msi_pages[v] * 0x1000 + S13_MSI_OFFSET;
+                tlm_generic_payload* warmup_tr = new tlm_generic_payload();
+                unsigned char* warmup_data = new unsigned char[4]();
+                memcpy(warmup_data, &v, 4);
+                warmup_tr->set_address(msi_iova);
+                warmup_tr->set_data_ptr(warmup_data);
+                warmup_tr->set_data_length(4);
+                warmup_tr->set_command(TLM_WRITE_COMMAND);
+                PayloadExtention* warmup_ext = new PayloadExtention();
+                warmup_ext->requester_id = 0x0A;
+                warmup_ext->is_ctrl = 1;
+                warmup_tr->set_extension(warmup_ext);
+                sc_time delay = SC_ZERO_TIME;
+                tlm::tlm_phase phase = tlm::BEGIN_REQ;
+                axi_master_to_pcie_noc_0_socket->nb_transport_fw(*warmup_tr, phase, delay);
+            }
+            // 等待预热请求全部完成
+            int warmup_stall = 0;
+            while (response_count < WARMUP_MSI) {
+                wait(100, SC_NS);
+                if (++warmup_stall > 100) break;
+            }
+            printf("[WARMUP] %d MSI warmup requests completed (response_count=%d)\n",
+                   WARMUP_MSI, response_count);
+            // 重置计数器, 预热不计入统计
+            response_count = 0;
+            g_msipt_cache_hit_count = 0;
+            g_msipt_cache_miss_count = 0;
+        }
 
+        // ============================================================
+        // [场景13-v4] SQ/CQ PT Cache 预热: 发送几笔SQ(读)+CQ(写)请求
+        //   固定IOVA地址, 预热后稳态PT Cache命中率=100%, 不进dedup/PTW
+        // ============================================================
+        {
+            const int WARMUP_SQ_CQ = 4;
+            printf("[WARMUP] Sending %d SQ+CQ requests to warm up PT Cache...\n", WARMUP_SQ_CQ * 2);
+            for (int w = 0; w < WARMUP_SQ_CQ; w++) {
+                // SQ: 32B读
+                tlm_generic_payload* sq_tr = new tlm_generic_payload();
+                unsigned char* sq_data = new unsigned char[32]();
+                sq_tr->set_address(S13_SQ_IOVA);
+                sq_tr->set_data_ptr(sq_data);
+                sq_tr->set_data_length(32);
+                sq_tr->set_command(TLM_READ_COMMAND);
+                PayloadExtention* sq_ext = new PayloadExtention();
+                sq_ext->requester_id = 0x0A;
+                sq_ext->is_ctrl = 1;
+                sq_tr->set_extension(sq_ext);
+                sc_time sq_delay = SC_ZERO_TIME;
+                tlm::tlm_phase sq_phase = tlm::BEGIN_REQ;
+                axi_master_to_pcie_noc_0_socket->nb_transport_fw(*sq_tr, sq_phase, sq_delay);
+
+                // CQ: 16B写
+                tlm_generic_payload* cq_tr = new tlm_generic_payload();
+                unsigned char* cq_data = new unsigned char[16]();
+                cq_tr->set_address(S13_CQ_IOVA);
+                cq_tr->set_data_ptr(cq_data);
+                cq_tr->set_data_length(16);
+                cq_tr->set_command(TLM_WRITE_COMMAND);
+                PayloadExtention* cq_ext = new PayloadExtention();
+                cq_ext->requester_id = 0x0A;
+                cq_ext->is_ctrl = 1;
+                cq_tr->set_extension(cq_ext);
+                sc_time cq_delay = SC_ZERO_TIME;
+                tlm::tlm_phase cq_phase = tlm::BEGIN_REQ;
+                axi_master_to_pcie_noc_0_socket->nb_transport_fw(*cq_tr, cq_phase, cq_delay);
+            }
+            // 等待预热请求全部完成 (WARMUP_SQ_CQ * 2 笔)
+            int warmup_stall2 = 0;
+            int expected_warmup = WARMUP_SQ_CQ * 2;
+            while (response_count < expected_warmup) {
+                wait(100, SC_NS);
+                if (++warmup_stall2 > 100) break;
+            }
+            printf("[WARMUP] %d SQ+CQ warmup requests completed (response_count=%d)\n",
+                   expected_warmup, response_count);
+            // 重置计数器, 预热不计入统计
+            response_count = 0;
+        }
+
+        // ============================================================
+        // [场景13-v4] 混合负载注入: 每组 = 8x512B Data + 1 SQ(32B) + 1 CQ(16B) + 1 MSI(4B)
+        //   所有任务(数据+控制)均计入IOPS
+        // ============================================================
+        printf("\n========== %d-Packet Mixed Test (%d Data + %d SQ + %d CQ + %d MSI) ==========\n",
+               NUM_REQUESTS, NUM_IO_REQS, NUM_SQ_REQS, NUM_CQ_REQS, NUM_MSI_REQS);
+        printf("[TEST] Task distribution:\n");
+        printf("  - 512B Data tasks:  %d (%.2f%%)\n", NUM_IO_REQS, 100.0 * NUM_IO_REQS / NUM_REQUESTS);
+        printf("  - 32B SQ tasks:     %d (%.2f%%)\n", NUM_SQ_REQS, 100.0 * NUM_SQ_REQS / NUM_REQUESTS);
+        printf("  - 16B CQ tasks:     %d (%.2f%%)\n", NUM_CQ_REQS, 100.0 * NUM_CQ_REQS / NUM_REQUESTS);
+        printf("  - 4B MSI tasks:     %d (%.2f%%)\n", NUM_MSI_REQS, 100.0 * NUM_MSI_REQS / NUM_REQUESTS);
+        printf("  - Total:            %d (100%%)\n", NUM_REQUESTS);
+
+        // [场景13-v4] IOPS统计所有任务(数据+控制信息)
         iommu_ptr->steady_start_count = NUM_REQUESTS * STEADY_STATE_START_PERCENT / 100;
         iommu_ptr->steady_end_count   = NUM_REQUESTS * STEADY_STATE_END_PERCENT / 100;
 
         tlm_generic_payload** trans_array = new tlm_generic_payload*[NUM_REQUESTS];
         PayloadExtention** ext_array = new PayloadExtention*[NUM_REQUESTS];
         uint64_t* expected_pa = new uint64_t[NUM_REQUESTS];
-        int* req_is_msi = new int[NUM_REQUESTS];
+        int* req_type = new int[NUM_REQUESTS];  // 0=Data, 1=SQ, 2=CQ, 3=MSI
 
-        printf("[TEST] Injecting %d packets (group: 8x512B R/W + 1 MSI, MSI vector random)...\n", NUM_REQUESTS);
-        printf("[TEST] Prefetch D=%d, Walker Cache ENABLED (MSI tasks skip prefetch/S2)\n",
-               (int)TEST_CFG_PT_DEDUP_PREFETCH_DEPTH);
+        printf("[TEST] Injecting %d packets (group: 8x512B Data + 1 SQ + 1 CQ + 1 MSI)...\n", NUM_REQUESTS);
+        printf("[TEST] Prefetch D=%d, Walker Cache ENABLED, MSI vector FIXED=%d\n",
+               (int)TEST_CFG_PT_DEDUP_PREFETCH_DEPTH, S13_MSI_FIXED_VEC);
         fflush(stdout);
 
         int req_idx = 0;
-        int msi_idx = 0;
         for (int g = 0; g < NUM_GROUPS; g++) {
-            // ---- 1个4KB随机读写任务: 8个连续512B (offset 0~3读, 4~7写) ----
+            // ---- 8个512B Data任务: 奇读偶写交替 (系统任务1=全读, 系统任务2=全写, ...) ----
             int iova_pg = page_indices[g];
+            bool group_is_read = (g % 2 == 0);  // 偶数组=读, 奇数组=写
             for (int off = 0; off < REQ_PER_PAGE; off++) {
                 uint64_t iova = IOVA_BASE + (uint64_t)iova_pg * 0x1000 + off * 0x200;
                 uint64_t exp_pa = (uint64_t)iova_huge[iova_pg] * HUGE_PAGE_SZ
                                 + (uint64_t)iova_slot[iova_pg] * 0x1000
                                 + SPA_OFFSET + (iova & 0xFFF);
-                bool is_read = (off < REQ_PER_PAGE / 2);
+                bool is_read = group_is_read;
 
                 trans_array[req_idx] = new tlm_generic_payload();
                 unsigned char* data = new unsigned char[1024]();
@@ -346,39 +486,93 @@ void RP_Module::send_translation_request_1_thread()
                 ext_array[req_idx]->priv_req = 0;
                 ext_array[req_idx]->no_write = is_read ? 1 : 0;
                 ext_array[req_idx]->at = 0;
+                ext_array[req_idx]->is_ctrl = 0;  // Data: 计入IOPS
                 trans_array[req_idx]->set_extension(ext_array[req_idx]);
 
                 expected_pa[req_idx] = exp_pa;
-                req_is_msi[req_idx] = 0;
+                req_type[req_idx] = 0;  // Data
                 req_idx++;
             }
 
-            // ---- 1个MSI任务: 4B写, vector随机, IOVA随机不连续 ----
-            int v = msi_vectors[msi_idx];
-            uint64_t msi_iova = S13_MSI_IOVA_BASE + (uint64_t)msi_pages[v] * 0x1000 + S13_MSI_OFFSET;
+            // ---- 1个SQ任务: 32B读, 固定IOVA, is_ctrl=1 ----
+            {
+                trans_array[req_idx] = new tlm_generic_payload();
+                unsigned char* sq_data = new unsigned char[32]();
+                trans_array[req_idx]->set_address(S13_SQ_IOVA);
+                trans_array[req_idx]->set_data_ptr(sq_data);
+                trans_array[req_idx]->set_data_length(32);
+                trans_array[req_idx]->set_command(TLM_READ_COMMAND);
 
-            trans_array[req_idx] = new tlm_generic_payload();
-            unsigned char* msi_data = new unsigned char[4]();
-            memcpy(msi_data, &v, 4);
-            trans_array[req_idx]->set_address(msi_iova);
-            trans_array[req_idx]->set_data_ptr(msi_data);
-            trans_array[req_idx]->set_data_length(4);
-            trans_array[req_idx]->set_command(TLM_WRITE_COMMAND);
+                ext_array[req_idx] = new PayloadExtention();
+                ext_array[req_idx]->requester_id = 0x0A;
+                ext_array[req_idx]->pid_valid = 0;
+                ext_array[req_idx]->process_id = 0;
+                ext_array[req_idx]->exec_req = 0;
+                ext_array[req_idx]->priv_req = 0;
+                ext_array[req_idx]->no_write = 1;
+                ext_array[req_idx]->at = 0;
+                ext_array[req_idx]->is_ctrl = 1;  // SQ: 不计入IOPS
+                trans_array[req_idx]->set_extension(ext_array[req_idx]);
 
-            ext_array[req_idx] = new PayloadExtention();
-            ext_array[req_idx]->requester_id = 0x0A;
-            ext_array[req_idx]->pid_valid = 0;
-            ext_array[req_idx]->process_id = 0;
-            ext_array[req_idx]->exec_req = 0;
-            ext_array[req_idx]->priv_req = 0;
-            ext_array[req_idx]->no_write = 0;
-            ext_array[req_idx]->at = 0;
-            trans_array[req_idx]->set_extension(ext_array[req_idx]);
+                expected_pa[req_idx] = S13_SQ_CQ_GPA + SPA_OFFSET;
+                req_type[req_idx] = 1;  // SQ
+                req_idx++;
+            }
 
-            expected_pa[req_idx] = ((S13_FLAT_PPN_BASE + v) << 12) | S13_MSI_OFFSET;
-            req_is_msi[req_idx] = 1;
-            req_idx++;
-            msi_idx++;
+
+            // ---- 1个CQ任务: 16B写, 固定IOVA, is_ctrl=1 ----
+            {
+                trans_array[req_idx] = new tlm_generic_payload();
+                unsigned char* cq_data = new unsigned char[16]();
+                trans_array[req_idx]->set_address(S13_CQ_IOVA);
+                trans_array[req_idx]->set_data_ptr(cq_data);
+                trans_array[req_idx]->set_data_length(16);
+                trans_array[req_idx]->set_command(TLM_WRITE_COMMAND);
+
+                ext_array[req_idx] = new PayloadExtention();
+                ext_array[req_idx]->requester_id = 0x0A;
+                ext_array[req_idx]->pid_valid = 0;
+                ext_array[req_idx]->process_id = 0;
+                ext_array[req_idx]->exec_req = 0;
+                ext_array[req_idx]->priv_req = 0;
+                ext_array[req_idx]->no_write = 0;
+                ext_array[req_idx]->at = 0;
+                ext_array[req_idx]->is_ctrl = 1;  // CQ: 不计入IOPS
+                trans_array[req_idx]->set_extension(ext_array[req_idx]);
+
+                expected_pa[req_idx] = S13_SQ_CQ_GPA + 0x1000 + SPA_OFFSET;
+                req_type[req_idx] = 2;  // CQ
+                req_idx++;
+            }
+
+            // ---- 1个MSI任务: 4B写, 固定vector=0, is_ctrl=1 ----
+            {
+                int v = S13_MSI_FIXED_VEC;
+                uint64_t msi_iova = S13_MSI_IOVA_BASE + (uint64_t)msi_pages[v] * 0x1000 + S13_MSI_OFFSET;
+
+                trans_array[req_idx] = new tlm_generic_payload();
+                unsigned char* msi_data = new unsigned char[4]();
+                memcpy(msi_data, &v, 4);
+                trans_array[req_idx]->set_address(msi_iova);
+                trans_array[req_idx]->set_data_ptr(msi_data);
+                trans_array[req_idx]->set_data_length(4);
+                trans_array[req_idx]->set_command(TLM_WRITE_COMMAND);
+
+                ext_array[req_idx] = new PayloadExtention();
+                ext_array[req_idx]->requester_id = 0x0A;
+                ext_array[req_idx]->pid_valid = 0;
+                ext_array[req_idx]->process_id = 0;
+                ext_array[req_idx]->exec_req = 0;
+                ext_array[req_idx]->priv_req = 0;
+                ext_array[req_idx]->no_write = 0;
+                ext_array[req_idx]->at = 0;
+                ext_array[req_idx]->is_ctrl = 1;  // MSI: 不计入IOPS
+                trans_array[req_idx]->set_extension(ext_array[req_idx]);
+
+                expected_pa[req_idx] = ((S13_FLAT_PPN_BASE + v) << 12) | S13_MSI_OFFSET;
+                req_type[req_idx] = 3;  // MSI
+                req_idx++;
+            }
 
             if ((g + 1) % 200 == 0) {
                 printf("[TEST] Progress: group %d/%d built (%d packets)\n", g + 1, NUM_GROUPS, req_idx);
@@ -388,7 +582,7 @@ void RP_Module::send_translation_request_1_thread()
 
         // ---- 末尾补1个MSI, 凑满10000包 ----
         {
-            int v = msi_vectors[msi_idx];
+            int v = S13_MSI_FIXED_VEC;
             uint64_t msi_iova = S13_MSI_IOVA_BASE + (uint64_t)msi_pages[v] * 0x1000 + S13_MSI_OFFSET;
             trans_array[req_idx] = new tlm_generic_payload();
             unsigned char* msi_data = new unsigned char[4]();
@@ -405,9 +599,10 @@ void RP_Module::send_translation_request_1_thread()
             ext_array[req_idx]->priv_req = 0;
             ext_array[req_idx]->no_write = 0;
             ext_array[req_idx]->at = 0;
+            ext_array[req_idx]->is_ctrl = 1;  // MSI: 不计入IOPS
             trans_array[req_idx]->set_extension(ext_array[req_idx]);
             expected_pa[req_idx] = ((S13_FLAT_PPN_BASE + v) << 12) | S13_MSI_OFFSET;
-            req_is_msi[req_idx] = 1;
+            req_type[req_idx] = 3;  // MSI
             req_idx++;
         }
 
@@ -415,7 +610,11 @@ void RP_Module::send_translation_request_1_thread()
             printf("[TEST] ERROR: built %d packets, expected %d\n", req_idx, NUM_REQUESTS);
         }
 
-        // ---- 注入 (与场景7一致: 背靠背注入, 入口128GB/s带宽控制平均4ns/包) ----
+        // ============================================================
+        // [场景13-v3] 注入时序控制:
+        //   Data: 背靠背注入(端口带宽自然形成4ns间隔)
+        //   SQ/CQ/MSI: 理想0耗时, 不消耗注入时间(无wait)
+        // ============================================================
         for (int i = 0; i < NUM_REQUESTS; i++) {
             sc_time delay = SC_ZERO_TIME;
             tlm::tlm_phase phase = tlm::BEGIN_REQ;
@@ -455,37 +654,99 @@ void RP_Module::send_translation_request_1_thread()
         printf("[TEST] Done. response_count=%d / %d\n", response_count, NUM_REQUESTS);
 
         // ============================================================
-        // 校验: IO请求(状态+PA) + MSI请求(Flat输出PA)
+        // [场景13-v2] 校验: Data/SQ/CQ/MSI 分类统计
         // ============================================================
         int pass_count = 0;
-        int io_pass = 0, msi_pass = 0;
+        int data_pass = 0, sq_pass = 0, cq_pass = 0, msi_pass = 0;
+        const char* type_names[] = {"Data", "SQ", "CQ", "MSI"};
         for (int i = 0; i < NUM_REQUESTS; i++) {
             uint64_t result_pa = trans_array[i]->get_address();
             tlm::tlm_response_status status = trans_array[i]->get_response_status();
 
             if (status == tlm::TLM_OK_RESPONSE && result_pa == expected_pa[i]) {
                 pass_count++;
-                if (req_is_msi[i]) msi_pass++; else io_pass++;
+                switch (req_type[i]) {
+                    case 0: data_pass++; break;
+                    case 1: sq_pass++; break;
+                    case 2: cq_pass++; break;
+                    case 3: msi_pass++; break;
+                }
             } else {
                 printf("[TEST] FAIL req %4d (%s): IOVA=0x%lx, expected PA=0x%lx, got PA=0x%lx, status=%s\n",
-                       i, req_is_msi[i] ? "MSI" : "IO", trans_array[i]->get_address(),
+                       i, type_names[req_type[i]], trans_array[i]->get_address(),
                        expected_pa[i], result_pa, trans_array[i]->get_response_string().c_str());
             }
         }
 
-        printf("\n[TEST] Validation: %d/%d passed (IO: %d/%d, MSI: %d/%d)\n",
-               pass_count, NUM_REQUESTS, io_pass, NUM_IO_REQS, msi_pass, NUM_MSI_REQS);
+        printf("\n[TEST] Validation: %d/%d passed\n", pass_count, NUM_REQUESTS);
+        printf("[TEST]   Data: %d/%d, SQ: %d/%d, CQ: %d/%d, MSI: %d/%d\n",
+               data_pass, NUM_IO_REQS, sq_pass, NUM_SQ_REQS,
+               cq_pass, NUM_CQ_REQS, msi_pass, NUM_MSI_REQS);
         if (pass_count == NUM_REQUESTS) {
-            printf("[TEST] PASS: All %d mixed packets (IO+MSI) translated correctly!\n", NUM_REQUESTS);
+            printf("[TEST] PASS: All %d mixed packets translated correctly!\n", NUM_REQUESTS);
         } else {
             printf("[TEST] FAIL: Some packets failed translation!\n");
         }
 
         // ============================================================
-        // 场景13专属统计
+        // [场景13-v4] 输入模式验证: 确认是否严格按照11个任务一组输入
         // ============================================================
-        printf("\n========== Scene 13 MSI Mixed Statistics ==========\n");
-        printf("  MSI requests injected: %d\n", NUM_MSI_REQS);
+        printf("\n[TEST] Input Pattern Verification:\n");
+        int pattern_violations = 0;
+        int expected_group_size = 11;  // 8 Data + 1 SQ + 1 CQ + 1 MSI
+        int total_groups = NUM_REQUESTS / expected_group_size;
+        
+        // 验证每组是否严格按照 8 Data + 1 SQ + 1 CQ + 1 MSI 的顺序
+        for (int g = 0; g < NUM_GROUPS; g++) {
+            int base_idx = g * expected_group_size;
+            
+            // 检查前8个是否为Data (req_type=0)
+            for (int i = 0; i < 8; i++) {
+                if (base_idx + i < NUM_REQUESTS && req_type[base_idx + i] != 0) {
+                    printf("[TEST] VIOLATION: Group %d, position %d: expected Data(0), got %d\n",
+                           g, i, req_type[base_idx + i]);
+                    pattern_violations++;
+                }
+            }
+            
+            // 检查第9个是否为SQ (req_type=1)
+            if (base_idx + 8 < NUM_REQUESTS && req_type[base_idx + 8] != 1) {
+                printf("[TEST] VIOLATION: Group %d, position 8: expected SQ(1), got %d\n",
+                       g, req_type[base_idx + 8]);
+                pattern_violations++;
+            }
+            
+            // 检查第10个是否为CQ (req_type=2)
+            if (base_idx + 9 < NUM_REQUESTS && req_type[base_idx + 9] != 2) {
+                printf("[TEST] VIOLATION: Group %d, position 9: expected CQ(2), got %d\n",
+                       g, req_type[base_idx + 9]);
+                pattern_violations++;
+            }
+            
+            // 检查第11个是否为MSI (req_type=3)
+            if (base_idx + 10 < NUM_REQUESTS && req_type[base_idx + 10] != 3) {
+                printf("[TEST] VIOLATION: Group %d, position 10: expected MSI(3), got %d\n",
+                       g, req_type[base_idx + 10]);
+                pattern_violations++;
+            }
+        }
+        
+        if (pattern_violations == 0) {
+            printf("[TEST] PASS: Input pattern strictly follows 11-task groups (8 Data + 1 SQ + 1 CQ + 1 MSI)\n");
+            printf("[TEST]   Total groups: %d, Tasks per group: %d\n", NUM_GROUPS, expected_group_size);
+        } else {
+            printf("[TEST] FAIL: Found %d pattern violations\n", pattern_violations);
+        }
+
+        // ============================================================
+        // [场景13-v4] 专属统计 (所有任务均计入IOPS)
+        // ============================================================
+        printf("\n========== Scene 13-v4 Mixed Statistics ==========\n");
+        printf("  Total requests (IOPS counted): %d\n", NUM_REQUESTS);
+        printf("    - 512B Data tasks:  %d (%.2f%%)\n", NUM_IO_REQS, 100.0 * NUM_IO_REQS / NUM_REQUESTS);
+        printf("    - 32B SQ tasks:     %d (%.2f%%)\n", NUM_SQ_REQS, 100.0 * NUM_SQ_REQS / NUM_REQUESTS);
+        printf("    - 16B CQ tasks:     %d (%.2f%%)\n", NUM_CQ_REQS, 100.0 * NUM_CQ_REQS / NUM_REQUESTS);
+        printf("    - 4B MSI tasks:     %d (%.2f%%)\n", NUM_MSI_REQS, 100.0 * NUM_MSI_REQS / NUM_REQUESTS);
         printf("  MSIPT Cache: hit=%lu, miss=%lu (hit rate %.1f%%)\n",
                (unsigned long)g_msipt_cache_hit_count, (unsigned long)g_msipt_cache_miss_count,
                (g_msipt_cache_hit_count + g_msipt_cache_miss_count) > 0 ?
@@ -504,7 +765,7 @@ void RP_Module::send_translation_request_1_thread()
         delete[] trans_array;
         delete[] ext_array;
         delete[] expected_pa;
-        delete[] req_is_msi;
+        delete[] req_type;
 
         printf("\n[TEST] Scene 13 mixed test completed!\n");
 
@@ -526,6 +787,13 @@ void RP_Module::send_translation_request_1_thread()
             printf("  Peak Valid Count:   %u entries\n", dedup_buf->get_peak_valid_count());
             printf("  Current Valid:      %u entries\n", dedup_buf->get_valid_count());
             printf("  Peak Usage:         %.1f%%\n", 100.0 * dedup_buf->get_peak_valid_count() / PT_DEDUP_BUFFER_SIZE);
+            printf("  Buffer Full Bypass: %lu tasks\n", (unsigned long)iommu_ptr->cache_sub.get_dedup_buffer_full_bypass_count());
+            // [STAT] buffer任务持有延时: 从申请(allocate_entry)到PTW完成释放(free_entry)
+            printf("  --- Buffer Task Hold Time (alloc -> PTW-done free) ---\n");
+            printf("    Avg hold:  %.1f ns\n", dedup_buf->get_avg_hold_ns());
+            printf("    Max hold:  %.1f ns\n", dedup_buf->get_max_hold_ns());
+            printf("    Min hold:  %.1f ns\n", dedup_buf->get_min_hold_ns());
+            printf("    Samples:   %lu\n", (unsigned long)dedup_buf->get_hold_count());
             printf("==================================================\n");
         }
 

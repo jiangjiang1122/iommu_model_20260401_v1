@@ -36,15 +36,22 @@ void iommu_top::reorder_register_task(iommu_task_t* task) {
     reorder_buf[task->task_id] = entry;
     if (is_write) {
         reorder_write_order.push(task->task_id);
+        iommu_write_outstanding++;
+        if (iommu_write_outstanding > peak_iommu_write_outstanding)
+            peak_iommu_write_outstanding = iommu_write_outstanding;
+    } else {
+        iommu_read_outstanding++;
+        if (iommu_read_outstanding > peak_iommu_read_outstanding)
+            peak_iommu_read_outstanding = iommu_read_outstanding;
     }
     iommu_global_outstanding++;
     if (iommu_global_outstanding > peak_iommu_global_outstanding)
         peak_iommu_global_outstanding = iommu_global_outstanding;
     reorder_mtx.unlock();
 
-    printf("[REORDER] register task_id=%u, %s, global_outstanding=%d\n",
+    printf("[REORDER] register task_id=%u, %s, global_outstanding=%d (read=%d, write=%d)\n",
            task->task_id, is_write ? "WRITE" : "READ",
-           iommu_global_outstanding);
+           iommu_global_outstanding, iommu_read_outstanding, iommu_write_outstanding);
     fflush(stdout);
 }
 
@@ -207,42 +214,54 @@ void iommu_top::reorder_output_thread() {
                    axi_master_0_to_pcie_noc_outstanding);
             fflush(stdout);
 
-            // [PERF] reorder_output 无需串行延时，出口速率由 master_0 带宽模型控制
-            send_response_to_initiator(task);
-            iommu_total_completed++;  // [STAT] IOMMU 完成翻译计数
-            // [STAT] 累加端到端延时 (parser入口 -> reorder出口)
-            double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
-            iommu_total_e2e_latency_ns += e2e_ns;
-            // [STAT] IOMMU e2e延时最大最小值追踪
-            if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
-            if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
-            iommu_e2e_values.push_back(e2e_ns);
+            // [流水线延时] sc_spawn独立进程: 400ns后发送响应并记录统计
+            // 每个请求独立计时，不同请求并行不阻塞
+            sc_spawn([this, task]() {
+                wait(IOMMU_OUTPUT_PIPELINE_DELAY_NS, SC_NS);
+                send_response_to_initiator(task);
 
-            // [STAT] IOMMU输出端口任务间隔采样
-            {
-                double out_ts_ns = sc_time_stamp().to_seconds() * 1e9;
-                if (iommu_out_last_ns > 0.0) {
-                    double out_interval = out_ts_ns - iommu_out_last_ns;
-                    iommu_out_interval_total_ns += out_interval;
-                    if (out_interval > iommu_out_interval_max_ns) iommu_out_interval_max_ns = out_interval;
-                    if (out_interval < iommu_out_interval_min_ns) iommu_out_interval_min_ns = out_interval;
-                    iommu_out_interval_count++;
-                    iommu_out_interval_values.push_back(out_interval);
+                // [STAT] IOMMU 完成翻译计数
+                iommu_total_completed++;
+
+                // [STAT] 累加端到端延时
+                double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
+                iommu_total_e2e_latency_ns += e2e_ns;
+                if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
+                if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
+                iommu_e2e_values.push_back(e2e_ns);
+
+                // [STAT] IOMMU输出端口任务间隔采样
+                {
+                    double out_ts_ns = sc_time_stamp().to_seconds() * 1e9;
+                    if (iommu_out_last_ns > 0.0) {
+                        double out_interval = out_ts_ns - iommu_out_last_ns;
+                        iommu_out_interval_total_ns += out_interval;
+                        if (out_interval > iommu_out_interval_max_ns) iommu_out_interval_max_ns = out_interval;
+                        if (out_interval < iommu_out_interval_min_ns) iommu_out_interval_min_ns = out_interval;
+                        iommu_out_interval_count++;
+                        iommu_out_interval_values.push_back(out_interval);
+                        iommu_out_interval_end_ns.push_back(out_ts_ns);  // [STAT需求1] 记录该间隔结束时刻(稳态窗口筛选)
+                    }
+                    iommu_out_last_ns = out_ts_ns;
                 }
-                iommu_out_last_ns = out_ts_ns;
-            }
 
-            // [STAT] 稳态IOPS采样：记录稳态开始/结束时刻
-            if (steady_start_ns == 0.0 && steady_start_count > 0 &&
-                iommu_total_completed >= steady_start_count) {
-                steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
-                ptw_steady_start_completed = ptw_total_completed;
-            }
-            if (steady_end_ns == 0.0 && steady_end_count > 0 &&
-                iommu_total_completed >= steady_end_count) {
-                steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
-                ptw_steady_end_completed = ptw_total_completed;
-            }
+                // [STAT] 稳态IOPS采样
+                if (steady_start_ns == 0.0 && steady_start_count > 0 &&
+                    iommu_total_completed >= steady_start_count) {
+                    steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
+                    ptw_steady_start_completed = ptw_total_completed;
+                }
+                if (steady_end_ns == 0.0 && steady_end_count > 0 &&
+                    iommu_total_completed >= steady_end_count) {
+                    steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
+                    ptw_steady_end_completed = ptw_total_completed;
+                }
+
+                // task 释放
+                if (!task->is_b_transport) {
+                    delete task;
+                }
+            });
 
             // ===== Bandwidth control: master_0 port (翻译输出) =====
             // delay_ns = 1000 * length * 8 / bandwidth_mbps
@@ -258,16 +277,24 @@ void iommu_top::reorder_output_thread() {
             // 标记完成
             task->state = TASK_DONE;
 
-            // 释放 IOMMU 全局 outstanding
+            // 释放 IOMMU 全局 outstanding + 读写分离 outstanding
             reorder_mtx.lock();
             if (iommu_global_outstanding > 0) iommu_global_outstanding--;
+            bool task_is_write = (task->read_writeAMO == WRITE);
+            if (task_is_write) {
+                if (iommu_write_outstanding > 0) iommu_write_outstanding--;
+            } else {
+                if (iommu_read_outstanding > 0) iommu_read_outstanding--;
+            }
             reorder_mtx.unlock();
             iommu_global_outstanding_freed_event.notify(SC_ZERO_TIME);
-
-            // task 释放（b_transport 路径由发起方释放）
-            if (!task->is_b_transport) {
-                delete task;
+            if (task_is_write) {
+                iommu_write_outstanding_freed_event.notify(SC_ZERO_TIME);
+            } else {
+                iommu_read_outstanding_freed_event.notify(SC_ZERO_TIME);
             }
+
+            // [流水线延时] task删除和响应发送已移至sc_spawn独立进程
         }
 
         // 若本轮无任何输出，等待下一次 ready 通知

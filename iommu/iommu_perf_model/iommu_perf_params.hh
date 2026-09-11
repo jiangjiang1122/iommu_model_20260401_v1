@@ -116,6 +116,12 @@ static const uint32_t PTW_MAX_OUTSTANDING_TASKS = TEST_CFG_PTW_MAX_OUTSTANDING_T
 #endif
 static const uint32_t PTW_REQ_PIPELINE_DELAY_NS = 30;         // PTW请求流水延时(ns, PEQ)
 static const uint32_t PTW_RSP_PIPELINE_DELAY_NS = 2;         // PTW响应流水延时(ns, PEQ)
+// [流水线延时] 三阶段硬件流水线建模
+static const uint32_t IOMMU_INPUT_PIPELINE_DELAY_NS  = 200;  // AXI slave接收任务流水延时(ns)
+// [聚合刷新] PTW完成后处理聚合任务(刷新去重buffer/去重cache/PT Cache)流水延时(ns)
+//   PEQ非阻塞并行计时, 不计入PTW任务执行时间(PTW已输出且并发已释放)
+static const uint32_t IOMMU_AGG_FLUSH_PIPELINE_DELAY_NS = 200;
+static const uint32_t IOMMU_OUTPUT_PIPELINE_DELAY_NS = 400;  // 翻译完成到AXI master输出流水延时(ns)
 static const uint32_t MSIPTW_MAX_OUTSTANDING_TASKS = 64;     // MSIPTW总outstanding任务数
 
 // ===================== PTW模块参数 =====================
@@ -228,6 +234,19 @@ static const uint32_t FORWARDER_DELAY = 2;          // Forwarder转发延迟
 static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = 256;
 #else
 static const uint32_t IOMMU_GLOBAL_MAX_OUTSTANDING = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
+#endif
+// [场景13] 读写分离 outstanding 上限:
+//   写任务上限 265, 读任务上限 243, 合计 508。
+//   经 Makefile -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=N / -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=N 覆盖。
+#ifndef TEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING
+static const uint32_t IOMMU_WRITE_MAX_OUTSTANDING = 265;
+#else
+static const uint32_t IOMMU_WRITE_MAX_OUTSTANDING = TEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING;
+#endif
+#ifndef TEST_CFG_IOMMU_READ_MAX_OUTSTANDING
+static const uint32_t IOMMU_READ_MAX_OUTSTANDING = 243;
+#else
+static const uint32_t IOMMU_READ_MAX_OUTSTANDING = TEST_CFG_IOMMU_READ_MAX_OUTSTANDING;
 #endif
 // 重排序输出每次发送的延迟(ns)
 static const uint32_t REORDER_OUTPUT_DELAY = 1;

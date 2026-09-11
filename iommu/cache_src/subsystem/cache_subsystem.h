@@ -97,6 +97,13 @@ public:
     // NEW: PT Cache去重功能接口
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
+    uint64_t get_dedup_buffer_full_bypass_count() const { return dedup_buffer_full_bypass_count_; }
+    // [FIX] Buffer满时等待PTW并发释放的机制:
+    // - ptw_capacity_check_cb_: 回调函数, 检查PTW是否有空闲并发槽位
+    // - dedup_buffer_full_event_: 事件, PTW每完成一个任务时notify
+    using PtwCapacityCheck = std::function<bool()>;
+    void set_ptw_capacity_check(PtwCapacityCheck cb) { ptw_capacity_check_cb_ = std::move(cb); }
+    sc_event& get_dedup_buffer_full_event() { return dedup_buffer_full_event_; }
     void set_pt_dedup_enabled(bool enabled) { pt_dedup_enabled_ = enabled; }
 
     // [重构] 绑定转发 FIFO(iommu_top::pt_cache_to_fwd_fifo), 供 dedup_update 刷新 Buffer 时转发任务
@@ -144,6 +151,13 @@ public:
 
     // [STAT] 打印32任务组统计报告
     void print_pt_group_report() const;
+
+    // [STAT] DC Cache 查询间隔统计访问器
+    double   get_dc_query_interval_avg_ns() const { return dc_query_interval_count_ > 0 ? dc_query_interval_total_ns_ / dc_query_interval_count_ : 0.0; }
+    double   get_dc_query_interval_max_ns() const { return dc_query_interval_max_ns_; }
+    double   get_dc_query_interval_min_ns() const { return dc_query_interval_min_ns_ == 999999999.0 ? 0.0 : dc_query_interval_min_ns_; }
+    uint64_t get_dc_query_interval_count() const { return dc_query_interval_count_; }
+    uint64_t get_dc_query_total_count() const { return dc_query_total_count_; }
 
 private:
     GlobalConfig cfg_;
@@ -341,6 +355,28 @@ private:
     uint64_t dedup_prefetch_dropped_ = 0;
     // [STAT] Buffer满旁路计数: Buffer<全局outstanding时, Buffer满则任务旁路直转PTW(防死锁)
     uint64_t dedup_buffer_full_bypass_count_ = 0;
+    // [STAT需求2] 去重Cache命中率统计(execute_dedup_request的lookup)
+    uint64_t dedup_lookup_total_ = 0;      // 全部lookup次数(主任务请求+预取占位)
+    uint64_t dedup_lookup_hit_ = 0;        // 命中占位CL次数(line!=nullptr)
+    uint64_t dedup_lookup_miss_ = 0;       // 未命中次数(line==nullptr)
+    uint64_t dedup_req_lookup_total_ = 0;  // 主任务去重请求(!dedup_is_prefetch)lookup次数
+    uint64_t dedup_req_lookup_hit_ = 0;    // 主任务去重请求命中次数
+    uint64_t dedup_req_lookup_miss_ = 0;   // 主任务去重请求未命中次数
+    // [FIX] Buffer满时dedup worker阻塞等待PTW并发释放的事件
+    // PTW每完成一个任务时由iommu_top调用notify, dedup worker在此事件上wait
+    sc_event dedup_buffer_full_event_;
+    // [FIX] PTW并发容量检查回调: 返回true表示PTW有空闲槽位
+    PtwCapacityCheck ptw_capacity_check_cb_;
+
+    // ============================================================
+    // [STAT] DC Cache 查询完成时间间隔统计
+    // ============================================================
+    double   dc_query_last_end_ns_ = 0.0;       // 上一次查询完成时刻(ns)
+    double   dc_query_interval_total_ns_ = 0.0; // 间隔总和(ns)
+    double   dc_query_interval_max_ns_ = 0.0;   // 最大间隔(ns)
+    double   dc_query_interval_min_ns_ = 999999999.0; // 最小间隔(ns)
+    uint64_t dc_query_interval_count_ = 0;      // 间隔采样次数
+    uint64_t dc_query_total_count_ = 0;         // DC查询总次数
 
     // ============================================================
     // [多RAM] PT Cache 多 RAM 方案状态与统计

@@ -21,7 +21,10 @@
     "num_sets": 64,
     "num_ways": 4,
     "replacement": "plru",
-    "read_set_latency_cycles": 0
+    "arbiter_latency_cycles": 0,
+    "hash_latency_cycles": 0,
+    "read_set_latency_cycles": 1,
+    "compare_latency_cycles": 1
   },
 
   "pc_cache": {

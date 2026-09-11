@@ -28,11 +28,32 @@ void iommu_top::collector_pt_response_thread() {
         // =====================================================================
         iommu::CacheMessage resp;
         while (cache_sub.pt_hit_response_fifo.nb_read(resp)) {
+            // [STAT] PT Cache 输出间隔统计
+            pt_cache_out_total_count++;
+            {
+                const double out_ns = sc_time_stamp().to_seconds() * 1e9;
+                if (pt_cache_out_last_ns > 0.0) {
+                    double interval = out_ns - pt_cache_out_last_ns;
+                    pt_cache_out_interval_total_ns += interval;
+                    if (interval > pt_cache_out_interval_max_ns)
+                        pt_cache_out_interval_max_ns = interval;
+                    if (interval < pt_cache_out_interval_min_ns)
+                        pt_cache_out_interval_min_ns = interval;
+                    pt_cache_out_interval_count++;
+                }
+                pt_cache_out_last_ns = out_ns;
+            }
+            
             pt_cache_mtx.lock();
             if (pt_cache_pending_tasks.find(resp.task_id) != pt_cache_pending_tasks.end()) {
                 iommu_task_t* task = pt_cache_pending_tasks[resp.task_id];
                 pt_cache_pending_tasks.erase(resp.task_id);
                 pt_cache_mtx.unlock();
+
+                // [STAT] 控制包(SQ/CQ/MSI) PT Cache 命中统计
+                if (task->is_ctrl) {
+                    ctrl_pt_cache_hit_count++;
+                }
 
                 // [重构] 区分两类 pt_hit_response:
                 //   dedup_suspended=false: PT Cache 常规CL HIT -> 转换并转发 Forwarder
@@ -92,6 +113,22 @@ void iommu_top::collector_pt_response_thread() {
         // 这里发送PTW请求,触发PTW walk + Burst预取
         // =====================================================================
         while (cache_sub.pt_miss_response_fifo.nb_read(resp)) {
+            // [STAT] PT Cache 输出间隔统计
+            pt_cache_out_total_count++;
+            {
+                const double out_ns = sc_time_stamp().to_seconds() * 1e9;
+                if (pt_cache_out_last_ns > 0.0) {
+                    double interval = out_ns - pt_cache_out_last_ns;
+                    pt_cache_out_interval_total_ns += interval;
+                    if (interval > pt_cache_out_interval_max_ns)
+                        pt_cache_out_interval_max_ns = interval;
+                    if (interval < pt_cache_out_interval_min_ns)
+                        pt_cache_out_interval_min_ns = interval;
+                    pt_cache_out_interval_count++;
+                }
+                pt_cache_out_last_ns = out_ns;
+            }
+            
             printf("[PT_CACHE] task_id=%u -> MISS response received\n", resp.task_id);
             fflush(stdout);
 
@@ -100,6 +137,14 @@ void iommu_top::collector_pt_response_thread() {
                 iommu_task_t* task = pt_cache_pending_tasks[resp.task_id];
                 pt_cache_pending_tasks.erase(resp.task_id);
                 pt_cache_mtx.unlock();
+
+                // [STAT] 控制包(SQ/CQ/MSI) PT Cache 缺失统计
+                if (task->is_ctrl) {
+                    ctrl_pt_cache_miss_count++;
+                    printf("[STAT_CTRL] task_id=%u is_ctrl=%u PT Cache MISS -> entering dedup/PTW\n",
+                           task->task_id, task->is_ctrl);
+                    fflush(stdout);
+                }
 
                 // Convert CacheMessage response to task
                 pt_miss_response_to_task(resp, task);

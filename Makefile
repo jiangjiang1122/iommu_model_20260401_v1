@@ -119,8 +119,9 @@ else ifeq ($(TEST), seq512b_2mb_twostage_s2on_128g)
                  -DTEST_CFG_SKIP_PHASE1=1
 else ifeq ($(TEST), rand4k_twostage_s2on_128g)
     # 场景7: 4KB随机读(16MB IOVA范围) + 两阶段 + S2开启 + 128GB/s入口/出口
-    #   全局并发512 + Buffer512 + PTW并发24(可用 make SCENE7_PTW=N 覆盖调参) + D=3预取(随机IOVA下预取失效) + 10000包(1250页x8)
+    #   全局并发512 + Buffer512(可用 make SCENE7_BUFFER=N 覆盖) + PTW并发24(可用 make SCENE7_PTW=N 覆盖调参) + D=3预取(随机IOVA下预取失效) + 10000包(1250页x8)
     SCENE7_PTW ?= 24
+    SCENE7_BUFFER ?= 512
     TEST_THREAD_SRC = rp/test_rp_rand4k_two_stage_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
@@ -129,6 +130,7 @@ else ifeq ($(TEST), rand4k_twostage_s2on_128g)
                  -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
                  -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE7_PTW) \
+                 -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE7_BUFFER) \
                  -DTEST_CFG_NUM_PAGES=1250
 else ifeq ($(TEST), rand4k_twostage_s2on_128g_inval)
     # 场景10: 场景7 + 运行期随机穿插 DC/PC/PT/Walker 缓存失效命令
@@ -186,24 +188,29 @@ else ifeq ($(TEST), virt_strict_twostage)
                  -DTEST_CFG_NUM_PAGES=1250 \
                  -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
 else ifeq ($(TEST), rand4k_msi_mix_s2on_128g)
-    # 场景13(混合性能): 4KB随机读写 + MSI 混合负载, 两阶段 + S2开启
-    #   128GB/s入口/出口 + 全局并发512 + Buffer可配(默认512, 当前266) + PT/Dedup双多RAM(4组)
-    #   + PTW并发27(可 make SCENE13_PTW=N 覆盖) + D=3预取 + 10000包(8888 IO + 1112 MSI)
-    #   激励: 每组 = 1个4KB随机读写任务(8x512B连续) + 1个MSI任务(4B写, vector随机);
-    #   MSI IOVA随机不连续且与16MB普通IOVA范围完全不重合, MSI窗口GPA与普通GPA不重合。
-    #   Buffer<全局并发时, execute_dedup_request在Buffer满时旁路直转PTW(防死锁)。
+    # 场景13-v4(混合性能): 4KB随机读写 + SQ/CQ/MSI 混合负载, 两阶段 + S2开启
+    #   128GB/s入口/出口 + 读写分离并发(写265+读243=508) + Buffer267
+    #   + PT/Dedup双多RAM(4组) + PTW并发27(可 make SCENE13_PTW=N 覆盖) + D=3预取
+    #   [v4] 系统级任务奇读偶写交替: 偶数组=8x512B全读, 奇数组=8x512B全写
+    #   [v4] SQ改为32B读请求(原为写)
+    #   [v4] SQ/CQ经预热后100%命中PT Cache, 不进dedup/PTW
+    #   每组 = 8x512B Data + 1x32B SQ读 + 1x16B CQ写 + 1x4B MSI写 = 11包
+    #   909组 x 11包 + 1 MSI = 10000包 (Data 7272 + SQ 909 + CQ 909 + MSI 910)
+    #   IOPS只统计Data任务(is_ctrl=0), SQ/CQ/MSI(is_ctrl=1)不计入
     SCENE13_PTW ?= 27
-    SCENE13_BUFFER ?= 266
+    SCENE13_BUFFER ?= 267
     TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
                  -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
                  -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
-                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=512 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=508 \
+                 -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=265 \
+                 -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=243 \
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
                  -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
-                 -DTEST_CFG_NUM_PAGES=1111
+                 -DTEST_CFG_NUM_PAGES=909
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)

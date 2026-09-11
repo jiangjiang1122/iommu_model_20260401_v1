@@ -397,6 +397,21 @@ void CacheSubsystem::dc_scheduler_thread() {
             record_task_completion("dc_cache", start, sc_time_stamp());
             trace_task_event("end", "dc_cache", "lookup", req, start, &resp);
             push_fifo(dc_response_fifo, resp);
+            
+            // [STAT] DC Cache 查询完成时间间隔统计
+            dc_query_total_count_++;
+            const double end_ns = sc_time_stamp().to_seconds() * 1e9;
+            if (dc_query_last_end_ns_ > 0.0) {
+                double interval = end_ns - dc_query_last_end_ns_;
+                dc_query_interval_total_ns_ += interval;
+                if (interval > dc_query_interval_max_ns_)
+                    dc_query_interval_max_ns_ = interval;
+                if (interval < dc_query_interval_min_ns_)
+                    dc_query_interval_min_ns_ = interval;
+                dc_query_interval_count_++;
+            }
+            dc_query_last_end_ns_ = end_ns;
+            
             continue;
         }
         wait(dc_invalidate_fifo.data_written_event() |
@@ -1281,6 +1296,17 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
     printf("    Dropped (inside_fifo full): %lu\n", (unsigned long)dedup_prefetch_dropped_);
     printf("  [Buffer Full Bypass]\n");
     printf("    Bypass to PTW count:        %lu\n", (unsigned long)dedup_buffer_full_bypass_count_);
+    // [STAT需求2] 去重Cache命中率(总查询/命中/未命中)
+    printf("  [去重Cache命中率 (execute_dedup_request lookup)]\n");
+    printf("    总查询(lookup):            %lu\n", (unsigned long)dedup_lookup_total_);
+    printf("    命中(占位CL存在):          %lu\n", (unsigned long)dedup_lookup_hit_);
+    printf("    未命中:                    %lu\n", (unsigned long)dedup_lookup_miss_);
+    printf("    总命中率:                  %.2f%%\n",
+           dedup_lookup_total_ > 0 ? 100.0 * dedup_lookup_hit_ / dedup_lookup_total_ : 0.0);
+    printf("    主任务去重请求:            %lu (命中 %lu, 未命中 %lu, 命中率 %.2f%%)\n",
+           (unsigned long)dedup_req_lookup_total_, (unsigned long)dedup_req_lookup_hit_,
+           (unsigned long)dedup_req_lookup_miss_,
+           dedup_req_lookup_total_ > 0 ? 100.0 * dedup_req_lookup_hit_ / dedup_req_lookup_total_ : 0.0);
 
     // 并发吞吐
     if (window_ns > 0) {
@@ -1903,6 +1929,14 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
     uint64_t page_iova = req.iova & ~0xFFFULL;
     DedupCacheLine* line = dedup_cache_->lookup(req.gscid, req.pscid, page_iova);
 
+    // [STAT需求2] 去重Cache命中率统计: 每次lookup计一次访问, line!=nullptr为命中
+    dedup_lookup_total_++;
+    if (line != nullptr) dedup_lookup_hit_++; else dedup_lookup_miss_++;
+    if (!req.dedup_is_prefetch) {  // 主任务去重请求(非预取占位)
+        dedup_req_lookup_total_++;
+        if (line != nullptr) dedup_req_lookup_hit_++; else dedup_req_lookup_miss_++;
+    }
+
     if (line != nullptr) {
         // ============ HIT 占位CL ============
         if (line->is_req) {
@@ -1912,13 +1946,22 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 
             uint16_t new_idx = dedup_buffer_->allocate_entry();
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                // [Buffer满旁路] Buffer < 全局outstanding时可能满: 不阻塞(防死锁环),
-                // 任务旁路直转PTW, PTW完成时不刷Buffer(链上已挂任务照常刷新)
+                // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
+                // 避免通过多级FIFO转发后再在PTW入口阻塞, 直接在源头控制流量
+                while (ptw_capacity_check_cb_ && !ptw_capacity_check_cb_()) {
+                    printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (main placeholder HIT), PTW full, waiting...\n",
+                           (unsigned)req.task_id);
+                    fflush(stdout);
+                    wait(dedup_buffer_full_event_);
+                }
+                // PTW有空闲槽位, 执行bypass
                 dedup_buffer_full_bypass_count_++;
                 resp.hit = false;
                 resp.dedup_bypass = true;
-                resp.prefetch_enabled = false;
-                resp.prefetch_depth = 0;
+                // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
+                //   组标记is_bypass, 刷新时跳过dedup_update(不碰去重cache/buffer), 仅更新PT Cache并直接转发主任务
+                resp.prefetch_enabled = req.prefetch_enabled;
+                resp.prefetch_depth = req.prefetch_depth;
                 printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (main placeholder HIT), bypass to PTW (bypass_count=%lu)\n",
                        (unsigned)req.task_id, (unsigned long)dedup_buffer_full_bypass_count_);
                 fflush(stdout);
@@ -1951,12 +1994,21 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             // -------- 分支2: 预取占位CL (is_req=0) 升级为主占位 --------
             uint16_t new_idx = dedup_buffer_->allocate_entry();
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
-                // [Buffer满旁路] 同主占位分支: 不阻塞, 旁路直转PTW(预取占位保持不变)
+                // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
+                while (ptw_capacity_check_cb_ && !ptw_capacity_check_cb_()) {
+                    printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (prefetch placeholder HIT), PTW full, waiting...\n",
+                           (unsigned)req.task_id);
+                    fflush(stdout);
+                    wait(dedup_buffer_full_event_);
+                }
+                // PTW有空闲槽位, 执行bypass
                 dedup_buffer_full_bypass_count_++;
                 resp.hit = false;
                 resp.dedup_bypass = true;
-                resp.prefetch_enabled = false;
-                resp.prefetch_depth = 0;
+                // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
+                //   组标记is_bypass, 刷新时跳过dedup_update(不碰去重cache/buffer), 仅更新PT Cache并直接转发主任务
+                resp.prefetch_enabled = req.prefetch_enabled;
+                resp.prefetch_depth = req.prefetch_depth;
                 printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (prefetch placeholder HIT), bypass to PTW (bypass_count=%lu)\n",
                        (unsigned)req.task_id, (unsigned long)dedup_buffer_full_bypass_count_);
                 fflush(stdout);
@@ -1991,12 +2043,20 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         // ============ MISS ============
         uint16_t head_idx = dedup_buffer_->allocate_entry();
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
-            // [Buffer满旁路] MISS不插占位/不发起预取, 直接转PTW(防死锁, 仅损失去重收益)
+            // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
+            while (ptw_capacity_check_cb_ && !ptw_capacity_check_cb_()) {
+                printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (%u/%u, MISS), PTW full, waiting...\n",
+                       (unsigned)req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE);
+                fflush(stdout);
+                wait(dedup_buffer_full_event_);
+            }
+            // PTW有空闲槽位, 执行bypass
             dedup_buffer_full_bypass_count_++;
             resp.hit = false;
             resp.dedup_bypass = true;
-            resp.prefetch_enabled = false;
-            resp.prefetch_depth = 0;
+            // [bypass预取] bypass任务保留预取能力, PTW完成后走late-spawn预取(组标记is_bypass)
+            resp.prefetch_enabled = req.prefetch_enabled;
+            resp.prefetch_depth = req.prefetch_depth;
             printf("[DEDUP_CACHE_BYPASS] task_id=%u -> Buffer full (%u/%u, MISS), bypass to PTW (bypass_count=%lu)\n",
                    (unsigned)req.task_id, dedup_buffer_->get_valid_count(), PT_DEDUP_BUFFER_SIZE,
                    (unsigned long)dedup_buffer_full_bypass_count_);
@@ -2063,8 +2123,10 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 dedup_buffer_->free_entry(head_idx);
                 resp.hit = false;
                 resp.dedup_bypass = true;
-                resp.prefetch_enabled = false;
-                resp.prefetch_depth = 0;
+                // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
+                //   组标记is_bypass, 刷新时跳过dedup_update(不碰去重cache/buffer), 仅更新PT Cache并直接转发主任务
+                resp.prefetch_enabled = req.prefetch_enabled;
+                resp.prefetch_depth = req.prefetch_depth;
                 printf("[DEDUP_CACHE_FALLBACK] task_id=%u -> insert FAILED (all ways protected), fallback to direct PTW\n",
                        (unsigned)req.task_id);
                 fflush(stdout);

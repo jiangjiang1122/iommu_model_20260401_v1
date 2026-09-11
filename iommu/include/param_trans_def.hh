@@ -16,6 +16,7 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
     , dstAddr       (0)
     , io_id(-1)
     , sequence_id(-1)
+    , is_ctrl(0)
     {
     }
 
@@ -26,6 +27,7 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         e->dstAddr         = dstAddr       ;
         e->io_id = io_id;
         e->sequence_id =sequence_id;
+        e->is_ctrl = is_ctrl;
         return e;
     }
 
@@ -35,6 +37,7 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         dstAddr = e.dstAddr;
         io_id = e.io_id;
         sequence_id=e.sequence_id;
+        is_ctrl = e.is_ctrl;
     }
 
     virtual void copy_from(tlm::tlm_extension_base const&ext)
@@ -94,6 +97,9 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
     uint16_t segment_num;
     uint8_t ds_valid;
     uint8_t dsegmemt;
+
+    // [场景13] 控制包标记: 1=SQ/CQ/MSI(不计入IOPS), 0=Data(512B, 计入IOPS)
+    uint32_t is_ctrl;
 };
 
 class NocTransaction;

@@ -171,6 +171,7 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
     task->priv_req = ext->priv_req;
     task->no_write = ext->no_write;
     task->is_cxl_dev = 0;
+    task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
     task->iova = trans.get_address();
     task->length = trans.get_data_length();
     task->read_writeAMO = (trans.get_command() == tlm::TLM_READ_COMMAND) ? READ : WRITE;
@@ -204,16 +205,22 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
     tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
 {
     if (phase == tlm::BEGIN_REQ) {
-        // ===== Bandwidth control: slave port accept delay =====
-        // delay_ns = 1000 * length * 8 / bandwidth_mbps
-        unsigned int data_len = trans.get_data_length();
-        slave_0_total_bytes += data_len;  // [STAT] 入口字节计数
-        double slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_0_BANDWIDTH_MBPS;
-        wait(slave_bw_delay_ns, SC_NS);
-
-        // 1. Extract PayloadExtention
+        // 1. Extract PayloadExtention FIRST (needed for delay calculation)
         PayloadExtention* ext = nullptr;
         trans.get_extension(ext);
+
+        // ===== Bandwidth control: slave port accept delay =====
+        // [v5] 512B data -> 4ns (128GB/s), ctrl(SQ/CQ/MSI) -> 2ns fixed
+        unsigned int data_len = trans.get_data_length();
+        slave_0_total_bytes += data_len;  // [STAT] 入口字节计数
+        double slave_bw_delay_ns;
+        bool is_ctrl_packet = (ext && ext->is_ctrl);
+        if (is_ctrl_packet) {
+            slave_bw_delay_ns = 2.0;  // 控制包固定2ns
+        } else {
+            slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_0_BANDWIDTH_MBPS;
+        }
+        wait(slave_bw_delay_ns, SC_NS);
 
         // 2. Create task and fill fields
         iommu_task_t* task = new iommu_task_t();
@@ -235,6 +242,7 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
             task->priv_req = ext->priv_req;
             task->no_write = ext->no_write;
             task->is_cxl_dev = 0;
+            task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
 
             if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
             else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
@@ -244,8 +252,21 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         task->timestamp = sc_time_stamp();
         task->state = TASK_INIT;
 
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数
+        if (task->is_ctrl) {
+            ctrl_total_count++;
+            // 基于固定IOVA区分SQ/CQ/MSI (场景13约定)
+            if (task->iova == 0x5000000) {
+                ctrl_sq_count++;
+            } else if (task->iova == 0x5001000) {
+                ctrl_cq_count++;
+            } else {
+                ctrl_msi_count++;  // MSI请求
+            }
+        }
+
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
-        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo [t=%.1f ns]\n",
+        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> input_pipeline_peq [t=%.1f ns]\n",
                task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
 
@@ -257,11 +278,16 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
             if (in_interval < iommu_in_interval_min_ns) iommu_in_interval_min_ns = in_interval;
             iommu_in_interval_count++;
             iommu_in_interval_values.push_back(in_interval);
+            iommu_in_interval_end_ns.push_back(ts_ns);  // [STAT需求1] 记录该间隔结束时刻(稳态窗口筛选)
         }
         iommu_in_last_ns = ts_ns;
 
-        // 3. Push to inbound_fifo
-        inbound_fifo.write(task);
+        // [流水线延时] sc_spawn独立进程: 200ns后写入inbound_fifo
+        // 每个请求独立计时，不同请求并行不阻塞
+        sc_spawn([this, task]() {
+            wait(IOMMU_INPUT_PIPELINE_DELAY_NS, SC_NS);
+            inbound_fifo.write(task);
+        });
 
         // 4. Return END_REQ (request accepted)
         phase = tlm::END_REQ;
@@ -557,9 +583,9 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     
     // [NEW] Phase 1: 启用预取功能 (使用配置参数PT_DEDUP_PREFETCH_DEPTH)
     // D=0表示关闭预取，D>0表示启用预取
-    // [MSI] MSI使能设备禁用预取: MSI命中后跳过S2与PT回填, 预取组/dedup链无法正确flush
-    if (!task->walk_ctx.prefetch_enabled && PT_DEDUP_PREFETCH_DEPTH > 0 &&
-        task->DC.msiptp.MODE == MSIPTP_Off) {
+    // [v6] MSI设备也开启预取: 普通Data任务正常预取(late-spawn);
+    //      MSI任务在PTW识别后禁用预取并清理dedup占位(见iommu_perf_ptw.cc)
+    if (!task->walk_ctx.prefetch_enabled && PT_DEDUP_PREFETCH_DEPTH > 0) {
         task->walk_ctx.prefetch_enabled = true;
         task->walk_ctx.prefetch_depth = PT_DEDUP_PREFETCH_DEPTH;
         printf("[CONFIGURE] task_id=%u -> Prefetch enabled (D=%u)\n",
@@ -754,6 +780,19 @@ void iommu_top::print_cache_statistics() {
 
     // [STAT] PT Scheduler任务间隔分析
     cache_sub.print_pt_scheduler_gap_report();
+
+    // [STAT] DC Cache 查询完成时间间隔统计
+    {
+        printf("========== DC Cache Query Interval Statistics ==========\n");
+        printf("  Total DC queries:      %lu\n", (unsigned long)cache_sub.get_dc_query_total_count());
+        printf("  Interval samples:      %lu\n", (unsigned long)cache_sub.get_dc_query_interval_count());
+        if (cache_sub.get_dc_query_interval_count() > 0) {
+            printf("  Avg query interval:    %.2f ns\n", cache_sub.get_dc_query_interval_avg_ns());
+            printf("  Max query interval:    %.2f ns\n", cache_sub.get_dc_query_interval_max_ns());
+            printf("  Min query interval:    %.2f ns\n", cache_sub.get_dc_query_interval_min_ns());
+        }
+        printf("==========================================================\n\n");
+    }
 
     // [STAT] 32任务组REQUEST排队/执行延时统计
     cache_sub.print_pt_group_report();
@@ -1005,10 +1044,34 @@ void iommu_top::print_cache_statistics() {
             printf("  ---\n");
             printf("  PTW DDR reads distribution (MAIN tasks, count=%lu):\n",
                    (unsigned long)ptw_main_task_count);
-            printf("    %-12s %-8s %-8s %-12s\n", "DDR_reads", "count", "percent", "avg_reads");
             if (ptw_main_task_count > 0) {
-                printf("    %-12s %-8s %-8s %.2f\n", "-", "-", "-",
-                       (double)ptw_main_total_ddr_reads / ptw_main_task_count);
+                printf("    Avg DDR reads:  %.2f\n", (double)ptw_main_total_ddr_reads / ptw_main_task_count);
+                printf("    Max DDR reads:  %u\n", ptw_main_max_ddr_reads);
+                printf("    Min DDR reads:  %u\n", ptw_main_min_ddr_reads == 999999 ? 0 : ptw_main_min_ddr_reads);
+                // [STAT需求3] 主任务两阶段DDR访问分解 + 预取启动前DDR次数
+                if (ptw_main_stage_count > 0) {
+                    printf("    [两阶段分解] 第一阶段(iova->gpa,VS_WALK) avg DDR: %.3f\n",
+                           (double)ptw_main_vs_ddr_sum / ptw_main_stage_count);
+                    printf("    [两阶段分解] 第二阶段(gpa->spa,GS_*)     avg DDR: %.3f\n",
+                           (double)ptw_main_gs_ddr_sum / ptw_main_stage_count);
+                    printf("    [两阶段分解] AD_UPDATE                   avg DDR: %.3f\n",
+                           (double)ptw_main_ad_ddr_sum / ptw_main_stage_count);
+                    printf("    [两阶段分解] 合计(VS+GS+AD) avg DDR/主任务: %.3f (样本主任务=%lu)\n",
+                           (double)(ptw_main_vs_ddr_sum + ptw_main_gs_ddr_sum + ptw_main_ad_ddr_sum) / ptw_main_stage_count,
+                           (unsigned long)ptw_main_stage_count);
+                }
+                if (ptw_spawn_start_ddr_count > 0) {
+                    printf("    [预取启动] 主任务访问DDR几次后启动预取 (spawn事件=%lu): 平均 %.3f\n",
+                           (unsigned long)ptw_spawn_start_ddr_count,
+                           (double)ptw_spawn_start_ddr_sum / ptw_spawn_start_ddr_count);
+                    if (ptw_early_spawn_cnt > 0)
+                        printf("      early-spawn(walker hit@L0): %.3f DDR后启动 (count=%lu)\n",
+                               (double)ptw_early_spawn_ddr_sum / ptw_early_spawn_cnt, (unsigned long)ptw_early_spawn_cnt);
+                    if (ptw_late_spawn_cnt > 0)
+                        printf("      late-spawn(GS leaf完成后):  %.3f DDR后启动 (count=%lu)\n",
+                               (double)ptw_late_spawn_ddr_sum / ptw_late_spawn_cnt, (unsigned long)ptw_late_spawn_cnt);
+                }
+                printf("    %-12s %-8s %-8s\n", "DDR_reads", "count", "percent");
                 for (auto& [ddr_cnt, cnt] : ptw_main_ddr_reads_distribution) {
                     printf("    %-12u %-8u %.2f%%\n",
                            ddr_cnt, cnt, (double)cnt / ptw_main_task_count * 100.0);
@@ -1019,10 +1082,11 @@ void iommu_top::print_cache_statistics() {
             printf("  ---\n");
             printf("  PTW DDR reads distribution (PREFETCH tasks, count=%lu):\n",
                    (unsigned long)ptw_prefetch_task_count);
-            printf("    %-12s %-8s %-8s %-12s\n", "DDR_reads", "count", "percent", "avg_reads");
             if (ptw_prefetch_task_count > 0) {
-                printf("    %-12s %-8s %-8s %.2f\n", "-", "-", "-",
-                       (double)ptw_prefetch_total_ddr_reads / ptw_prefetch_task_count);
+                printf("    Avg DDR reads:  %.2f\n", (double)ptw_prefetch_total_ddr_reads / ptw_prefetch_task_count);
+                printf("    Max DDR reads:  %u\n", ptw_prefetch_max_ddr_reads);
+                printf("    Min DDR reads:  %u\n", ptw_prefetch_min_ddr_reads == 999999 ? 0 : ptw_prefetch_min_ddr_reads);
+                printf("    %-12s %-8s %-8s\n", "DDR_reads", "count", "percent");
                 for (auto& [ddr_cnt, cnt] : ptw_prefetch_ddr_reads_distribution) {
                     printf("    %-12u %-8u %.2f%%\n",
                            ddr_cnt, cnt, (double)cnt / ptw_prefetch_task_count * 100.0);
@@ -1091,6 +1155,29 @@ void iommu_top::print_cache_statistics() {
                 }
             }
             
+            // [STAT] PTW任务组DDR读次数统计 (1主+D预取为一组)
+            if (ptw_group_exec_count > 0) {
+                printf("  ---\n");
+                printf("  PTW Task Group DDR Reads Statistics (per group, 1 main + D prefetch):\n");
+                printf("    Avg DDR reads/group: %.2f\n",
+                       (double)ptw_group_total_ddr_reads / ptw_group_exec_count);
+                printf("    Max DDR reads/group: %u\n", ptw_group_max_ddr_reads);
+                printf("    Min DDR reads/group: %u\n",
+                       ptw_group_min_ddr_reads == 999999 ? 0 : ptw_group_min_ddr_reads);
+                // 组DDR读次数分布直方图
+                std::map<uint32_t, uint32_t> ddr_dist;
+                for (auto v : ptw_group_ddr_values) {
+                    ddr_dist[v]++;
+                }
+                printf("    Group DDR reads distribution:\n");
+                printf("      %-12s %-8s %-8s\n", "ddr_reads", "count", "percent");
+                for (auto& [ddr_cnt, cnt] : ddr_dist) {
+                    printf("      %-12u %-8u %.2f%%\n",
+                           ddr_cnt, cnt,
+                           (double)cnt / ptw_group_ddr_values.size() * 100.0);
+                }
+            }
+            
             // [STAT] 导出输出间隔数据到CSV文件, 用于Python绘制波动曲线
             {
                 FILE* fp = fopen("ptw_output_intervals.csv", "w");
@@ -1139,6 +1226,23 @@ void iommu_top::print_cache_statistics() {
                     printf("  Task latency data exported to: ptw_task_latency.csv (%zu samples)\n",
                            ptw_task_latency_values.size());
                 }
+            }
+            // [STAT] 预取分析报告
+            printf("  ---\n");
+            printf("  Prefetch Analysis Report:\n");
+            printf("    Main tasks entering PTW:           %lu\n", (unsigned long)ptw_main_task_count);
+            printf("    Late-spawn triggered:              %lu\n", (unsigned long)ptw_late_spawn_triggered);
+            printf("    Late-spawn skipped (MSI):          %lu\n", (unsigned long)ptw_late_spawn_skipped_msi);
+            printf("    Late-spawn skipped (bypass):       %lu\n", (unsigned long)ptw_late_spawn_skipped_bypass);
+            printf("    Prefetch tasks spawned (total):    %lu\n", (unsigned long)ptw_prefetch_spawned_total);
+            printf("    Prefetch tasks completed:          %lu\n", (unsigned long)ptw_prefetch_task_count);
+            if (ptw_late_spawn_triggered > 0) {
+                printf("    Avg prefetch per triggered main:   %.2f (target D=3)\n",
+                       (double)ptw_prefetch_spawned_total / ptw_late_spawn_triggered);
+            }
+            if (ptw_main_task_count > 0) {
+                printf("    Late-spawn trigger rate:           %.1f%%\n",
+                       100.0 * ptw_late_spawn_triggered / ptw_main_task_count);
             }
             // [STAT] 导出任务组执行时间到CSV文件
             if (ptw_group_exec_count > 0) {
@@ -1200,6 +1304,29 @@ void iommu_top::print_cache_statistics() {
                    theory_iops, AXI_SLAVE_0_BANDWIDTH_MBPS / 8000.0);
             printf("  Efficiency:           %.1f%%\n", steady_iops / theory_iops * 100.0);
 
+            // [STAT需求1] 稳态窗口[#start~#end]内的输入/输出端口平均间隔
+            {
+                double in_sum = 0.0; uint64_t in_cnt = 0;
+                for (size_t i = 0; i < iommu_in_interval_values.size() && i < iommu_in_interval_end_ns.size(); i++) {
+                    if (iommu_in_interval_end_ns[i] >= steady_start_ns && iommu_in_interval_end_ns[i] <= steady_end_ns) {
+                        in_sum += iommu_in_interval_values[i]; in_cnt++;
+                    }
+                }
+                double out_sum = 0.0; uint64_t out_cnt = 0;
+                for (size_t i = 0; i < iommu_out_interval_values.size() && i < iommu_out_interval_end_ns.size(); i++) {
+                    if (iommu_out_interval_end_ns[i] >= steady_start_ns && iommu_out_interval_end_ns[i] <= steady_end_ns) {
+                        out_sum += iommu_out_interval_values[i]; out_cnt++;
+                    }
+                }
+                printf("  ---\n");
+                printf("  [需求1] 稳态窗口内端口注入平均间隔 (window [%.1f, %.1f] ns):\n",
+                       steady_start_ns, steady_end_ns);
+                printf("    输入端口平均间隔(稳态): %.3f ns  (samples=%lu)\n",
+                       in_cnt > 0 ? in_sum / in_cnt : 0.0, (unsigned long)in_cnt);
+                printf("    输出端口平均间隔(稳态): %.3f ns  (samples=%lu)\n",
+                       out_cnt > 0 ? out_sum / out_cnt : 0.0, (unsigned long)out_cnt);
+            }
+
             // PTW Steady IOPS
             if (ptw_steady_end_completed > ptw_steady_start_completed && steady_duration_ns > 0) {
                 uint64_t ptw_steady_tasks = ptw_steady_end_completed - ptw_steady_start_completed;
@@ -1260,10 +1387,53 @@ void iommu_top::print_cache_statistics() {
     }
     printf("=========================================================\n\n");
 
+    // PT Cache 输出间隔统计
+    printf("========== PT Cache Output Interval Statistics ==========\n");
+    printf("  Total PT Cache outputs:  %lu (HIT + MISS)\n", (unsigned long)pt_cache_out_total_count);
+    if (pt_cache_out_interval_count > 0) {
+        printf("  Avg output interval:   %.2f ns\n", pt_cache_out_interval_total_ns / pt_cache_out_interval_count);
+        printf("  Max output interval:   %.2f ns\n", pt_cache_out_interval_max_ns);
+        printf("  Min output interval:   %.2f ns\n", pt_cache_out_interval_min_ns);
+        printf("  Sample count:          %lu\n", (unsigned long)pt_cache_out_interval_count);
+    } else {
+        printf("  (no samples)\n");
+    }
+    printf("==========================================================\n\n");
+
+    // SQ/CQ/MSI PT Cache 命中统计
+    printf("========== SQ/CQ/MSI PT Cache Hit Statistics ==========\n");
+    printf("  Control packets (SQ+CQ+MSI) total:  %lu\n", (unsigned long)ctrl_total_count);
+    printf("    SQ count:   %lu\n", (unsigned long)ctrl_sq_count);
+    printf("    CQ count:   %lu\n", (unsigned long)ctrl_cq_count);
+    printf("    MSI count:  %lu\n", (unsigned long)ctrl_msi_count);
+    printf("  PT Cache HIT (bypass dedup/PTW):    %lu\n", (unsigned long)ctrl_pt_cache_hit_count);
+    printf("  PT Cache MISS (enter dedup/PTW):    %lu\n", (unsigned long)ctrl_pt_cache_miss_count);
+    if (ctrl_total_count > 0) {
+        printf("  PT Cache hit rate for ctrl:       %.2f%%\n", 
+               100.0 * ctrl_pt_cache_hit_count / ctrl_total_count);
+    }
+    printf("=========================================================\n\n");
+
+    // PTW 任务数占入口任务数比例
+    printf("========== PTW Task Ratio Statistics ==========\n");
+    printf("  IOMMU input tasks (total):    %lu\n", (unsigned long)(iommu_total_completed + peak_iommu_global_outstanding));
+    printf("  PTW completed tasks:          %lu\n", (unsigned long)ptw_total_completed);
+    printf("    Main tasks:                 %lu\n", (unsigned long)ptw_main_task_count);
+    printf("    Prefetch tasks:             %lu\n", (unsigned long)ptw_prefetch_task_count);
+    if (iommu_total_completed > 0) {
+        printf("  PTW/IOMMU ratio:              %.2f%%\n", 
+               100.0 * ptw_total_completed / iommu_total_completed);
+    }
+    printf("================================================\n\n");
+
     // Outstanding Peak Statistics
     printf("========== Outstanding Peak Statistics ==========\n");
     printf("  %-30s peak=%4d / max=%4d\n", "IOMMU Global:",
            peak_iommu_global_outstanding,  (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "IOMMU Read (场景13):",
+           peak_iommu_read_outstanding,    (int)IOMMU_READ_MAX_OUTSTANDING);
+    printf("  %-30s peak=%4d / max=%4d\n", "IOMMU Write (场景13):",
+           peak_iommu_write_outstanding,   (int)IOMMU_WRITE_MAX_OUTSTANDING);
     printf("  %-30s peak=%4d / max=%4d\n", "PTW:",
            peak_ptw_outstanding,            (int)PTW_MAX_OUTSTANDING_TASKS);
     printf("  %-30s peak=%4d / max=%4d\n", "xDTW DC walk:",
