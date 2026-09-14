@@ -36,20 +36,28 @@ using namespace std;
 //   不进入去重cache及后续PTW模块。
 // ============================================================
 
-// ---- 场景13 MSI常量 ----
+// ---- 场景13 MSI/SQ/CQ 地址常量 ----
 static const uint64_t S13_MSI_MASK      = 0xFF;
-static const uint64_t S13_MSI_PATTERN   = 0x3000;
-static const uint64_t S13_MSI_GPA_BASE  = S13_MSI_PATTERN << 12;  // 0x3000000 (48MB)
+#ifdef TEST_CFG_S13_IOVA_512MB
+// [512MB新测试项] 数据IOVA扩至512MB(1~513MB), MSI/SQ/CQ的IOVA与GPA均移到数据区之上避免重叠
+static const uint64_t S13_MSI_PATTERN   = 0x7000;      // MSI窗口GPA=0x7000000(112MB, 避开数据GPA 0~100MB)
+static const uint64_t S13_MSI_IOVA_BASE = 0x21000000;  // MSI IOVA区基址(528MB, 避开数据IOVA 1~513MB)
+static const uint64_t S13_SQ_IOVA       = 0x22000000;  // SQ固定IOVA(544MB)
+static const uint64_t S13_CQ_IOVA       = 0x22001000;  // CQ固定IOVA
+static const uint64_t S13_SQ_CQ_GPA     = 0x8000000;   // SQ/CQ共用GPA区(128MB, 避开数据100MB/MSI112MB)
+#else
+// [16MB原测试项] 原地址布局(保持不变)
+static const uint64_t S13_MSI_PATTERN   = 0x3000;      // MSI窗口GPA=0x3000000(48MB)
+static const uint64_t S13_MSI_IOVA_BASE = 0x2000000;   // MSI IOVA区基址(32MB)
+static const uint64_t S13_SQ_IOVA       = 0x5000000;   // SQ固定IOVA(80MB)
+static const uint64_t S13_CQ_IOVA       = 0x5001000;   // CQ固定IOVA
+static const uint64_t S13_SQ_CQ_GPA     = 0x4000000;   // SQ/CQ共用GPA区(64MB, 避开Data/MSI)
+#endif
+static const uint64_t S13_MSI_GPA_BASE  = S13_MSI_PATTERN << 12;  // MSI窗口GPA基址
 static const int      S13_MSI_VECTORS   = 256;                    // mask=0xFF -> 256 vectors
 static const uint64_t S13_FLAT_PPN_BASE = 0x1000;                 // Flat输出物理页基址(16MB)
-static const uint64_t S13_MSI_IOVA_BASE = 0x2000000;              // MSI IOVA区基址(32MB)
 static const int      S13_MSI_IOVA_CAND = 1024;                   // MSI IOVA候选页数(4MB区域)
 static const uint64_t S13_MSI_OFFSET    = 0x40;                   // MSI写页内偏移
-
-// [场景13-v4] SQ/CQ 固定IOVA地址(稳态100%命中PT Cache)
-static const uint64_t S13_SQ_IOVA       = 0x5000000;              // SQ固定IOVA(32B读)
-static const uint64_t S13_CQ_IOVA       = 0x5001000;              // CQ固定IOVA(16B写)
-static const uint64_t S13_SQ_CQ_GPA     = 0x4000000;              // SQ/CQ共用GPA区(64MB, 避开Data/MSI)
 static const int      S13_MSI_FIXED_VEC = 0;                      // MSI固定vector=0(稳态命中)
 
 // 写一笔16字节MSI PTE到设备MSI页表
@@ -86,10 +94,15 @@ void RP_Module::send_translation_request_1_thread()
         //   G-stage页表页: GPPN 0x10000+ (256MB GPA), 避开MSI窗口
         // ============================================================
         const uint64_t IOVA_BASE   = 0x100000;         // 1MB aligned base
-        const uint64_t RANGE_16MB  = 0x1000000;        // 16MB
+#ifdef TEST_CFG_S13_IOVA_512MB
+        const uint64_t IOVA_RANGE  = 0x20000000;       // [512MB新测试项] 512MB IOVA数据随机范围
+        const int NUM_GPA_HUGEPAGES = 50;              // [512MB] 50个2MB大页GPA(100MB)
+#else
+        const uint64_t IOVA_RANGE  = 0x1000000;        // [16MB原测试项] 16MB
+        const int NUM_GPA_HUGEPAGES = 20;              // [16MB] 20个2MB大页GPA(40MB)
+#endif
         const uint64_t HUGE_PAGE_SZ = 0x200000;        // 2MB (GPA大页粒度)
         const uint64_t SPA_OFFSET  = 0x80000000;       // SPA = GPA + 固定偏移(2MB对齐)
-        const int NUM_GPA_HUGEPAGES = 20;              // 20个2MB大页GPA
         const int SLOTS_PER_HUGEPAGE = (int)(HUGE_PAGE_SZ / 0x1000);  // 512个4KB slot
         // [场景化] 默认909组; Makefile传入TEST_CFG_NUM_PAGES=909
         // 每组 = 8 Data(512B) + 1 SQ(32B) + 1 CQ(16B) + 1 MSI(4B) = 11包
@@ -106,11 +119,11 @@ void RP_Module::send_translation_request_1_thread()
         const int NUM_CQ_REQS      = NUM_GROUPS;                  // CQ请求数(不计入IOPS)
         const int NUM_MSI_REQS     = NUM_GROUPS + 1;              // MSI请求数(末尾补1个, 不计入IOPS)
         const int NUM_REQUESTS     = NUM_IO_REQS + NUM_SQ_REQS + NUM_CQ_REQS + NUM_MSI_REQS;  // 总包数
-        const int TOTAL_PAGES_IN_RANGE = (int)(RANGE_16MB / 0x1000);  // 4096
+        const int TOTAL_PAGES_IN_RANGE = (int)(IOVA_RANGE / 0x1000);  // 4096(16MB) / 131072(512MB)
 
         printf("\n[TEST] Scene 13-v2 Mixed Load Construction (Data+SQ+CQ+MSI):\n");
-        printf("[TEST]   Normal IOVA range: 0x%lx ~ 0x%lx (16MB, %d pages, ALL mapped)\n",
-               IOVA_BASE, IOVA_BASE + RANGE_16MB, TOTAL_PAGES_IN_RANGE);
+        printf("[TEST]   Normal IOVA range: 0x%lx ~ 0x%lx (%dMB, %d pages)\n",
+               IOVA_BASE, IOVA_BASE + IOVA_RANGE, (int)(IOVA_RANGE >> 20), TOTAL_PAGES_IN_RANGE);
         printf("[TEST]   SQ fixed IOVA:     0x%lx (32B write, is_ctrl=1)\n", S13_SQ_IOVA);
         printf("[TEST]   CQ fixed IOVA:     0x%lx (16B write, is_ctrl=1)\n", S13_CQ_IOVA);
         printf("[TEST]   MSI fixed IOVA:    0x%lx (vector=%d, 4B write, is_ctrl=1)\n",
@@ -268,6 +281,34 @@ void RP_Module::send_translation_request_1_thread()
         srand(42);
         vector<int> iova_huge(TOTAL_PAGES_IN_RANGE, 0);
         vector<int> iova_slot(TOTAL_PAGES_IN_RANGE, 0);
+#ifdef TEST_CFG_S13_IOVA_512MB
+        // [512MB] 部分映射: 仅映射被访问页(909数据页 + 各自D个预取相邻页), 多对一随机GPA。
+        //   原因: IOVA页(131072) >> GPA slot(50×512=25600)无法一对一; 且全量映射会产生海量
+        //   add_vs_stage_pte调试printf。仅映射数据页+预取页即可保证主/预取任务iova→gpa→spa全有效。
+        {
+            set<uint64_t> accessed_pages;
+            for (int k = 0; k < PAGES_NEEDED; k++) {
+                uint64_t base = IOVA_BASE + (uint64_t)page_indices[k] * 0x1000;
+                for (int d = 0; d <= (int)TEST_CFG_PT_DEDUP_PREFETCH_DEPTH; d++) {
+                    uint64_t pg = base + (uint64_t)d * 0x1000;
+                    if (pg < IOVA_BASE + IOVA_RANGE) accessed_pages.insert(pg);
+                }
+            }
+            for (uint64_t pg : accessed_pages) {
+                int idx = (int)((pg - IOVA_BASE) / 0x1000);
+                int h = rand() % NUM_GPA_HUGEPAGES;          // 随机GPA大页(多对一)
+                int slot = rand() % SLOTS_PER_HUGEPAGE;      // 随机slot
+                iova_huge[idx] = h;
+                iova_slot[idx] = slot;
+                uint64_t gpa_page = (uint64_t)h * HUGE_PAGE_SZ + (uint64_t)slot * 0x1000;
+                pte6.PPN = gpa_page / PAGESIZE;
+                fail_if((add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, pg, pte6, 0, DC6.iohgatp, 0) == (uint64_t)-1));
+            }
+            printf("[TEST]   512MB partial-mapped %zu accessed pages (data+prefetch) onto %d GPA hugepages (many-to-one)\n",
+                   accessed_pages.size(), NUM_GPA_HUGEPAGES);
+        }
+#else
+        // [16MB] 全量一对一映射(原逻辑不变)
         int slot_counter[20] = {0};
         for (int i = 0; i < TOTAL_PAGES_IN_RANGE; i++) {
             int h = rand() % NUM_GPA_HUGEPAGES;
@@ -287,6 +328,7 @@ void RP_Module::send_translation_request_1_thread()
         }
         printf("[TEST]   Mapped all %d normal VS-stage pages onto %d G-stage 2MB hugepages\n",
                TOTAL_PAGES_IN_RANGE, NUM_GPA_HUGEPAGES);
+#endif
 
         // ============================================================
         // VS-stage: MSI页映射 (MSI IOVA -> MSI窗口GPA, 无S2映射)
@@ -325,6 +367,27 @@ void RP_Module::send_translation_request_1_thread()
 
             printf("[TEST]   SQ/CQ fixed mapping: SQ IOVA=0x%lx->GPA=0x%lx, CQ IOVA=0x%lx->GPA=0x%lx\n",
                    S13_SQ_IOVA, sq_gpa, S13_CQ_IOVA, cq_gpa);
+
+            // [FIX] SQ/CQ预取相邻页映射: 控制包偶发PT Cache miss(冷启动)后进PTW会late-spawn预取,
+            //   预取页(SQ/CQ_IOVA + 4KB×d)若未映射会导致VS PTE invalid skip。
+            //   此处将这些相邻页映射到数据GPA区(G-stage大页已全覆盖), 保证预取PTE有效、无skip。
+            {
+                set<uint64_t> ctrl_pf_pages;
+                for (int d = 1; d <= (int)TEST_CFG_PT_DEDUP_PREFETCH_DEPTH; d++) {
+                    ctrl_pf_pages.insert(S13_SQ_IOVA + (uint64_t)d * 0x1000);
+                    ctrl_pf_pages.insert(S13_CQ_IOVA + (uint64_t)d * 0x1000);
+                }
+                for (uint64_t pg : ctrl_pf_pages) {
+                    if (pg == S13_SQ_IOVA || pg == S13_CQ_IOVA) continue;  // 跳过SQ/CQ本身(已映射)
+                    int h = rand() % NUM_GPA_HUGEPAGES;
+                    int slot = rand() % SLOTS_PER_HUGEPAGE;
+                    uint64_t gpa_page = (uint64_t)h * HUGE_PAGE_SZ + (uint64_t)slot * 0x1000;
+                    pte6.PPN = gpa_page / PAGESIZE;
+                    fail_if((add_vs_stage_pte(iommu_ptr, DC6.fsc.iosatp, pg, pte6, 0, DC6.iohgatp, 0) == (uint64_t)-1));
+                }
+                printf("[TEST]   Mapped %zu SQ/CQ prefetch-adjacent pages (avoid VS PTE invalid on ctrl miss)\n",
+                       ctrl_pf_pages.size());
+            }
         }
 
         // Invalidate caches
@@ -361,6 +424,12 @@ void RP_Module::send_translation_request_1_thread()
                 warmup_tr->set_command(TLM_WRITE_COMMAND);
                 PayloadExtention* warmup_ext = new PayloadExtention();
                 warmup_ext->requester_id = 0x0A;
+                warmup_ext->pid_valid = 0;   // [FIX] 显式初始化(构造函数未初始化这些字段, 避免垃圾值导致cause=260预热fault)
+                warmup_ext->process_id = 0;
+                warmup_ext->exec_req = 0;
+                warmup_ext->priv_req = 0;
+                warmup_ext->no_write = 0;
+                warmup_ext->at = 0;
                 warmup_ext->is_ctrl = 1;
                 warmup_tr->set_extension(warmup_ext);
                 sc_time delay = SC_ZERO_TIME;
@@ -398,6 +467,12 @@ void RP_Module::send_translation_request_1_thread()
                 sq_tr->set_command(TLM_READ_COMMAND);
                 PayloadExtention* sq_ext = new PayloadExtention();
                 sq_ext->requester_id = 0x0A;
+                sq_ext->pid_valid = 0;   // [FIX] 显式初始化(避免预热fault)
+                sq_ext->process_id = 0;
+                sq_ext->exec_req = 0;
+                sq_ext->priv_req = 0;
+                sq_ext->no_write = 1;    // SQ: 32B读
+                sq_ext->at = 0;
                 sq_ext->is_ctrl = 1;
                 sq_tr->set_extension(sq_ext);
                 sc_time sq_delay = SC_ZERO_TIME;
@@ -413,6 +488,12 @@ void RP_Module::send_translation_request_1_thread()
                 cq_tr->set_command(TLM_WRITE_COMMAND);
                 PayloadExtention* cq_ext = new PayloadExtention();
                 cq_ext->requester_id = 0x0A;
+                cq_ext->pid_valid = 0;   // [FIX] 显式初始化(避免预热fault)
+                cq_ext->process_id = 0;
+                cq_ext->exec_req = 0;
+                cq_ext->priv_req = 0;
+                cq_ext->no_write = 0;    // CQ: 16B写
+                cq_ext->at = 0;
                 cq_ext->is_ctrl = 1;
                 cq_tr->set_extension(cq_ext);
                 sc_time cq_delay = SC_ZERO_TIME;
@@ -788,6 +869,11 @@ void RP_Module::send_translation_request_1_thread()
             printf("  Current Valid:      %u entries\n", dedup_buf->get_valid_count());
             printf("  Peak Usage:         %.1f%%\n", 100.0 * dedup_buf->get_peak_valid_count() / PT_DEDUP_BUFFER_SIZE);
             printf("  Buffer Full Bypass: %lu tasks\n", (unsigned long)iommu_ptr->cache_sub.get_dedup_buffer_full_bypass_count());
+            // [STAT需求] buffer实际占用率(时间加权平均): 反映buffer真实使用强度
+            printf("  --- Buffer 实际占用率 (时间加权平均) ---\n");
+            printf("    Avg Occupancy:    %.2f entries / %u (%.2f%%)\n",
+                   dedup_buf->get_avg_occupancy(), PT_DEDUP_BUFFER_SIZE, dedup_buf->get_avg_occupancy_pct());
+            printf("    Occupancy window: %.1f ns\n", dedup_buf->get_occupancy_window_ns());
             // [STAT] buffer任务持有延时: 从申请(allocate_entry)到PTW完成释放(free_entry)
             printf("  --- Buffer Task Hold Time (alloc -> PTW-done free) ---\n");
             printf("    Avg hold:  %.1f ns\n", dedup_buf->get_avg_hold_ns());

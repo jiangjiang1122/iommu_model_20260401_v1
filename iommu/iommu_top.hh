@@ -237,6 +237,14 @@ public:
     int peak_collector_dc_walk_outstanding; // Collector DC walk outstanding峰值
     int peak_collector_pc_walk_outstanding; // Collector PC walk outstanding峰值
     int peak_axi_master_1_outstanding;     // DDR端口outstanding峰值
+    // [STAT] DDR端口(axi_master_1, 访问页表/目录表)读写分离并发统计
+    //   并发定义: 每发一笔请求++, 每收一组response--; 读=页表/目录表walk, 写=A/D位更新+MSI MRIF
+    int      axi_master_1_read_outstanding = 0;       // 当前读并发
+    int      axi_master_1_write_outstanding = 0;      // 当前写并发
+    int      peak_axi_master_1_read_outstanding = 0;  // 读并发峰值
+    int      peak_axi_master_1_write_outstanding = 0; // 写并发峰值
+    uint64_t axi_master_1_read_req_total = 0;         // 读请求总数
+    uint64_t axi_master_1_write_req_total = 0;        // 写请求总数
     int peak_axi_master_0_outstanding;     // 出口端口outstanding峰值
 
     // ===================== [STAT] 平均并发统计(Little's Law) =====================

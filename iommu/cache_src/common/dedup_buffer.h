@@ -72,7 +72,19 @@ struct DedupBuffer {
     uint64_t         hold_count = 0;
     double           max_hold_ns = 0.0;
     double           min_hold_ns = 1e18;
-    
+    // [STAT需求] buffer实际占用率(时间加权平均): occupancy_integral_ = Σ valid_count×Δt
+    double           occupancy_integral_ = 0.0;  // 单位 entry·ns
+    double           last_change_ns_ = -1.0;     // 上次valid_count变化时刻
+    double           first_change_ns_ = -1.0;    // 首次valid_count变化时刻
+
+    // [STAT需求] 结算时间加权占用积分(在valid_count变化前调用, 用旧值×Δt)
+    void settle_occupancy() {
+        double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (first_change_ns_ < 0.0) { first_change_ns_ = now_ns; last_change_ns_ = now_ns; return; }
+        occupancy_integral_ += (double)valid_count * (now_ns - last_change_ns_);
+        last_change_ns_ = now_ns;
+    }
+
     /**
      * @brief 分配Entry（按顺序线性查找第一个空闲）
      * @return Entry索引（0~255），失败返回0xFF
@@ -89,6 +101,7 @@ struct DedupBuffer {
                 entries[i].clear();
                 entries[i].valid = 1;
                 entries[i].alloc_time_ns = sc_time_stamp().to_seconds() * 1e9;  // [STAT] 记录申请时刻
+                settle_occupancy();  // [STAT需求] 结算占用积分(变化前)
                 valid_count++;
                 if (valid_count > peak_valid_count) peak_valid_count = valid_count;
                 return static_cast<uint16_t>(i);  // 返回索引（0, 1, 2, ...顺序）
@@ -115,6 +128,7 @@ struct DedupBuffer {
                 if (hold_ns < min_hold_ns) min_hold_ns = hold_ns;
             }
             entries[idx].clear();
+            settle_occupancy();  // [STAT需求] 结算占用积分(变化前)
             valid_count--;
             // [P5] 通知反压等待者：有Buffer Entry被释放
             free_event.notify(SC_ZERO_TIME);
@@ -136,6 +150,15 @@ struct DedupBuffer {
     uint64_t get_hold_count() const { return hold_count; }
     double   get_max_hold_ns() const { return max_hold_ns; }
     double   get_min_hold_ns() const { return hold_count > 0 ? min_hold_ns : 0.0; }
+    // [STAT需求] buffer实际占用率(时间加权平均) getters
+    double   get_avg_occupancy() const {
+        double span = last_change_ns_ - first_change_ns_;
+        return span > 0.0 ? occupancy_integral_ / span : 0.0;
+    }
+    double   get_avg_occupancy_pct() const { return get_avg_occupancy() / PT_DEDUP_BUFFER_SIZE * 100.0; }
+    double   get_occupancy_window_ns() const {
+        return (first_change_ns_ >= 0.0 && last_change_ns_ > first_change_ns_) ? (last_change_ns_ - first_change_ns_) : 0.0;
+    }
     
     /**
      * @brief 重置Buffer（清空所有Entry）

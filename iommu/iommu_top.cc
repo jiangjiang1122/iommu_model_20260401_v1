@@ -255,7 +255,16 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         // [STAT] 控制包(SQ/CQ/MSI)入口计数
         if (task->is_ctrl) {
             ctrl_total_count++;
-            // 基于固定IOVA区分SQ/CQ/MSI (场景13约定)
+            // 基于固定IOVA区分SQ/CQ/MSI (场景13约定; 512MB测试项SQ/CQ IOVA上移至0x22000000/0x22001000)
+#ifdef TEST_CFG_S13_IOVA_512MB
+            if (task->iova == 0x22000000) {
+                ctrl_sq_count++;
+            } else if (task->iova == 0x22001000) {
+                ctrl_cq_count++;
+            } else {
+                ctrl_msi_count++;  // MSI请求
+            }
+#else
             if (task->iova == 0x5000000) {
                 ctrl_sq_count++;
             } else if (task->iova == 0x5001000) {
@@ -263,6 +272,7 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
             } else {
                 ctrl_msi_count++;  // MSI请求
             }
+#endif
         }
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
@@ -364,6 +374,9 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
 
         // Decrement axi_master_1 outstanding counter
         axi_master_1_to_cmn_rnd_outstanding--;
+        // [STAT] DDR端口读写分离并发: 收response时按is_write分别--
+        if (pending.is_write) axi_master_1_write_outstanding--;
+        else                  axi_master_1_read_outstanding--;
         printf("[DDR_RSP] axi_master_1 outstanding-- -> %d (task_id=%u, source=%d)\n",
                axi_master_1_to_cmn_rnd_outstanding, pending.task_id, pending.source_module);
         fflush(stdout);
@@ -467,6 +480,7 @@ void iommu_top::ddr_arbiter_thread() {
             pending.addr = req.addr;
             pending.size = req.size;
             pending.submit_time_ns = req.submit_time_ns;  // [STAT] 传递时间戳
+            pending.is_write = req.is_write;  // [STAT] 存读写标记, 供响应侧分离读写outstanding--
 
             // Allocate TLM payload
             tlm::tlm_generic_payload* trans = new tlm::tlm_generic_payload();
@@ -507,6 +521,18 @@ void iommu_top::ddr_arbiter_thread() {
             axi_master_1_to_cmn_rnd_outstanding++;
             if (axi_master_1_to_cmn_rnd_outstanding > peak_axi_master_1_outstanding)
                 peak_axi_master_1_outstanding = axi_master_1_to_cmn_rnd_outstanding;
+            // [STAT] DDR端口读写分离并发: 发请求时按is_write分别++并更新峰值
+            if (req.is_write) {
+                axi_master_1_write_outstanding++;
+                axi_master_1_write_req_total++;
+                if (axi_master_1_write_outstanding > peak_axi_master_1_write_outstanding)
+                    peak_axi_master_1_write_outstanding = axi_master_1_write_outstanding;
+            } else {
+                axi_master_1_read_outstanding++;
+                axi_master_1_read_req_total++;
+                if (axi_master_1_read_outstanding > peak_axi_master_1_read_outstanding)
+                    peak_axi_master_1_read_outstanding = axi_master_1_read_outstanding;
+            }
             printf("[DDR_ARBITER] axi_master_1 outstanding++ -> %d (task_id=%u)\n",
                    axi_master_1_to_cmn_rnd_outstanding, req.task_id);
             fflush(stdout);
@@ -1446,6 +1472,11 @@ void iommu_top::print_cache_statistics() {
            peak_collector_pc_walk_outstanding, (int)COLLECTOR_MAX_PC_WALK_OUTSTANDING);
     printf("  %-30s peak=%4d / max=%4d\n", "DDR (master_1):",
            peak_axi_master_1_outstanding,   (int)AXI_MASTER_1_TO_CMN_RND_MAX_OUTSTANDING);
+    // [STAT] DDR端口(axi_master_1, 访问页表/目录表)读写分离并发峰值
+    printf("  %-30s peak=%4d  (读请求总数=%lu)\n", "DDR master_1 READ(页表/目录):",
+           peak_axi_master_1_read_outstanding, (unsigned long)axi_master_1_read_req_total);
+    printf("  %-30s peak=%4d  (写请求总数=%lu)\n", "DDR master_1 WRITE(AD/MRIF):",
+           peak_axi_master_1_write_outstanding, (unsigned long)axi_master_1_write_req_total);
     printf("  %-30s peak=%4d / max=%4d\n", "Output (master_0):",
            peak_axi_master_0_outstanding,   (int)AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING);
     printf("=================================================\n\n");

@@ -382,6 +382,7 @@ struct ddr_pending_entry_t {
     uint32_t size;
     tlm::tlm_generic_payload* trans_ptr;
     double submit_time_ns;  // [STAT] DDR请求提交时间戳(ns)
+    bool is_write = false;  // [STAT] DDR读/写标记: 响应时据此分离读写outstanding--
 
     ddr_pending_entry_t() : task_id(0), source_module(0), addr(0),
                             size(0), trans_ptr(nullptr), submit_time_ns(0.0) {}

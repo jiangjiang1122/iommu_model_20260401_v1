@@ -189,7 +189,7 @@ else ifeq ($(TEST), virt_strict_twostage)
                  -DTEST_CFG_VMM_TRAP_NS=$(VIRT_TRAP_NS)
 else ifeq ($(TEST), rand4k_msi_mix_s2on_128g)
     # 场景13-v4(混合性能): 4KB随机读写 + SQ/CQ/MSI 混合负载, 两阶段 + S2开启
-    #   128GB/s入口/出口 + 读写分离并发(写265+读243=508) + Buffer267
+    #   128GB/s入口/出口 + 读写分离并发(写265+读243=508) + Buffer512(>全局outstanding508, 不满不bypass)
     #   + PT/Dedup双多RAM(4组) + PTW并发27(可 make SCENE13_PTW=N 覆盖) + D=3预取
     #   [v4] 系统级任务奇读偶写交替: 偶数组=8x512B全读, 奇数组=8x512B全写
     #   [v4] SQ改为32B读请求(原为写)
@@ -198,9 +198,29 @@ else ifeq ($(TEST), rand4k_msi_mix_s2on_128g)
     #   909组 x 11包 + 1 MSI = 10000包 (Data 7272 + SQ 909 + CQ 909 + MSI 910)
     #   IOPS只统计Data任务(is_ctrl=0), SQ/CQ/MSI(is_ctrl=1)不计入
     SCENE13_PTW ?= 27
-    SCENE13_BUFFER ?= 267
+    SCENE13_BUFFER ?= 512
     TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+                 -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
+                 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+                 -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+                 -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=508 \
+                 -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=265 \
+                 -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=243 \
+                 -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+                 -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+                 -DTEST_CFG_NUM_PAGES=909
+else ifeq ($(TEST), rand4k_msi_mix_s2on_128g_512mb)
+    # 场景13-v4-512MB(混合性能): IOVA数据随机范围扩大到512MB, GPA 50个2MB大页(100MB)
+    #   基于 rand4k_msi_mix_s2on_128g, 仅IOVA数据随机范围16MB->512MB、GPA大页20->50;
+    #   MSI/SQ/CQ的IOVA与GPA上移避免与512MB数据区重叠; VS部分映射(数据页+预取页,多对一随机GPA);
+    #   保证所有GPA->SPA有效(50大页G-stage全建), 主/预取任务PTE均有效。
+    SCENE13_PTW ?= 27
+    SCENE13_BUFFER ?= 512
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+                 -DTEST_CFG_S13_IOVA_512MB \
                  -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
                  -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 \
                  -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
