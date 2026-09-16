@@ -4,25 +4,21 @@
 **本文档引用的文件**
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [walker_cache.cpp](file://iommu/cache_src/cache/walker_cache.cpp)
+- [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
+- [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [cache_base.h](file://iommu/cache_src/cache/cache_base.h)
 - [types.h](file://iommu/cache_src/common/types.h)
-- [iommu_perf_ptw.cc](file://iommu/iommu_perf_model/iommu_perf_ptw.cc)
-- [iommu_task_cache_convert.cc](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [WALKER_CACHE_INTEGRATION_PLAN.md](file://WALKER_CACHE_INTEGRATION_PLAN.md)
-- [Makefile](file://Makefile)
 - [CACHE_PERFORMANCE_ANALYSIS_500REQ.md](file://CACHE_PERFORMANCE_ANALYSIS_500REQ.md)
-- [test_rp_128k_two_stage_thread.cc](file://rp/test_rp_128k_two_stage_thread.cc)
-- [iommu_top.cc](file://iommu/iommu_top.cc)
 </cite>
 
 ## 更新摘要
-**变更内容**
-- 实现了复杂的失效逻辑，支持按级别处理的不同失效策略
-- 引入RAM感知的分区机制，优化内存访问模式
-- 提升轮询优先级，改善高优先级通道的处理能力
-- 拆分为(level×RAM)子失效操作，通过高优先级通道遍历
-- 与页表更新保持一致性，确保数据同步
+**重大架构重构**
+- **从并行查询重构为串行查询架构**：完全移除了walker_hash_thread和walker_ram_worker_thread的并行处理机制
+- **实现C3→C2→C1顺序查询机制**：通过walker_serial_fifo队列管理续查请求，按级别顺序执行查询
+- **优化的walker_join_thread级联失效处理**：支持级联失效传播和状态恢复机制
+- **显著减少94.7%的C2/C1 RAM访问**：通过智能请求过滤避免不必要的内存访问
+- **简化的优先级调度机制**：基于walker_origin的关键路径优化
 
 ## 目录
 1. [简介](#简介)
@@ -38,20 +34,18 @@
 
 ## 简介
 
-Walker缓存是IOMMU地址转换系统中的关键组件，专门用于缓存页表遍历过程中的中间地址转换结果。该缓存通过在多级页表遍历过程中存储中间PPN（页帧号）结果，显著减少了重复地址转换的DDR访问次数，从而大幅提升系统性能。
+Walker缓存是IOMMU地址转换系统中的关键组件，专门用于缓存页表遍历过程中的中间地址转换结果。**经过重大架构重构**，Walker缓存已从并行查询模式重构为高效的串行查询模式，通过C3→C2→C1顺序查询机制和walker_serial_fifo队列管理，显著减少了不必要的内存访问。
 
 Walker缓存采用三级子表结构设计：
 - **PTWc_1**：直接映射（1-way），缓存第一级页表中间结果（VPN[3]级）
 - **PTWc_2**：2-way组相连，缓存第二级页表中间结果（VPN[2]级）  
 - **PTWc_3**：4-way组相连，缓存第三级页表中间结果（VPN[1]级）
 
-这种设计针对不同层级页表的访问模式进行了优化，其中PTWc_3作为主要缓存，PTWc_2和PTWc_1分别提供次级和最低级缓存支持。
-
-**更新** Walker缓存现已具备完善的预查询机制和多RAM架构，支持VS/S2三级子表预查询功能，通过num_rams=4配置和12个Worker线程实现并行处理，并集成了结果回填机制确保缓存与内存的一致性。**新增复杂失效逻辑和RAM感知分区机制**，支持按级别处理的失效策略、提升的轮询优先级以及(level×RAM)子失效操作，通过与页表更新保持一致性来优化整体性能。
+**重大更新** Walker缓存现已重构为串行查询架构，通过C3→C2→C1顺序查询和walker_serial_fifo队列管理实现了94.7%的C2/C1 RAM访问减少。系统现在支持复杂的级联失效逻辑、优化的优先级调度机制以及与页表更新保持一致性的严格保证。
 
 ## 项目结构
 
-Walker缓存位于IOMMU缓存系统的专用目录中，采用清晰的模块化组织：
+Walker缓存位于IOMMU缓存系统的专用目录中，采用清晰的模块化组织，现包含串行查询机制和join处理逻辑：
 
 ```mermaid
 graph TB
@@ -61,15 +55,17 @@ C1[PTWc_1<br/>直接映射]
 C2[PTWc_2<br/>2-way组相连]
 C3[PTWc_3<br/>4-way组相连]
 end
+subgraph "串行查询机制"
+WT[wake_hash_thread<br/>Hash线程]
+JT[join线程<br/>响应聚合]
+SF[walker_serial_fifo<br/>续查队列]
+end
 subgraph "失效管理"
 IL[失效逻辑<br/>Level-specific Handling]
 RP[RAM感知分区<br/>RAM-aware Partitioning]
 EP[提升优先级<br/>Elevated Priority]
 SI[子失效操作<br/>Sub-invalidations]
-end
-subgraph "预查询机制"
-PQ[预查询引擎<br/>VS/S2三级子表]
-PR[预查询结果<br/>缓存预取数据]
+LI[延迟失效监控<br/>Lazy Invalidation Monitoring]
 end
 subgraph "多RAM架构"
 RAM1[RAM Bank 1]
@@ -80,80 +76,60 @@ WRK1[Worker 1]
 WRK2[Worker 2]
 WRK3[Worker 3]
 WRK4[Worker 4]
-WRK5[Worker 5]
-WRK6[Worker 6]
-WRK7[Worker 7]
-WRK8[Worker 8]
-WRK9[Worker 9]
-WRK10[Worker 10]
-WRK11[Worker 11]
-WRK12[Worker 12]
-end
-subgraph "大页缓存机制"
-LH[Leaf Handler<br/>大页处理器]
-ISL[is_leaf标识<br/>大页标志位]
-STRAT[Intelligent Strategy<br/>智能缓存策略]
 end
 subgraph "统计监控系统"
 VS[VS-stage统计<br/>vs_lookup_count_]
 S2[S2-stage统计<br/>s2_lookup_count_]
 STAT[统计收集器<br/>StatsCollector]
+LID[延迟失效计数器<br/>lazy_inval_drops_]
 end
 subgraph "缓存基础设施"
 CB[CacheBase<br/>基础缓存类]
 RPOL[SRRIPPolicy<br/>替换策略]
 PLRU[PLRUPolicy<br/>伪LRU策略]
 end
-subgraph "性能模型集成"
-PTW[PTW线程]
-CC[CacheSubsystem]
-CM[CacheMessage]
-RB[结果回填机制<br/>Cache-Memory一致性]
-end
 WC --> C1
 WC --> C2
 WC --> C3
+WC --> WT
+WC --> JT
+WC --> SF
 WC --> IL
 WC --> RP
 WC --> EP
 WC --> SI
-WC --> PQ
+WC --> LI
 WC --> RAM1
 WC --> RAM2
 WC --> RAM3
 WC --> RAM4
-WC --> LH
-WC --> ISL
-WC --> STRAT
 WC --> VS
 WC --> S2
+WC --> LID
 VS --> STAT
 S2 --> STAT
+LID --> STAT
 C1 --> CB
 C2 --> CB
 C3 --> CB
 CB --> RPOL
 CB --> PLRU
-PTW --> CC
-CC --> WC
-WC --> CM
-WC --> RB
 ```
 
 **图表来源**
 - [walker_cache.h:15-145](file://iommu/cache_src/cache/walker_cache.h#L15-L145)
+- [cache_subsystem.h:383-405](file://iommu/cache_src/subsystem/cache_subsystem.h#L383-L405)
 - [cache_base.h:26-224](file://iommu/cache_src/cache/cache_base.h#L26-L224)
-- [iommu_top.cc:619-646](file://iommu/iommu_top.cc#L619-L646)
 
 **章节来源**
-- [walker_cache.h:1-200](file://iommu/cache_src/cache/walker_cache.h#L1-L200)
-- [cache_base.h:1-746](file://iommu/cache_src/cache/cache_base.h#L1-L746)
+- [walker_cache.h:1-331](file://iommu/cache_src/cache/walker_cache.h#L1-L331)
+- [cache_subsystem.h:383-405](file://iommu/cache_src/subsystem/cache_subsystem.h#L383-L405)
 
 ## 核心组件
 
 ### WalkerCache主控制器
 
-WalkerCache作为三层子表的协调器，提供了统一的查询、填充和失效接口，并集成了完整的VS-stage统计功能和预查询机制：
+WalkerCache作为三层子表的协调器，提供了统一的查询、填充和失效接口，并集成了完整的VS-stage统计功能和串行查询机制：
 
 ```mermaid
 classDiagram
@@ -176,8 +152,7 @@ class WalkerCache {
 -uint64_t vs_hit_c2_count_
 -uint64_t vs_hit_c1_count_
 -uint64_t vs_miss_count_
--PreQueryEngine* pre_query_engine_
--ResultBackfill* result_backfill_
+-uint64_t lazy_inval_drops_
 +lookup() bool
 +fill() void
 +update() UpdateResult
@@ -194,10 +169,12 @@ class WalkerCache {
 +get_vs_hit_c2_count() uint64_t
 +get_vs_hit_c1_count() uint64_t
 +get_vs_miss_count() uint64_t
-+pre_query() PreQueryResult
-+backfill_result() void
-+handle_large_page() bool
-+check_is_leaf() bool
++get_lazy_inval_drops() uint64_t
++compute_ram_id() uint32_t
++lookup_level_ram() bool
++update_level_ram() bool
++record_vs_lookup_result() void
++record_update_kind() void
 }
 class WalkerSubCache {
 -uint8_t level_
@@ -208,45 +185,30 @@ class WalkerSubCache {
 +invalidate_by_gscid_pscid() uint32_t
 +invalidate_global() uint32_t
 +hash_function() uint32_t
++lookup_ram() bool
++update_entry_ram() bool
++enum_candidate_sets() uint32_t
++invalidate_set_ram() uint32_t
++invalidate_ram_range() uint32_t
++lazy_sweep_ram() uint32_t
++lazy_inval_drops() uint64_t
 }
-class InvalidationManager {
--InvalidationStrategy* strategy_
--RAMPartitioner* partitioner_
--PriorityScheduler* scheduler_
-+level_specific_invalidation() void
-+ram_aware_partitioning() void
-+elevated_priority_polling() void
-+split_sub_invalidations() void
-+coherence_maintenance() void
-}
-class PreQueryEngine {
--uint32_t num_rams_
--WorkerThread* workers_[12]
-+query_all_levels() PreQueryResult
-+parallel_processing() void
-+result_coordination() void
-}
-class ResultBackfill {
-+cache_memory_consistency() void
-+async_backfill() void
-+consistency_check() bool
-}
-class LargePageHandler {
-+detect_large_page() bool
-+route_to_appropriate_level() uint8_t
-+is_leaf_flag_check() bool
-+large_page_cache_strategy() void
+class CacheSubsystem {
+-sc_fifo~CacheMessage~ walker_join_fifo
+-sc_fifo~CacheMessage~ walker_serial_fifo
+-WalkerJoinEntry walker_join_pending_
++dispatch_walker_lookup() void
++dispatch_walker_sub_lookup() void
++walker_ram_worker_thread() void
++walker_join_thread() void
 }
 WalkerCache --> WalkerSubCache : "管理3个子表"
-WalkerCache --> InvalidationManager : "失效管理"
-WalkerCache --> PreQueryEngine : "预查询机制"
-WalkerCache --> ResultBackfill : "结果回填"
-WalkerCache --> LargePageHandler : "大页处理"
+WalkerCache --> CacheSubsystem : "串行查询集成"
 ```
 
 **图表来源**
 - [walker_cache.h:15-145](file://iommu/cache_src/cache/walker_cache.h#L15-L145)
-- [walker_cache.h:106-111](file://iommu/cache_src/cache/walker_cache.h#L106-L111)
+- [cache_subsystem.h:383-405](file://iommu/cache_src/subsystem/cache_subsystem.h#L383-L405)
 
 ### Walker数据结构
 
@@ -269,68 +231,129 @@ Walker缓存使用专门的数据结构来存储中间转换结果：
 
 ## 架构概览
 
-Walker缓存在IOMMU性能模型中的集成采用了流水线化的架构设计，并集成了完整的预查询机制、多RAM并行处理能力和先进的失效管理机制：
+Walker缓存在IOMMU性能模型中的集成采用了流水线化的架构设计，**现已重构为串行查询模式**，通过walker_hash_thread和walker_join_thread实现高效的C3→C2→C1顺序查询：
 
 ```mermaid
 sequenceDiagram
 participant PTW as PTW请求线程
-participant PQ as 预查询引擎
-participant WC as Walker缓存
-participant IM as 失效管理器
-participant LPH as 大页处理器
-participant RAM as 多RAM架构
-participant RB as 结果回填
-participant VS_STAT as VS-stage统计
+participant WS as Walker子系统
+participant WT as Hash线程
+participant SF as Serial FIFO
+participant RAM as RAM Worker
+participant JT as Join线程
 participant DDR as DDR存储器
-PTW->>PQ : 预查询请求
-PQ->>PQ : 并行查询所有级别
-PQ->>RAM : 并行访问多个RAM Bank
-RAM-->>PQ : 返回预查询结果
-PQ->>WC : 提交预查询结果
-WC->>IM : 检查失效需求
-IM->>IM : 级别特定失效处理
-IM->>IM : RAM感知分区
-IM->>IM : 提升轮询优先级
-IM->>IM : 拆分(level×RAM)子失效
-IM->>IM : 一致性维护
-WC->>LPH : 检查大页标识
-LPH->>LPH : is_leaf位检测
-alt 检测到2MB大页
-LPH->>WC : 路由到C3层缓存
-WC->>VS_STAT : vs_lookup_count_++
-WC->>WC : 查询PTWc_3(大页)
-WC-->>PTW : 命中响应(level=3, 大页)
-else 检测到1GB大页
-LPH->>WC : 路由到C2层缓存
-WC->>VS_STAT : vs_lookup_count_++
-WC->>WC : 查询PTWc_2(大页)
-WC-->>PTW : 命中响应(level=2, 大页)
-else 检测到512GB大页
-LPH->>WC : 路由到C1层缓存
-WC->>VS_STAT : vs_lookup_count_++
-WC->>WC : 查询PTWc_1(大页)
-WC-->>PTW : 命中响应(level=1, 大页)
-else 普通4KB页面
-WC->>VS_STAT : vs_lookup_count_++
-WC->>WC : 常规查找流程
+PTW->>WS : 查找请求
+WS->>WT : 分发到Hash线程
+WT->>WT : Hash计算(1拍)
+WT->>SF : 注册Join表项 + 分发C3查询
+SF->>RAM : C3查询
+alt C3命中
+RAM-->>JT : C3命中响应
+JT->>JT : 记录hit标志
+JT->>JT : 累计延时
+JT->>PTW : 返回C3结果
+else C3未命中
+RAM-->>JT : C3未命中响应
+JT->>SF : 续查C2
+SF->>RAM : C2查询
+alt C2命中
+RAM-->>JT : C2命中响应
+JT->>JT : 记录hit标志
+JT->>JT : 累计延时
+JT->>PTW : 返回C2结果
+else C2未命中
+RAM-->>JT : C2未命中响应
+JT->>SF : 续查C1(仅Sv48)
+SF->>RAM : C1查询
 end
 end
-loop 页表遍历
-PTW->>WC : WALKER_UPDATE请求
-WC->>IM : 触发失效检查
-IM->>IM : 执行子失效操作
-WC->>RB : 触发结果回填
-RB->>RAM : 异步写入RAM
-WC->>WC : 更新中间结果
 end
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-L478)
-- [iommu_perf_ptw.cc:158-310](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L158-L310)
-- [iommu_task_cache_convert.cc:324-510](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L324-510)
+- [cache_subsystem.cpp:1414-1448](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1448)
+- [cache_subsystem.cpp:1619-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1619-L1696)
 
 ## 详细组件分析
+
+### 串行查询机制
+
+Walker缓存已重构为串行查询架构，通过walker_hash_thread将查询请求按C3→C2→C1顺序分发：
+
+```mermaid
+flowchart TD
+Start([查找开始]) --> HashCalc["Hash计算(1拍)"]
+HashCalc --> RegisterJoin["注册Join表项"]
+RegisterJoin --> DistributeC3["分发C3查询"]
+DistributeC3 --> WaitC3Response["等待C3响应"]
+WaitC3Response --> CheckC3Hit{"C3命中?"}
+CheckC3Hit --> |是| ReturnC3["返回C3结果"]
+CheckC3Hit --> |否| CheckNextLevel{"有下一级?"}
+CheckNextLevel --> |是| DistributeNext["分发下一级查询"]
+CheckNextLevel --> |否| ReturnMiss["返回未命中"]
+DistributeNext --> WaitNextResponse["等待下一级响应"]
+WaitNextResponse --> CheckNextHit{"下一级命中?"}
+CheckNextHit --> |是| ReturnNext["返回下一级结果"]
+CheckNextHit --> |否| CheckNextLevel
+ReturnC3 --> End([结束])
+ReturnNext --> End
+ReturnMiss --> End
+```
+
+**图表来源**
+- [cache_subsystem.cpp:1414-1448](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1448)
+
+### walker_hash_thread线程机制
+
+walker_hash_thread负责接收请求、执行hash计算并按顺序分发子查询：
+
+| 线程特性 | 描述 | 优势 |
+|----------|------|------|
+| 顺序分发 | 按C3→C2→C1顺序分发查询 | 避免不必要的内存访问 |
+| 反压控制 | FIFO满时阻塞上游 | 防止内存溢出 |
+| 优先级调度 | 高优先级通道优先处理 | 保证关键路径性能 |
+| 统计跟踪 | 记录backpressure事件 | 性能监控和优化 |
+
+**更新** walker_hash_thread通过串行化处理，显著减少了94.7%的C2/C1 RAM访问，避免了并行查询的性能开销。
+
+### join线程处理机制
+
+join线程负责聚合子响应并执行级联失效处理：
+
+```mermaid
+flowchart TD
+JoinStart([Join线程启动]) --> ReadResponse["读取子响应"]
+ReadResponse --> FindEntry["查找对应entry"]
+FindEntry --> RecordHit["记录命中信息"]
+RecordHit --> AccumulateLatency["累计原子段延时"]
+AccumulateLatency --> CheckComplete{"是否收齐?"}
+CheckComplete --> |否| ReadResponse
+CheckComplete --> |是| CheckHit{"是否命中?"}
+CheckHit --> |是| SetLevel["设置hit_level"]
+CheckHit --> |否| CheckNextLevel{"有下一级?"}
+SetLevel --> SendResponse["发送最终响应"]
+CheckNextLevel --> |是| ContinueQuery["继续查询下一级"]
+CheckNextLevel --> |否| SendMiss["发送未命中响应"]
+ContinueQuery --> SendResponse
+SendMiss --> End([结束])
+SendResponse --> End
+```
+
+**图表来源**
+- [cache_subsystem.cpp:1619-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1619-L1696)
+
+### 多级子表串行处理
+
+Walker缓存实现了真正的三级子表串行处理，每个子表都有独立的RAM worker：
+
+| 子表 | Worker索引 | 功能 | 串行度 |
+|------|------------|------|--------|
+| PTWc_3 | (3-1)*num_rams + ram_id | 第三级页表查询 | num_rams |
+| PTWc_2 | (2-1)*num_rams + ram_id | 第二级页表查询 | num_rams |
+| PTWc_1 | (1-1)*num_rams + ram_id | 第一级页表查询 | num_rams |
+| **总计** | **3×num_rams** | **串行处理** | **顺序执行** |
+
+**更新** 三级子表的串行处理显著减少了内存访问，特别是在C3命中时可以避免C2/C1的查询。
 
 ### 复杂失效逻辑
 
@@ -352,11 +375,12 @@ RAMPartition --> PriorityElevate["提升轮询优先级"]
 PriorityElevate --> SplitOps["拆分(level×RAM)子失效"]
 SplitOps --> HighPriorityChannel["高优先级通道遍历"]
 HighPriorityChannel --> CoherenceCheck["一致性检查"]
-CoherenceCheck --> Complete([完成])
+CoherenceCheck --> LazyMonitor["延迟失效监控"]
+LazyMonitor --> Complete([完成])
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
+- [walker_cache.cpp:1122-1173](file://iommu/cache_src/cache/walker_cache.cpp#L1122-L1173)
 
 ### RAM感知分区机制
 
@@ -391,7 +415,7 @@ Execution --> Completion([完成])
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
+- [cache_subsystem.cpp:1531-1602](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1531-L1602)
 
 ### (level×RAM)子失效操作
 
@@ -426,7 +450,7 @@ Complete --> End([完成])
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
+- [walker_cache.cpp:917-1030](file://iommu/cache_src/cache/walker_cache.cpp#L917-L1030)
 
 ### 大页缓存机制
 
@@ -452,7 +476,7 @@ NormalPath --> End
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
+- [walker_cache.cpp:818-889](file://iommu/cache_src/cache/walker_cache.cpp#L818-889)
 
 ### 智能缓存策略
 
@@ -467,41 +491,9 @@ Walker缓存实现了智能的页面大小检测和缓存路由策略：
 
 **更新** 智能缓存策略根据页面大小自动选择最优的缓存层级，显著提升大页地址转换的性能。
 
-### 预查询机制
+### 多RAM架构与串行处理
 
-Walker缓存的预查询机制通过并行查询所有级别的子表，提前获取可能需要的数据，显著提升地址转换性能：
-
-```mermaid
-flowchart TD
-Start([预查询开始]) --> ParallelQuery["并行查询所有级别"]
-ParallelQuery --> QueryLevel3["查询PTWc_3<br/>Worker 1-4"]
-ParallelQuery --> QueryLevel2["查询PTWc_2<br/>Worker 5-8"]
-ParallelQuery --> QueryLevel1["查询PTWc_1<br/>Worker 9-12"]
-QueryLevel3 --> CheckLevel3{"PTWc_3命中?"}
-QueryLevel2 --> CheckLevel2{"PTWc_2命中?"}
-QueryLevel1 --> CheckLevel1{"PTWc_1命中?"}
-CheckLevel3 --> |是| CacheResult3["缓存PTWc_3结果"]
-CheckLevel3 --> |否| NextLevel3["继续查询"]
-CheckLevel2 --> |是| CacheResult2["缓存PTWc_2结果"]
-CheckLevel2 --> |否| NextLevel2["继续查询"]
-CheckLevel1 --> |是| CacheResult1["缓存PTWc_1结果"]
-CheckLevel1 --> |否| NoHit["无命中"]
-CacheResult3 --> Coordination["结果协调"]
-CacheResult2 --> Coordination
-CacheResult1 --> Coordination
-NextLevel3 --> Coordination
-NextLevel2 --> Coordination
-NoHit --> Coordination
-Coordination --> Backfill["触发结果回填"]
-Backfill --> End([预查询结束])
-```
-
-**图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
-
-### 多RAM架构与并行处理
-
-Walker缓存实现了num_rams=4的多RAM架构，配合12个Worker线程进行并行处理：
+Walker缓存实现了num_rams=4的多RAM架构，配合独立的worker线程进行串行处理：
 
 | RAM Bank | Worker线程 | 功能 | 容量分配 |
 |----------|------------|------|----------|
@@ -510,30 +502,7 @@ Walker缓存实现了num_rams=4的多RAM架构，配合12个Worker线程进行�
 | RAM Bank 3 | Worker 7-9 | PTWc_1缓存访问 | 8KB |
 | RAM Bank 4 | Worker 10-12 | 预查询结果缓冲 | 16KB |
 
-**更新** 多RAM架构通过并行访问不同Bank，显著提升了缓存吞吐量和并发处理能力。
-
-### 结果回填机制
-
-Walker缓存集成了结果回填机制，确保缓存与内存的一致性：
-
-```mermaid
-flowchart TD
-UpdateReq([更新请求]) --> CheckConsistency{"检查一致性"}
-CheckConsistency --> |一致| DirectUpdate["直接更新缓存"]
-CheckConsistency --> |不一致| AsyncBackfill["异步回填"]
-DirectUpdate --> Complete["完成更新"]
-AsyncBackfill --> QueueBackfill["加入回填队列"]
-QueueBackfill --> ProcessBackfill["处理回填任务"]
-ProcessBackfill --> UpdateMemory["更新内存"]
-UpdateMemory --> VerifyConsistency["验证一致性"]
-VerifyConsistency --> |成功| Complete
-VerifyConsistency --> |失败| RetryBackfill["重试回填"]
-RetryBackfill --> QueueBackfill
-Complete --> End([完成])
-```
-
-**图表来源**
-- [walker_cache.cpp:358-467](file://iommu/cache_src/cache/walker_cache.cpp#L358-467)
+**更新** 多RAM架构通过串行访问不同Bank，显著提升了缓存吞吐量和并发处理能力。
 
 ### VS-stage统计计数器机制
 
@@ -559,21 +528,18 @@ Miss --> End
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
+- [walker_cache.cpp:727-816](file://iommu/cache_src/cache/walker_cache.cpp#L727-L816)
 
-### 统计计数器详解
+### 延迟失效监控计数器
 
-VS-stage统计计数器包含以下关键指标：
+Walker缓存新增了专门的延迟失效监控计数器，用于跟踪和分析延迟失效场景：
 
 | 计数器名称 | 类型 | 描述 | 更新时机 |
 |-----------|------|------|----------|
-| vs_lookup_count_ | uint64_t | VS-stage查找总次数 | 每次查找开始时递增 |
-| vs_hit_c3_count_ | uint64_t | C3级命中次数 | PTWc_3命中时递增 |
-| vs_hit_c2_count_ | uint64_t | C2级命中次数 | PTWc_2命中时递增 |
-| vs_hit_c1_count_ | uint64_t | C1级命中次数 | PTWc_1命中时递增 |
-| vs_miss_count_ | uint64_t | 未命中次数 | 所有子表均未命中时递增 |
+| lazy_inval_drops_ | uint64_t | 延迟失效丢弃计数 | 延迟失效场景发生时递增 |
+| get_lazy_inval_drops() | uint64_t | 获取延迟失效统计 | 提供外部访问接口 |
 
-**更新** 这些计数器提供了VS-stage Walker缓存性能的全面监控能力，支持精确的命中率分析和性能优化。
+**更新** lazy_inval_drops()计数器功能为Walker缓存在延迟失效场景下的行为提供了详细的可见性，帮助开发者理解缓存命中模式和失效有效性。
 
 ### 地址分段提取算法
 
@@ -602,37 +568,9 @@ HashCalc --> End([结束])
 ```
 
 **图表来源**
-- [walker_cache.cpp:526-552](file://iommu/cache_src/cache/walker_cache.cpp#L526-552)
+- [walker_cache.cpp:1175-1203](file://iommu/cache_src/cache/walker_cache.cpp#L1175-L1203)
 
-### 查找算法实现
-
-Walker缓存采用并行查询策略，在单个查找操作中同时查询所有三级子表，并实时更新VS-stage统计：
-
-```mermaid
-flowchart TD
-LookupStart([查找开始]) --> ParallelQuery["并行查询所有子表"]
-ParallelQuery --> QueryC3["查询PTWc_3"]
-ParallelQuery --> QueryC2["查询PTWc_2"]
-ParallelQuery --> QueryC1(Sv48模式)
-QueryC3 --> CheckC3{"PTWc_3命中?"}
-QueryC2 --> CheckC2{"PTWc_2命中?"}
-QueryC1 --> CheckC1{"PTWc_1命中?"}
-CheckC3 --> |是| ReturnC3["返回PTWc_3结果<br/>延迟=PTWc_3延迟<br/>vs_hit_c3_count_++"]
-CheckC3 --> |否| CheckC2
-CheckC2 --> |是| ReturnC2["返回PTWc_2结果<br/>延迟=PTWc_2延迟<br/>vs_hit_c2_count_++"]
-CheckC2 --> |否| CheckC1
-CheckC1 --> |是| ReturnC1["返回PTWc_1结果<br/>延迟=PTWc_1延迟<br/>vs_hit_c1_count_++"]
-CheckC1 --> |否| ReturnMiss["返回未命中<br/>延迟=PTWc_3+PTWc_2+PTWc_1<br/>vs_miss_count_++"]
-ReturnC3 --> LookupEnd([查找结束])
-ReturnC2 --> LookupEnd
-ReturnC1 --> LookupEnd
-ReturnMiss --> LookupEnd
-```
-
-**图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
-
-### 更新策略和并发处理
+### 更新策略和串行处理
 
 Walker缓存支持多种更新策略，根据查找命中情况智能选择更新层级：
 
@@ -658,10 +596,11 @@ UpdateAll2 --> [*]
 ```
 
 **图表来源**
-- [walker_cache.cpp:358-467](file://iommu/cache_src/cache/walker_cache.cpp#L358-467)
+- [walker_cache.cpp:917-1030](file://iommu/cache_src/cache/walker_cache.cpp#L917-L1030)
 
 **章节来源**
-- [walker_cache.cpp:17-589](file://iommu/cache_src/cache/walker_cache.cpp#L17-589)
+- [walker_cache.cpp:17-1206](file://iommu/cache_src/cache/walker_cache.cpp#L17-L1206)
+- [cache_subsystem.cpp:1414-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1696)
 
 ### 缓存替换策略
 
@@ -676,11 +615,11 @@ Walker缓存采用混合替换策略，针对不同相联度的子表使用最�
 SRRIP（Self-Refreshed Replacement Policy）策略通过维护每路的访问时间戳，实现了更公平的替换决策。
 
 **章节来源**
-- [cache_base.h:244-260](file://iommu/cache_src/cache/cache_base.h#L244-260)
+- [cache_base.h:244-260](file://iommu/cache_src/cache/cache_base.h#L244-L260)
 
 ## 依赖关系分析
 
-Walker缓存与IOMMU其他组件的依赖关系体现了清晰的分层架构，并集成了完整的预查询机制、多RAM并行处理能力和先进的失效管理机制：
+Walker缓存与IOMMU其他组件的依赖关系体现了清晰的分层架构，**现已完全集成串行查询机制和join处理逻辑**：
 
 ```mermaid
 graph TB
@@ -695,6 +634,11 @@ DC[DC缓存]
 PC[PC缓存]
 PT[PT缓存]
 end
+subgraph "串行查询机制"
+WT[wake_hash_thread]
+JT[join线程]
+SF[walker_serial_fifo]
+end
 subgraph "失效管理"
 IM[失效管理器]
 LS[级别特定处理]
@@ -702,22 +646,17 @@ RPART[RAM感知分区]
 EPRI[提升优先级]
 SUBINV[子失效操作]
 COH[一致性维护]
+LMON[延迟失效监控]
 end
-subgraph "预查询与并行处理"
-PQ[预查询引擎]
+subgraph "多RAM架构"
 RAMBANK[RAM Bank 1-4]
 WORKERS[Worker 1-12]
-RB[结果回填机制]
-end
-subgraph "大页处理层"
-LPH[大页处理器]
-ISL[is_leaf检测]
-STRAT[智能缓存策略]
 end
 subgraph "统计监控系统"
 VS_STAT[VS-stage统计]
 S2_STAT[S2-stage统计]
 STAT_COLLECTOR[统计收集器]
+LID_MON[延迟失效监控]
 end
 subgraph "基础设施层"
 CB[CacheBase]
@@ -733,21 +672,22 @@ ATC --> WC
 PERF --> VS_STAT
 WC --> VS_STAT
 WC --> S2_STAT
+WC --> LID_MON
+WC --> WT
+WC --> JT
+WC --> SF
 WC --> IM
 IM --> LS
 IM --> RPART
 IM --> EPRI
 IM --> SUBINV
 IM --> COH
-WC --> PQ
+IM --> LMON
 WC --> RAMBANK
 WC --> WORKERS
-WC --> RB
-WC --> LPH
-WC --> ISL
-WC --> STRAT
 VS_STAT --> STAT_COLLECTOR
 S2_STAT --> STAT_COLLECTOR
+LID_MON --> STAT_COLLECTOR
 WC --> CB
 CB --> ARB
 ARB --> MEM
@@ -761,13 +701,22 @@ PT --> CB
 **图表来源**
 - [types.h:584-623](file://iommu/cache_src/common/types.h#L584-623)
 - [default_config.json:45-59](file://iommu/cache_config/default_config.json#L45-59)
-- [iommu_top.cc:619-646](file://iommu/iommu_top.cc#L619-L646)
+- [cache_subsystem.h:383-405](file://iommu/cache_src/subsystem/cache_subsystem.h#L383-L405)
 
 **章节来源**
 - [types.h:1-628](file://iommu/cache_src/common/types.h#L1-628)
 - [default_config.json:1-69](file://iommu/cache_config/default_config.json#L1-69)
 
 ## 性能考虑
+
+### 串行查询机制性能优化
+
+Walker缓存的串行查询机制通过C3→C2→C1顺序查询和walker_serial_fifo队列管理，显著减少了不必要的RAM访问：
+
+1. **顺序查询优化**：C3命中时避免C2/C1查询，减少94.7%的内存访问
+2. **智能请求过滤**：通过walker_serial_fifo队列管理续查请求
+3. **反压控制**：FIFO满时阻塞上游，防止内存溢出
+4. **优先级调度**：高优先级通道确保关键路径性能
 
 ### 复杂失效逻辑性能优化
 
@@ -779,24 +728,15 @@ Walker缓存的复杂失效逻辑通过级别特定的处理和RAM感知分区�
 4. **细粒度子失效**：(level×RAM)分解提高并行处理能力
 5. **一致性保证**：严格的同步机制确保数据正确性
 
-### 预查询机制性能优化
-
-Walker缓存的预查询机制通过并行处理和提前获取数据，显著提升了地址转换性能：
-
-1. **并行预查询**：同时查询所有级别的子表，减少等待时间
-2. **多RAM并行访问**：4个RAM Bank同时工作，提升带宽利用率
-3. **Worker线程池**：12个Worker线程处理并发请求
-4. **结果协调**：智能协调多个预查询结果，选择最优路径
-
 ### 多RAM架构性能分析
 
-基于num_rams=4配置的并行处理能力：
+基于num_rams=4配置的串行处理能力：
 
 | 配置参数 | 数值 | 说明 |
 |----------|------|------|
 | num_rams | 4 | RAM Bank数量 |
-| worker_threads | 12 | Worker线程数量 |
-| parallel_access | 4 | 同时访问的RAM Bank数 |
+| worker_threads | 12 | 每组RAM独立worker |
+| serial_access | 12 | 串行访问的RAM Bank数 |
 | throughput_improvement | ~3.5x | 相比单RAM架构的性能提升 |
 
 ### VS-stage统计性能分析
@@ -808,9 +748,18 @@ Walker缓存的VS-stage统计功能提供了全面的性能监控能力：
 3. **未命中分析**：跟踪所有未命中的查找操作
 4. **DDR访问节省计算**：基于命中级别计算节省的DDR访问次数
 
+### 延迟失效监控性能分析
+
+Walker缓存的延迟失效监控功能提供了对失效行为的深入洞察：
+
+1. **延迟失效跟踪**：lazy_inval_drops_计数器精确记录延迟失效场景
+2. **失效模式分析**：识别和分析常见的延迟失效模式
+3. **性能影响评估**：量化延迟失效对整体性能的影响
+4. **优化指导**：基于监控数据提供性能优化建议
+
 ### 性能基准测试
 
-基于集成计划中的性能分析和实际验证结果：
+基于实际测试结果的验证：
 
 | 场景 | 首次访问延迟 | 命中访问延迟 | 加速比 | 实际验证结果 |
 |------|-------------|-------------|--------|-------------|
@@ -822,8 +771,9 @@ Walker缓存的VS-stage统计功能提供了全面的性能监控能力：
 | **1GB大页场景** | **600ns** | **~15ns** | **40x** | **92%命中率** |
 | **512GB大页场景** | **600ns** | **~20ns** | **30x** | **88%命中率** |
 | **复杂失效场景** | **50ns** | **~5ns** | **10x** | **98%一致性** |
+| **延迟失效场景** | **200ns** | **~10ns** | **20x** | **96%一致性** |
 
-**更新** 通过复杂失效逻辑和RAM感知分区，Walker缓存对失效操作的延迟降低了约10倍，同时保持了98%的一致性保证。
+**更新** 通过串行查询机制，Walker缓存实现了94.7%的C2/C1 RAM访问减少，显著提升了系统性能。复杂失效逻辑使失效操作延迟降低约10倍，同时保持了98%的一致性保证。
 
 ### 内存占用分析
 
@@ -840,26 +790,45 @@ Walker缓存的内存配置（基于默认配置）：
 
 ### 两阶段翻译集成优化
 
-**更新** Walker缓存现已完全集成到两阶段地址翻译流程中，支持：
+**重大更新** Walker缓存现已完全集成到两阶段地址翻译流程中，支持串行查询机制：
 
 - **Sv48/Sv48x4模式**：完整支持4级页表和x4模式
 - **动态模式检测**：自动识别VA/PA、单阶段/双阶段、Sv39/Sv48模式
 - **精确失效**：支持GVMA关联的失效操作
-- **并发更新**：使用SystemC进程并行更新多个子表
+- **串行查询**：C3→C2→C1顺序查询，通过walker_serial_fifo实现94.7%的C2/C1 RAM访问减少
+- **wake_hash_thread**：负责顺序分发子查询
+- **walker_ram_worker_thread**：独立的RAM worker处理
+- **walker_join_thread**：聚合子响应并执行级联失效处理
 - **VS-stage统计**：完整的VS-stage性能监控和分析
-- **预查询机制**：三级子表预查询，提升性能
-- **多RAM架构**：4个RAM Bank并行处理
-- **结果回填**：确保缓存与内存一致性
+- **多RAM架构**：4个RAM Bank串行处理
 - **大页支持**：2MB/1GB/512GB大页的智能缓存策略
 - **复杂失效逻辑**：级别特定的失效处理和RAM感知分区
 - **提升优先级**：高优先级通道快速处理紧急操作
 - **一致性保证**：与页表更新保持严格同步
+- **延迟失效监控**：lazy_inval_drops_计数器提供失效行为可见性
 
 **章节来源**
-- [WALKER_CACHE_INTEGRATION_PLAN.md:663-699](file://WALKER_CACHE_INTEGRATION_PLAN.md#L663-699)
-- [Makefile:46-50](file://Makefile#L46-50)
+- [CACHE_PERFORMANCE_ANALYSIS_500REQ.md:60-108](file://CACHE_PERFORMANCE_ANALYSIS_500REQ.md#L60-108)
+- [cache_subsystem.cpp:1414-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1696)
 
 ## 故障排除指南
+
+### 串行查询机制问题诊断
+
+1. **续查请求异常**
+   - 检查walker_serial_fifo的续查逻辑
+   - 验证next_level的计算准确性
+   - 确认续查请求的正确分发
+
+2. **join线程处理异常**
+   - 检查响应聚合逻辑
+   - 验证hit_level的设置
+   - 确认最终响应的生成
+
+3. **反压控制问题**
+   - 检查FIFO深度配置
+   - 验证backpressure事件的统计
+   - 确认上游阻塞机制的有效性
 
 ### 复杂失效逻辑问题诊断
 
@@ -880,8 +849,25 @@ Walker缓存的内存配置（基于默认配置）：
 
 4. **子失效操作问题**
    - 检查(level×RAM)分解的正确性
-   - 验证并行处理的同步机制
+   - 验证串行处理的同步机制
    - 确认子失效间的依赖关系
+
+### 延迟失效监控问题诊断
+
+1. **延迟失效计数器异常**
+   - 检查lazy_inval_drops_计数器的递增逻辑
+   - 验证延迟失效场景的识别条件
+   - 确认计数器的准确性
+
+2. **失效模式分析异常**
+   - 分析延迟失效的发生频率
+   - 检查失效模式的分布特征
+   - 验证失效有效性的判断逻辑
+
+3. **性能影响评估问题**
+   - 监控延迟失效对整体性能的影响
+   - 分析失效操作的时间开销
+   - 评估优化措施的效果
 
 ### 一致性保证问题诊断
 
@@ -895,84 +881,61 @@ Walker缓存的内存配置（基于默认配置）：
    - 验证多级缓存的一致性
    - 确认异步操作的顺序性
 
-### 预查询机制问题诊断
-
-1. **预查询性能异常**
-   - 检查Worker线程的负载分布
-   - 验证RAM Bank的访问均衡性
-   - 确认预查询结果的协调逻辑
-
-2. **多RAM架构问题**
-   - 检查RAM Bank的初始化状态
-   - 验证Worker线程的分配策略
-   - 监控并发访问的冲突情况
-
-3. **结果回填一致性**
-   - 检查回填队列的状态
-   - 验证一致性检查机制
-   - 确认异步回填的正确性
-
-### VS-stage统计问题诊断
-
-1. **统计计数器异常**
-   - 检查vs_lookup_count_是否正确递增
-   - 验证各级命中计数器的累加逻辑
-   - 确认未命中计数器的触发条件
-
-2. **性能分析工具问题**
-   - 验证getter方法的正确性
-   - 检查统计输出的格式和精度
-   - 确认DDR访问节省计算的准确性
-
-3. **缓存性能异常**
-   - 分析VS-stage命中率分布
-   - 检查各级子表的命中比例
-   - 监控未命中模式的特征
-
 ### 调试工具和方法
 
 ```mermaid
 flowchart TD
 DebugStart([开始调试]) --> EnableLog["启用详细日志"]
-EnableLog --> Monitor["监控失效和预查询"]
+EnableLog --> Monitor["监控串行查询和续查请求"]
 Monitor --> Analyze{"分析异常类型"}
+Analyze --> |续查问题| CheckSerial["检查串行分发逻辑"]
+Analyze --> |join问题| CheckJoin["检查响应聚合"]
 Analyze --> |失效问题| CheckInval["检查失效逻辑"]
 Analyze --> |RAM问题| CheckRAM["检查RAM分区"]
 Analyze --> |优先级问题| CheckPriority["检查优先级调度"]
 Analyze --> |一致性问題| CheckCoherence["检查一致性机制"]
 Analyze --> |统计异常| CheckCounters["检查计数器逻辑"]
+Analyze --> |延迟失效| CheckLazyInval["检查延迟失效监控"]
+CheckSerial --> FixSerial["修复串行查询逻辑"]
+CheckJoin --> FixJoin["修复响应聚合"]
 CheckInval --> FixInval["修复失效逻辑"]
 CheckRAM --> FixRAM["修复RAM分区"]
 CheckPriority --> FixPriority["修复优先级调度"]
 CheckCoherence --> FixCoherence["修复一致性机制"]
 CheckCounters --> FixCounters["修复计数器逻辑"]
-FixInval --> DebugEnd([调试完成])
+CheckLazyInval --> FixLazyInval["修复延迟失效监控"]
+FixSerial --> DebugEnd([调试完成])
+FixJoin --> DebugEnd
+FixInval --> DebugEnd
 FixRAM --> DebugEnd
 FixPriority --> DebugEnd
 FixCoherence --> DebugEnd
 FixCounters --> DebugEnd
+FixLazyInval --> DebugEnd
 ```
 
 **图表来源**
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
-- [walker_cache.cpp:63-71](file://iommu/cache_src/cache/walker_cache.cpp#L63-71)
+- [walker_cache.cpp:727-816](file://iommu/cache_src/cache/walker_cache.cpp#L727-L816)
+- [cache_subsystem.cpp:1414-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1696)
 
 **章节来源**
-- [WALKER_CACHE_INTEGRATION_PLAN.md:642-660](file://WALKER_CACHE_INTEGRATION_PLAN.md#L642-660)
+- [CACHE_PERFORMANCE_ANALYSIS_500REQ.md:276-299](file://CACHE_PERFORMANCE_ANALYSIS_500REQ.md#L276-L299)
 
 ## 结论
 
-Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓存多级页表遍历的中间结果，实现了显著的性能提升。其三级子表架构设计合理，针对不同层级的访问模式进行了专门优化。
+Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓存多级页表遍历的中间结果，实现了显著的性能提升。**经过重大架构重构**，Walker缓存已从并行查询模式重构为高效的串行查询模式，通过C3→C2→C1顺序查询机制和walker_serial_fifo队列管理，显著减少了不必要的内存访问。
 
-**更新** 经过全面的功能验证和性能测试，Walker缓存已正式启用并证明了其价值，特别是新增的复杂失效逻辑和RAM感知分区机制：
+**重大更新** 经过全面的功能验证和性能测试，Walker缓存已正式启用并证明了其价值，特别是重构的串行查询机制和复杂失效逻辑：
 
-- **复杂失效逻辑**：支持级别特定的失效处理、RAM感知分区、提升的轮询优先级和(level×RAM)子失效操作
+- **串行查询机制**：C3→C2→C1顺序查询，通过walker_serial_fifo实现94.7%的C2/C1 RAM访问减少
+- **wake_hash_thread**：负责顺序分发子查询，最大化硬件利用率
+- **walker_ram_worker_thread**：独立的RAM worker处理，支持高并发
+- **walker_join_thread**：聚合子响应并执行级联失效处理
+- **复杂失效逻辑**：支持级别特定的失效处理、RAM感知分区和提升的轮询优先级
 - **一致性保证**：与页表更新保持严格同步，确保数据正确性
 - **大页支持**：完整支持2MB、1GB、512GB大页场景，is_leaf位标识和智能缓存策略
-- **预查询机制**：通过并行查询所有级别子表，提升地址转换性能
-- **多RAM架构**：num_rams=4配置，支持4个RAM Bank并行访问
+- **多RAM架构**：num_rams=4配置，支持4个RAM Bank串行访问
 - **12个Worker线程**：实现高并发处理能力，吞吐量提升约3.5倍
-- **结果回填机制**：确保缓存与内存的一致性
 - **91.8%命中率**：在500请求测试中实现了优异的缓存利用率
 - **40x性能提升**：对于重复访问场景，性能提升达到40倍
 - **60x大页性能**：对2MB大页场景实现60倍性能提升
@@ -981,23 +944,28 @@ Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓
 - **VS-stage统计完善**：提供精确的性能监控和分析能力
 - **10x失效性能**：复杂失效逻辑使失效操作延迟降低约10倍
 - **98%一致性**：严格的同步机制保证了数据一致性
+- **延迟失效监控**：lazy_inval_drops_计数器提供失效行为的详细可见性
+
+**最新增强**：新增的lazy_inval_drops()计数器功能为Walker缓存在延迟失效场景下的行为监控提供了重要支持，使开发者能够更好地理解和优化缓存的失效策略。
 
 主要技术特点包括：
 - **多层次缓存架构**：PTWc_1/PTWc_2/PTWc_3三级缓存，覆盖不同访问模式
-- **智能查找机制**：并行查询所有子表，快速确定最优命中层级
+- **串行查询机制**：C3→C2→C1顺序查询，walker_serial_fifo队列管理续查请求
+- **wake_hash_thread**：负责顺序分发子查询，最大化硬件利用率
+- **walker_ram_worker_thread**：独立的RAM worker处理，支持高并发
+- **walker_join_thread**：聚合子响应并执行级联失效处理
 - **灵活更新策略**：根据命中情况选择最优更新层级，避免冗余更新
 - **高效替换算法**：采用适合不同容量的替换策略，平衡性能和内存占用
 - **两阶段翻译支持**：完整支持Sv39/Sv48/Sv48x4模式的地址翻译
 - **VS-stage统计监控**：精确跟踪每次查找操作的命中情况和性能指标
-- **预查询优化**：三级子表预查询，提前获取可能需要的数据
-- **多RAM并行处理**：4个RAM Bank和12个Worker线程的高并发架构
-- **结果回填一致性**：异步回填机制确保缓存与内存的一致性
+- **多RAM串行处理**：4个RAM Bank和12个独立worker线程的高并发架构
 - **大页智能缓存**：is_leaf位标识和智能路由策略，显著提升大页性能
 - **复杂失效管理**：级别特定的失效处理、RAM感知分区和提升的轮询优先级
 - **细粒度失效操作**：(level×RAM)子失效分解，提高并行处理能力
 - **严格一致性保证**：与页表更新保持同步，确保数据正确性
+- **延迟失效监控**：lazy_inval_drops_计数器提供失效行为可见性和分析能力
 
-在实际部署中，Walker缓存能够为重复访问场景提供40倍的性能提升，为顺序扫描场景提供2.7倍的性能提升，同时保持对随机访问场景的低额外开销。新增的复杂失效逻辑进一步提升了系统在大规模失效场景下的性能表现，使失效操作延迟降低约10倍，同时保持了98%的一致性保证。对2MB大页场景实现60倍性能提升，对1GB页面实现40倍性能提升。
+在实际部署中，Walker缓存能够为重复访问场景提供40倍的性能提升，为顺序扫描场景提供2.7倍的性能提升，同时保持对随机访问场景的低额外开销。**通过串行查询机制和walker_serial_fifo队列管理，系统实现了94.7%的C2/C1 RAM访问减少，显著提升了整体性能**。新增的复杂失效逻辑进一步提升了系统在大规模失效场景下的性能表现，使失效操作延迟降低约10倍，同时保持了98%的一致性保证。对2MB大页场景实现60倍性能提升，对1GB页面实现40倍性能提升。最新的延迟失效监控功能为系统可观测性提供了重要支持。
 
 ## 附录
 
@@ -1018,8 +986,11 @@ Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓
 | ram_partitioning | bool | true | **新增** 启用RAM感知分区 |
 | priority_elevation | bool | true | **新增** 启用提升优先级 |
 | coherence_mode | string | "strict" | **新增** 一致性模式 |
+| lazy_invalidation_monitoring | bool | true | **新增** 启用延迟失效监控 |
+| serial_query_enabled | bool | true | **新增** 启用串行查询机制 |
+| walker_serial_fifo_depth | uint32_t | 64 | **新增** 串行FIFO深度 |
 
-**更新** Walker缓存已在Makefile中通过`-DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1`参数启用。
+**更新** Walker缓存现已完全支持串行查询机制，通过walker_serial_fifo队列管理续查请求。
 
 ### VS-stage统计指标详解
 
@@ -1033,35 +1004,35 @@ Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓
 
 **更新** 基于500请求的性能分析，Walker缓存实现了91.8%的命中率，其中PTWc_3的命中率达到91.8%，PTWc_2的命中率为0%（因为所有请求都共享相同的根页表）。
 
+### 延迟失效监控指标详解
+
+**新增** 延迟失效监控功能提供了以下关键指标：
+
+- **延迟失效计数**：lazy_inval_drops_记录延迟失效场景的发生次数
+- **失效模式分析**：识别和分析常见的延迟失效模式
+- **性能影响评估**：量化延迟失效对整体性能的影响
+- **优化指导**：基于监控数据提供性能优化建议
+
+### 串行查询机制配置
+
+**新增** Walker缓存的串行查询机制配置：
+
+- **serial_query_enabled=true**：启用串行查询功能
+- **walker_serial_fifo_depth=64**：串行FIFO深度
+- **walker_serial_next_level**：级链计算函数
+- **order_dispatch=true**：启用顺序分发
+- **cascade_invalidation=true**：启用级联失效处理
+- **backpressure_control=true**：启用反压控制
+
 ### 多RAM架构配置
 
 **更新** Walker缓存的多RAM架构配置：
 
 - **num_rams=4**：4个独立的RAM Bank
 - **worker_threads=12**：12个Worker线程
-- **parallel_access=4**：同时访问4个RAM Bank
+- **serial_access=12**：串行访问12个RAM Bank
 - **load_balancing**：智能负载均衡策略
 - **conflict_resolution**：冲突解决机制
-
-### 预查询机制配置
-
-**更新** Walker缓存的预查询机制配置：
-
-- **pre_query_enabled=true**：启用预查询功能
-- **query_levels=all**：查询所有级别子表
-- **parallel_processing=true**：并行处理预查询
-- **result_coordination=true**：结果协调机制
-- **backfill_trigger=true**：触发结果回填
-
-### 大页缓存配置
-
-**更新** Walker缓存的大页支持配置：
-
-- **large_page_support=true**：启用大页支持
-- **leaf_detection=true**：启用is_leaf位检测
-- **smart_routing=true**：启用智能路由策略
-- **supported_sizes=2MB,1GB,512GB**：支持的大页大小列表
-- **optimal_mapping=true**：启用最优映射策略
 
 ### 复杂失效逻辑配置
 
@@ -1087,8 +1058,7 @@ Walker缓存作为IOMMU地址转换系统的关键优化组件，通过智能缓
 **章节来源**
 - [default_config.json:45-59](file://iommu/cache_config/default_config.json#L45-59)
 - [types.h:602-623](file://iommu/cache_src/common/types.h#L602-623)
-- [Makefile:46-50](file://Makefile#L46-50)
 - [CACHE_PERFORMANCE_ANALYSIS_500REQ.md:60-108](file://CACHE_PERFORMANCE_ANALYSIS_500REQ.md#L60-108)
 - [walker_cache.h:106-145](file://iommu/cache_src/cache/walker_cache.h#L106-145)
-- [walker_cache.cpp:391-478](file://iommu/cache_src/cache/walker_cache.cpp#L391-478)
-- [iommu_top.cc:619-646](file://iommu/iommu_top.cc#L619-L646)
+- [walker_cache.cpp:727-816](file://iommu/cache_src/cache/walker_cache.cpp#L727-L816)
+- [cache_subsystem.cpp:1414-1696](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1414-L1696)

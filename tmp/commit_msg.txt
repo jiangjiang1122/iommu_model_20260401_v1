@@ -1,0 +1,22 @@
+场景13-v4: 读写分离并发 + SQ/CQ/MSI混合负载 + 聚合刷新PEQ + 大量统计增强
+
+场景13-v4 主要变更:
+- 读写分离outstanding: read_max=243, write_max=265, total=508
+- 系统级任务模式: 偶数批全读(8x512B), 奇数批全写(8x512B)
+- SQ改为32B读请求; SQ/CQ预热后100%命中PT Cache不进dedup/PTW
+- 每组=8x512B Data + 1x32B SQ + 1x16B CQ + 1x4B MSI = 11任务
+- 909批x11 + 1 MSI = 10000任务, IOPS仅统计Data(is_ctrl=0)
+
+架构变更:
+- 新增pending_group_update结构体(自包含字段避免PEQ延时后use-after-free)
+- 新增agg_flush_peq: PTW完成后200ns非阻塞延时刷新去重buffer/cache/PT Cache
+- 新增bypass预取标记(is_bypass): 跳过dedup_update直接转发主任务
+- 新增读写分离outstanding计数器与峰值跟踪
+
+统计增强:
+- Little's Law平均并发统计(e2e驻留时间/仿真总时长)
+- PT Cache输出间隔统计 + SQ/CQ/MSI命中路径统计
+- 主任务两阶段DDR分解(VS/GS/AD) + 预取启动前DDR次数统计
+- 组DDR读次数分布 + 每任务DDR读max/min + late-spawn触发统计
+
+配置: Buffer=267, PTW=27, Pages=909, 全局并发=508

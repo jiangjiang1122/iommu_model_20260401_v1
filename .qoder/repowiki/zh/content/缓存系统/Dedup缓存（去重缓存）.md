@@ -2,6 +2,12 @@
 
 <cite>
 **本文引用的文件**   
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
+- [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
+- [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
+- [default_config.json](file://iommu/cache_config/default_config.json)
+- [iommu_dedup_params.hh](file://iommu/include/iommu_dedup_params.hh)
+- [iommu_perf_pt_dedup_flush.cc](file://iommu/iommu_perf_model/iommu_perf_pt_dedup_flush.cc)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 - [dedup_cache.cpp](file://iommu/cache_src/cache/dedup_cache.cpp)
 - [cache_base.h](file://iommu/cache_src/cache/cache_base.h)
@@ -10,13 +16,9 @@
 - [replacement_policy.h](file://iommu/cache_src/replacement/replacement_policy.h)
 - [plru_policy.h](file://iommu/cache_src/replacement/plru_policy.h)
 - [srrip_policy.h](file://iommu/cache_src/replacement/srrip_policy.h)
-- [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
-- [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
-- [types.h](file://iommu/cache_src/common/types.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
-- [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
+- [types.h](file://iommu/cache_src/common/types.h)
 - [pt_cache.h](file://iommu/cache_src/cache/pt_cache.h)
 - [pt_cache.cpp](file://iommu/cache_src/cache/pt_cache.cpp)
 - [dc_cache.h](file://iommu/cache_src/cache/dc_cache.h)
@@ -27,18 +29,15 @@
 - [msipt_cache.cpp](file://iommu/cache_src/cache/msipt_cache.cpp)
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [walker_cache.cpp](file://iommu/cache_src/cache/walker_cache.cpp)
-- [iommu_dedup_params.hh](file://iommu/include/iommu_dedup_params.hh)
 - [iommu_task_cache_convert.cc](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc)
-- [iommu_perf_pt_dedup_flush.cc](file://iommu/iommu_perf_model/iommu_perf_pt_dedup_flush.cc)
 - [iommu_top.cc](file://iommu/iommu_top.cc)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 引入多RAM架构，支持4个独立的RAM模块进行并行处理
-- 实现scheduler-hash-worker并发处理模型，提升吞吐量
-- 基于哈希分布的负载均衡机制，优化内存访问模式
-- 增强去重缓存的并发处理能力与性能优化
+- 增强去重缓冲区实现，新增时间加权平均占用率跟踪能力
+- 新增统计收集方法：occupancy_integral_、settle_occupancy()、get_avg_occupancy()、get_avg_occupancy_pct()、get_occupancy_window_ns()
+- 提供详细的缓冲区使用模式分析功能，支持更精确的性能监控和调优
 
 ## 目录
 1. [简介](#简介)
@@ -58,14 +57,14 @@
 ## 简介
 本文件聚焦于IOMMU模型中的"去重缓存"（Dedup缓存）子系统，系统性梳理其设计目标、模块划分、数据流与关键算法，帮助读者快速理解并正确使用该能力。去重缓存用于在页表遍历（PTW）等路径中识别并合并重复的虚拟地址访问，从而减少冗余的内存访问与计算开销，提升整体吞吐并降低延迟。
 
-**更新** Dedup缓存现已采用多RAM架构和scheduler-hash-worker并发处理模型，通过4个RAM模块与哈希分布机制实现高性能的去重操作处理。
+**更新** 去重缓存现已采用多RAM架构和scheduler-hash-worker并发处理模型，通过4个RAM模块与哈希分布机制实现高性能的去重操作处理，并增强了时间加权平均占用率跟踪能力。
 
 ## 项目结构
 与去重缓存相关的代码主要分布在以下目录：
 - 缓存实现层：cache_src/cache 下包含各类缓存的具体实现，其中 dedup_cache.* 为去重缓存的核心实现；cache_base.* 提供通用缓存基类；cache_line.h 定义缓存行数据结构；各具体缓存（如 pt_cache、dc_cache、pc_cache、msipt_cache、walker_cache）通过组合或继承复用公共能力。
 - 替换策略层：cache_src/replacement 提供多种替换策略接口与实现（PLRU、SRRIP），供不同缓存按需选用。
 - 子系统集成：cache_src/subsystem 将多个缓存实例统一接入到缓存子系统，负责生命周期管理、统计收集与配置加载。
-- 公共工具：cache_src/common 提供类型定义、统计收集器、JSON配置解析等基础能力。
+- 公共工具：cache_src/common 提供类型定义、统计收集器、JSON配置解析等基础能力，包括增强的去重缓冲区实现。
 - 配置：iommu/cache_config 提供默认配置与示例输入参数。
 - 上层集成：iommu/iommu_perf_model 下的任务转换与PTW去重刷新相关逻辑，将去重能力嵌入性能模型工作流。
 
@@ -87,6 +86,7 @@ PC["页目录缓存<br/>pc_cache"]
 MSIPT["MSI页表缓存<br/>msipt_cache"]
 WC["Walker缓存<br/>walker_cache"]
 DEDUP["去重缓存<br/>dedup_cache"]
+DB["去重缓冲区<br/>dedup_buffer"]
 end
 subgraph "多RAM架构"
 RAM1["RAM模块1"]
@@ -122,6 +122,7 @@ PC --> CB
 MSIPT --> CB
 WC --> CB
 DEDUP --> CB
+DEDUP --> DB
 CB --> CL
 CB --> RP
 RP --> PLRU
@@ -157,11 +158,11 @@ CS --> TYPES
 - [msipt_cache.h](file://iommu/cache_src/cache/msipt_cache.h)
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [types.h](file://iommu/cache_src/common/types.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
 
 章节来源
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
@@ -178,17 +179,20 @@ CS --> TYPES
 - [msipt_cache.h](file://iommu/cache_src/cache/msipt_cache.h)
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [types.h](file://iommu/cache_src/common/types.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
 
 ## 核心组件
 - 去重缓存（Dedup Cache）
   - 职责：对访问键（通常为虚拟地址或规范化后的请求标识）进行去重判断与结果缓存，避免重复的页表遍历或外部访存。
   - 关键特性：支持可配置的容量、替换策略、命中/未命中统计、失效与清理接口。
   - **更新** 现在采用多RAM架构，支持4个独立RAM模块并行处理，显著提升并发性能。
+- 去重缓冲区（Dedup Buffer）
+  - 职责：管理等待PTW完成的任务链表，提供高效的缓冲管理机制。
+  - **更新** 新增时间加权平均占用率跟踪能力，提供更精确的缓冲区使用模式分析。
 - 缓存基类（Cache Base）
   - 职责：封装通用缓存行为（查找、插入、淘汰、统计、线程安全等），派生类只需关注键值语义与匹配规则。
 - 缓存行（Cache Line）
@@ -205,11 +209,12 @@ CS --> TYPES
   - 统计收集器：记录命中率、未命中率、淘汰次数、延迟分布等指标。
   - JSON配置：从配置文件加载缓存参数（容量、策略、阈值等）。
 
-**更新** 新增的多RAM架构和scheduler-hash-worker并发模型进一步增强了去重缓存的处理能力和性能表现。
+**更新** 新增的多RAM架构、scheduler-hash-worker并发模型以及时间加权平均占用率跟踪功能进一步增强了去重缓存的处理能力和性能表现。
 
 章节来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 - [dedup_cache.cpp](file://iommu/cache_src/cache/dedup_cache.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [cache_base.h](file://iommu/cache_src/cache/cache_base.h)
 - [cache_base.cpp](file://iommu/cache_src/cache/cache_base.cpp)
 - [cache_line.h](file://iommu/cache_src/cache/cache_line.h)
@@ -222,7 +227,6 @@ CS --> TYPES
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
 
 ## 架构总览
 下图展示了去重缓存与其他缓存及子系统之间的交互关系，以及配置与统计的支撑链路。
@@ -245,6 +249,16 @@ class 去重缓存 {
 +dedup_flush_callback() void
 +多RAM访问() void
 +哈希分发() void
+}
+class 去重缓冲区 {
++allocate_entry() uint16_t
++free_entry(uint16_t) void
++is_full() bool
++get_valid_count() uint16_t
++settle_occupancy() void
++get_avg_occupancy() double
++get_avg_occupancy_pct() double
++get_occupancy_window_ns() double
 }
 class 页表缓存
 class 数据缓存
@@ -285,6 +299,7 @@ class 哈希分发器 {
 +负载均衡() void
 }
 去重缓存 --|> 缓存基类 : "继承"
+去重缓存 --> 去重缓冲区 : "使用"
 页表缓存 --|> 缓存基类 : "继承"
 数据缓存 --|> 缓存基类 : "继承"
 页目录缓存 --|> 缓存基类 : "继承"
@@ -314,6 +329,7 @@ SRRIP策略 ..|> 替换策略接口
 - [cache_base.cpp](file://iommu/cache_src/cache/cache_base.cpp)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 - [dedup_cache.cpp](file://iommu/cache_src/cache/dedup_cache.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [pt_cache.h](file://iommu/cache_src/cache/pt_cache.h)
 - [dc_cache.h](file://iommu/cache_src/cache/dc_cache.h)
 - [pc_cache.h](file://iommu/cache_src/cache/pc_cache.h)
@@ -353,12 +369,15 @@ SRRIP策略 ..|> 替换策略接口
 sequenceDiagram
 participant 调用方 as "调用方"
 participant 去重缓存 as "去重缓存"
+participant 去重缓冲区 as "去重缓冲区"
 participant 哈希分发 as "哈希分发器"
 participant RAM模块 as "RAM模块"
 participant 基类 as "缓存基类"
 participant 策略 as "替换策略"
 participant 统计 as "统计收集器"
 调用方->>去重缓存 : "查找(键)"
+去重缓存->>去重缓冲区 : "检查缓冲区状态"
+去重缓冲区-->>去重缓存 : "缓冲区状态"
 去重缓存->>哈希分发 : "计算哈希(键)"
 哈希分发-->>去重缓存 : "目标RAM索引"
 去重缓存->>RAM模块 : "访问指定RAM"
@@ -385,6 +404,7 @@ Note over 去重缓存 : 多RAM架构和哈希分发机制
 图表来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 - [dedup_cache.cpp](file://iommu/cache_src/cache/dedup_cache.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [cache_base.h](file://iommu/cache_src/cache/cache_base.h)
 - [cache_base.cpp](file://iommu/cache_src/cache/cache_base.cpp)
 - [replacement_policy.h](file://iommu/cache_src/replacement/replacement_policy.h)
@@ -395,12 +415,59 @@ Note over 去重缓存 : 多RAM架构和哈希分发机制
 章节来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 - [dedup_cache.cpp](file://iommu/cache_src/cache/dedup_cache.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [cache_base.h](file://iommu/cache_src/cache/cache_base.h)
 - [cache_base.cpp](file://iommu/cache_src/cache/cache_base.cpp)
 - [replacement_policy.h](file://iommu/cache_src/replacement/replacement_policy.h)
 - [plru_policy.h](file://iommu/cache_src/replacement/plru_policy.h)
 - [srrip_policy.h](file://iommu/cache_src/replacement/srrip_policy.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
+
+### 去重缓冲区（Dedup Buffer）
+- 设计要点
+  - 任务管理：管理等待PTW完成的任务链表，支持顺序分配和链表挂接。
+  - 内存优化：使用紧凑的数据结构，减少内存占用。
+  - **更新** 时间加权平均占用率跟踪：通过occupancy_integral_字段记录缓冲区占用的时间积分。
+  - **更新** 精确的占用率统计：提供get_avg_occupancy()、get_avg_occupancy_pct()等方法。
+- 核心功能
+  - allocate_entry()：分配Entry，按顺序线性查找第一个空闲位置。
+  - free_entry()：释放Entry，记录持有延时并通知反压等待者。
+  - settle_occupancy()：**新增** 结算时间加权占用积分，在valid_count变化前调用。
+  - get_avg_occupancy()：**新增** 获取时间加权平均占用率。
+  - get_avg_occupancy_pct()：**新增** 获取占用率百分比。
+  - get_occupancy_window_ns()：**新增** 获取占用统计窗口时长。
+- 统计特性
+  - valid_count：当前有效Entry数量。
+  - peak_valid_count：峰值有效Entry数量。
+  - total_hold_ns：总持有延时。
+  - hold_count：持有次数。
+  - max_hold_ns/min_hold_ns：最大/最小持有延时。
+  - occupancy_integral_：**新增** 时间加权占用积分。
+  - first_change_ns_/last_change_ns_：**新增** 首次/上次变化时刻。
+
+```mermaid
+flowchart TD
+Start(["进入allocate_entry"]) --> CheckFull{"Buffer是否已满?"}
+CheckFull --> |是| ReturnErr["返回错误"]
+CheckFull --> |否| FindFree["查找空闲Entry"]
+FindFree --> Found{"找到空闲Entry?"}
+Found --> |否| ReturnErr
+Found --> |是| ClearEntry["清除Entry"]
+ClearEntry --> SetValid["设置valid=1"]
+SetValid --> RecordTime["记录申请时刻alloc_time_ns"]
+RecordTime --> Settle["调用settle_occupancy()"]
+Settle --> IncrementCount["valid_count++"]
+IncrementCount --> UpdatePeak["更新peak_valid_count"]
+UpdatePeak --> ReturnIdx["返回索引"]
+ReturnErr --> End(["结束"])
+ReturnIdx --> End
+```
+
+**图表来源**
+- [dedup_buffer.h:92-113](file://iommu/cache_src/common/dedup_buffer.h#L92-L113)
+
+章节来源
+- [dedup_buffer.h:20-177](file://iommu/cache_src/common/dedup_buffer.h#L20-L177)
 
 ### 缓存基类与缓存行
 - 缓存基类
@@ -439,10 +506,9 @@ ReturnMiss --> End
 ### 替换策略（PLRU与SRRIP）
 - 接口抽象
   - 提供统一的"选择淘汰候选"方法，由具体策略实现。
-- PLRU
-  - 基于伪最近最少使用树结构，适合硬件友好实现，近似LRU效果。
-- SRRIP
-  - 基于扫描式随机替换改进策略，兼顾公平性与实现成本。
+- 策略特点
+  - PLRU：基于伪最近最少使用树结构，适合硬件友好实现，近似LRU效果。
+  - SRRIP：基于扫描式随机替换改进策略，兼顾公平性与实现成本。
 
 ```mermaid
 classDiagram
@@ -502,7 +568,6 @@ participant 其他 as "其他缓存"
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 
@@ -511,7 +576,6 @@ participant 其他 as "其他缓存"
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [default_config.json](file://iommu/cache_config/default_config.json)
-- [input_params_example.json](file://iommu/cache_config/input_params_example.json)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
 
@@ -537,6 +601,8 @@ DEDUP -.-> DC["数据缓存(解耦)"]
 DEDUP --> FIFO["set_forward_fifo机制"]
 FIFO --> CALLBACK["dedup_flush_callback"]
 DEDUP --> HASH["哈希分发器"]
+DEDUP --> BUFFER["去重缓冲区<br/>时间加权统计"]
+BUFFER --> STATS["占用率统计"]
 HASH --> RAM1["RAM模块1"]
 HASH --> RAM2["RAM模块2"]
 HASH --> RAM3["RAM模块3"]
@@ -545,6 +611,7 @@ HASH --> RAM4["RAM模块4"]
 
 图表来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [pt_cache.h](file://iommu/cache_src/cache/pt_cache.h)
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [pc_cache.h](file://iommu/cache_src/cache/pc_cache.h)
@@ -553,6 +620,7 @@ HASH --> RAM4["RAM模块4"]
 
 章节来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [pt_cache.h](file://iommu/cache_src/cache/pt_cache.h)
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [pc_cache.h](file://iommu/cache_src/cache/pc_cache.h)
@@ -642,15 +710,31 @@ Worker1-->>Client : "返回结果"
   - 报告内容包括延迟统计、任务计数、命中率等关键指标
 - **更新** 新增的多RAM架构和并发处理模型提升了处理效率
 
+### 时间加权平均占用率统计
+**新增** 去重缓冲区现在支持时间加权平均占用率跟踪，提供更精确的缓冲区使用模式分析：
+
+- **占用率积分跟踪**
+  - occupancy_integral_：记录缓冲区占用的时间积分（单位：entry·ns）
+  - 在valid_count变化前调用settle_occupancy()进行结算
+- **平均占用率计算**
+  - get_avg_occupancy()：获取时间加权平均占用率
+  - get_avg_occupancy_pct()：获取占用率百分比
+- **统计窗口管理**
+  - get_occupancy_window_ns()：获取占用统计窗口时长
+  - first_change_ns_/last_change_ns_：跟踪首次和上次变化时刻
+
 ### 监控数据流
 ```mermaid
 sequenceDiagram
 participant 调度器 as "去重调度器"
+participant 缓冲区 as "去重缓冲区"
 participant 监控 as "性能监控器"
 participant 统计 as "统计收集器"
 participant 报告 as "报告生成器"
 participant 回调 as "dedup_flush_callback"
 调度器->>监控 : "记录执行开始时间"
+调度器->>缓冲区 : "分配Entry"
+缓冲区->>缓冲区 : "settle_occupancy()"
 调度器->>调度器 : "执行去重操作"
 调度器->>回调 : "触发刷新回调"
 调度器->>监控 : "记录执行结束时间"
@@ -663,6 +747,7 @@ participant 回调 as "dedup_flush_callback"
 图表来源
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [iommu_top.cc](file://iommu/iommu_top.cc)
 
 ### 统计变量说明
@@ -672,10 +757,14 @@ participant 回调 as "dedup_flush_callback"
 - `dedup_miss_count_`：去重未命中次数
 - `total_execution_time_`：总执行时间统计
 - `avg_execution_time_`：平均执行时间统计
+- **新增** `occupancy_integral_`：时间加权占用积分
+- **新增** `first_change_ns_`：首次变化时刻
+- **新增** `last_change_ns_`：上次变化时刻
 
 **章节来源**
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 - [iommu_top.cc](file://iommu/iommu_top.cc)
 
 ## 依赖关系分析
@@ -708,6 +797,8 @@ SUB --> REPORT["报告生成器"]
 DEDUP --> FIFO["set_forward_fifo"]
 DEDUP --> CALLBACK["dedup_flush_callback"]
 DEDUP --> HASH["哈希分发器"]
+DEDUP --> BUFFER["去重缓冲区<br/>时间加权统计"]
+BUFFER --> STATS
 HASH --> RAM1["RAM模块1"]
 HASH --> RAM2["RAM模块2"]
 HASH --> RAM3["RAM模块3"]
@@ -727,6 +818,7 @@ HASH --> RAM4["RAM模块4"]
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 
 章节来源
 - [dedup_cache.h](file://iommu/cache_src/cache/dedup_cache.h)
@@ -741,6 +833,7 @@ HASH --> RAM4["RAM模块4"]
 - [walker_cache.h](file://iommu/cache_src/cache/walker_cache.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 
 ## 性能考量
 - 命中率与容量
@@ -762,6 +855,10 @@ HASH --> RAM4["RAM模块4"]
 - **更新** 并发处理模型
   - scheduler-hash-worker模型提供高效的并发处理能力
   - 工作线程间无锁设计，减少竞争开销
+- **更新** 时间加权占用率统计
+  - 提供更精确的缓冲区使用模式分析
+  - 支持长期运行时的占用率趋势观察
+  - 帮助识别缓冲区使用高峰和低谷时段
 
 ## 故障排查指南
 - 常见问题
@@ -771,28 +868,32 @@ HASH --> RAM4["RAM模块4"]
   - **更新** 调度延迟过高：使用性能监控报告分析具体的延迟分布和任务计数。
   - **更新** 回调函数问题：检查dedup_flush_callback的实现是否正确。
   - **更新** RAM模块负载不均：检查哈希函数的分布均匀性。
+  - **更新** 缓冲区占用率异常：使用新的时间加权统计功能分析缓冲区使用情况。
 - 定位手段
   - 启用统计收集器，观察命中/未命中/淘汰/失效指标。
   - 使用JSON配置切换策略与容量，进行对比实验。
   - 结合子系统提供的查询接口，查看缓存状态快照。
   - **更新** 使用print_dedup_scheduler_report()生成详细性能报告，分析调度线程性能。
   - **更新** 检查多RAM架构的运行状态和负载均衡情况。
+  - **更新** 使用get_avg_occupancy()和get_avg_occupancy_pct()监控缓冲区占用率。
 - **更新** 性能分析报告解读
   - 重点关注平均执行延迟、最大延迟峰值、任务队列长度等关键指标。
   - 对比不同负载下的性能表现，识别性能瓶颈点。
   - 分析dedup_flush_callback的执行时间和频率。
   - **更新** 监控各RAM模块的使用率和负载分布。
+  - **更新** 分析时间加权占用率的变化趋势，识别缓冲区使用模式。
 
 **章节来源**
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [json_config.h](file://iommu/cache_src/common/json_config.h)
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)
 
 ## 结论
 去重缓存通过识别并合并重复访问，显著降低页表遍历与访存开销。其与缓存基类、替换策略、统计收集器及配置系统的解耦设计，使得扩展与维护更加便捷。在实际部署中，应结合工作负载特征选择合适的容量与策略，并通过统计观测持续优化。
 
-**更新** 新增的多RAM架构和scheduler-hash-worker并发处理模型进一步提升了去重缓存的性能和灵活性，通过4个RAM模块的并行处理和哈希分布机制，为高效处理去重操作提供了更强的支持。
+**更新** 新增的多RAM架构、scheduler-hash-worker并发处理模型以及时间加权平均占用率跟踪功能进一步提升了去重缓存的性能和灵活性。通过4个RAM模块的并行处理、哈希分布机制和精确的缓冲区使用模式分析，为高效处理去重操作提供了更强的支持。
 
 ## 附录
 - 配置参考
@@ -807,6 +908,11 @@ HASH --> RAM4["RAM模块4"]
   - **更新** 多RAM访问接口：支持4个RAM模块的并行访问
   - **更新** 哈希分发接口：实现负载均衡和请求路由
   - **更新** 并发控制接口：支持scheduler-hash-worker模型
+  - **新增** 时间加权占用率统计接口：
+    - settle_occupancy()：结算时间加权占用积分
+    - get_avg_occupancy()：获取时间加权平均占用率
+    - get_avg_occupancy_pct()：获取占用率百分比
+    - get_occupancy_window_ns()：获取占用统计窗口时长
 
 **章节来源**
 - [default_config.json](file://iommu/cache_config/default_config.json)
@@ -817,3 +923,4 @@ HASH --> RAM4["RAM模块4"]
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [iommu_top.cc](file://iommu/iommu_top.cc)
+- [dedup_buffer.h](file://iommu/cache_src/common/dedup_buffer.h)

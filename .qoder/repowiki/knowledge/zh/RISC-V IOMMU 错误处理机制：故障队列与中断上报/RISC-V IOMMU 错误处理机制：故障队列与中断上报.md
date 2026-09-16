@@ -7,51 +7,68 @@ scope:
 source_files:
     - iommu/include/iommu_fault.hh
     - iommu/iommu_fun_model/iommu_faults.cc
-    - iommu/include/iommu_interrupt.hh
-    - iommu/iommu_fun_model/iommu_ats.cc
+    - iommu/include/iommu_registers.hh
     - iommu/iommu_fun_model/iommu_translate.cc
-    - iommu/iommu_fun_model/iommu_second_stage_trans.cc
-    - iommu/iommu_fun_model/iommu_two_stage_trans.cc
-    - iommu/iommu_fun_model/iommu_msi_trans.cc
+    - iommu/iommu_fun_model/iommu_atc.cc
+    - iommu/iommu_fun_model/iommu_ats.cc
+    - iommu/cache_src/common/mini_json.h
+    - iommu/cache_src/cache/cache_base.h
 ---
 
-该仓库是一个基于 SystemC 的 RISC-V IOMMU 性能模型，其错误处理完全遵循 RISC-V IOMMU 规范，采用**硬件风格的故障记录 + 内存故障队列 + 中断上报**机制，而非 C++ 异常或返回值错误码。核心设计如下：
+该仓库实现了基于 RISC-V IOMMU 规范的错误处理机制，核心围绕**故障队列（Fault Queue）**、**页请求队列（Page Request Queue）**和**中断上报**构建。错误处理分为两个层面：硬件模拟层的结构化故障记录，以及缓存子系统层的 C++ 异常处理。
 
-### 1. 故障类型与编码
-- 所有错误以 `cause`（12位）形式表示，定义在 `iommu_fault.hh` 中，包括：
-  - 访问类：`RVI_IOMMU_ACCESS_FAULT`(0x01)、`RVI_IOMMU_DATA_CORRUPTION`(0x02)
-  - Guest 阶段：`RVI_IOMMU_GST_PAGE_FAULT`(0x21)、`RVI_IOMMU_GST_ACCESS_FAULT`(0x22)、`RVI_IOMMU_GST_DATA_CORRUPTION`(0x23)
-  - 页表/MSI/PDT/DDT 等专用错误（256~274），如 DDT 加载访问失败、MSI PTE 无效、内部数据通路错误等
-- 事务类型通过 `TTYP` 字段（6位）标识，区分未翻译/已翻译读执行、PCIe ATS 请求、Message Request 等
+## 1. 故障记录与上报机制
 
-### 2. 故障记录结构
-- `fault_rec_t` 是 32 字节对齐的内存结构体，包含 CAUSE、PID、PV、PRIV、TTYP、DID、iotval、iotval2 等字段
-- 通过 `report_fault()` 统一入口函数生成并写入故障队列
+### 故障记录结构
+- `fault_rec_t`（`iommu_fault.hh:63-77`）：32 字节固定格式的故障记录，包含 CAUSE（12位）、PID（20位）、PV/PRIV、TTYP（事务类型）、DID、iotval、iotval2 等字段
+- 支持多种故障原因常量：`RVI_IOMMU_ACCESS_FAULT`(0x01)、`RVI_IOMMU_GST_PAGE_FAULT`(0x21) 等
 
-### 3. 故障队列（Fault Queue）机制
-- 位于内存中的环形队列，由 `fqb`（基址）、`fqh`（头指针）、`fqt`（尾指针）、`log2szm1`（大小）寄存器控制
-- 写入前检查：`fqon`（启用）、`fqen`（使能）、`fqmf`（内存访问故障标志）、`fqof`（溢出标志）
-- 队列满时设置 `fqof=1` 并触发 FAULT_QUEUE 中断；写入失败时设置 `fqmf=1`
-- 支持 `DTF`（Disable Translation Fault）位过滤：当 DTF=1 时，仅允许特定 cause（256/257/258/259/268/272/273）上报
+### 统一上报接口
+- `report_fault()`（`iommu_faults.cc:9-159`）：唯一的外部故障上报入口，所有翻译路径通过此函数集中处理
+- 实现 DTF（Disable Translation Fault）过滤逻辑，根据配置选择性屏蔽翻译相关故障
+- 自动检查故障队列状态：启用标志（fqon/fqen）、溢出（fqof）、内存访问故障（fqmf）
 
-### 4. 中断系统
-- 通过 `generate_interrupt(iommu, unit)` 统一触发，unit 包括 COMMAND_QUEUE、FAULT_QUEUE、HPM、PAGE_QUEUE
-- 中断状态由 `ipsr`（interrupt pending status register）管理，支持 `fie`（enable）和 `fip`（pending）位
-- MSI 相关错误（如 273）会直接调用 `report_fault` 上报
+### 寄存器映射
+- `fqb_t`（`iommu_registers.hh:374-394`）：故障队列基址和大小配置
+- `fqh_t`/`fqt_t`：软件头指针和硬件尾指针
+- `fqcsr_t`（`iommu_registers.hh:550-564`）：故障队列控制状态寄存器
 
-### 5. 错误传播模式
-- 各功能模块（ATC、ATS、Translate、Second Stage、Two Stage、MSI）遇到错误时，使用 `goto stop_and_report_fault` 或直接调用 `report_fault` 跳转至统一错误路径
-- 不使用 C++ 异常（无 throw/catch/exception），也不使用返回值错误码
-- 调试信息通过 `printf("[MODULE] ...")` 输出到 stdout，便于日志分析
+## 2. 故障传播路径
 
-### 6. 关键文件
-- `iommu/include/iommu_fault.hh`：故障类型常量、`fault_rec_t` 结构体、`report_fault` 声明
-- `iommu/iommu_fun_model/iommu_faults.cc`：`report_fault` 实现，含完整的队列操作逻辑
-- `iommu/include/iommu_interrupt.hh`：中断单元枚举、`generate_interrupt` 声明
-- `iommu/iommu_fun_model/iommu_ats.cc`、`iommu_translate.cc`、`iommu_second_stage_trans.cc`、`iommu_two_stage_trans.cc`、`iommu_msi_trans.cc`：各模块的错误检测与上报点
+### 翻译路径中的故障点
+- `iommu_translate.cc`：设备上下文查找失败、页表遍历错误时跳转到 `stop_and_report_fault` 标签
+- `iommu_atc.cc`：权限检查失败（执行/读/写权限）跳转到 `page_fault` 标签
+- `iommu_ats.cc`：ATS 请求处理中的各种错误场景调用 `report_fault()`
 
-### 约定与约束
-- 所有故障必须通过 `report_fault` 上报，禁止直接操作寄存器绕过队列
-- 故障记录写入失败后，后续故障被丢弃直到软件清除 `fqmf`/`fqof` 位
-- DTF 位严格过滤翻译相关故障，但非翻译类错误（如 DDT 损坏、内部错误）始终上报
-- 中断触发需检查是否已 pending 且未被 mask（`fip==1 && fie==0`）
+### 中断生成
+- `generate_interrupt()` 在故障队列写入后触发 FAULT_QUEUE 中断
+- 支持 MSI 中断和传统中断两种模式
+- 中断挂起位（fip）在队列状态变化时设置
+
+## 3. 缓存子系统的异常处理
+
+### JSON 配置解析异常
+- `mini_json.h`：自定义 JSON 解析器，使用 `std::runtime_error` 抛出类型不匹配、键不存在等错误
+- 严格的类型转换操作符，失败时立即抛出异常而非返回错误码
+
+### 资源管理异常安全
+- `cache_base.h:826-829`：RAII 风格的异常安全包装，确保 RAM 端口释放不被异常中断
+- 使用 `catch (...)` 捕获所有异常并重新抛出，保证资源清理
+
+## 4. 设计约定与约束
+
+### 故障优先级
+1. 首先检查 DTF 位决定是否报告翻译相关故障
+2. 验证故障队列是否启用且未处于错误状态
+3. 检查队列溢出条件，设置 fqof 位并丢弃记录
+4. 写入队列时检测内存访问故障，设置 fqmf 位
+
+### 错误恢复策略
+- 故障队列满或访问错误时，设置相应状态位并停止后续故障记录
+- 需要软件显式清除错误位才能恢复故障记录功能
+- 中断机制通知软件及时响应和处理
+
+### 性能模型中的错误处理
+- 性能统计模块使用 `cause` 字段分类统计不同类型的故障
+- 虚拟化场景下区分普通页故障和 Guest 页故障（cause 20/21/23）
+- 支持 A/D 位更新失败的隐式故障处理（GADE/SADE 位控制）

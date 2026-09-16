@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: rp
-title: IOMMU 地址转换回归测试场景集（RP）
-scope:
-    - rp/
-source_files: []
-depends_on: []
-related_to: []

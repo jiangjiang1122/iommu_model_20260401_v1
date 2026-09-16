@@ -3,50 +3,19 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-07-31T01:13:48Z"
+exported_at: "2026-09-14T02:10:45Z"
 modules:
     "":
-        dir_name: RISC-V IOMMU SystemC 仿真平台
-        title: RISC-V IOMMU SystemC 仿真平台
+        dir_name: RISC-V IOMMU SystemC 性能仿真模型
+        title: RISC-V IOMMU SystemC 性能仿真模型
         scope: []
-        source_files: []
-        children:
-            - rp
-        depends_on: []
-        related_to: []
-    analysis_scripts:
-        dir_name: IOMMU 性能分析脚本集（tmp）
-        title: IOMMU 性能分析脚本集（tmp）
-        scope:
-            - tmp/
-        source_files: []
-        children: []
-        depends_on: []
-        related_to: []
-    device_models:
-        dir_name: IOMMU 性能模型子系统（DDR_PCIe NoC_RP_Slink）
-        title: IOMMU 性能模型子系统（DDR/PCIe NoC/RP/Slink）
-        scope:
-            - ddr/
-            - pcienoc/
-            - rp/
-            - slink/
-        source_files: []
-        children: []
-        depends_on: []
-        related_to: []
-    iommu_core:
-        dir_name: IOMMU 性能模型核心（缓存子系统与失效通路）
-        title: IOMMU 性能模型核心（缓存子系统与失效通路）
-        scope:
-            - iommu/
         source_files: []
         children: []
         depends_on: []
         related_to: []
     rp:
-        dir_name: IOMMU 地址转换回归测试场景集（RP）
-        title: IOMMU 地址转换回归测试场景集（RP）
+        dir_name: IOMMU RP 测试与验证平台
+        title: IOMMU RP 测试与验证平台
         scope:
             - rp/
         source_files: []

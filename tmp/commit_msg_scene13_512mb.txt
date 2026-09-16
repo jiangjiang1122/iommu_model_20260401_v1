@@ -1,0 +1,18 @@
+feat(scene13-v4-512mb): 场景13-v4 IOVA随机范围扩至512MB + PTW并发/去重Buffer深度参数化调优测试
+
+- 新增测试项 rand4k_msi_mix_s2on_128g_512mb: 基于场景13-v4(4KB随机读写+SQ/CQ/MSI混合负载,
+  10000包, 两阶段翻译+S2开启, 全局outstanding508), IOVA数据随机范围16MB->512MB,
+  GPA 50个2MB大页(100MB), MSI/SQ/CQ的IOVA与GPA上移避免与数据区重叠
+- Makefile 新增 SCENE13_PTW / SCENE13_BUFFER 命令行覆盖变量, 支持PTW并发任务数目与
+  去重Buffer深度参数化调优
+- 512MB IOVA场景4组参数矩阵仿真(均10000/10000功能PASS, 无死锁无fault):
+  Buf512+PTW27: 稳态222.27M IOPS(88.9%);  Buf266+PTW27: 153.46M(61.4%, bypass 490)
+  Buf266+PTW64: 稳态234.67M IOPS(93.9%, bypass 219, Buffer 100%打满)
+  Buf512+PTW64: 稳态241.27M IOPS(96.5%, bypass 0, Buffer峰值391/512=76.4%)
+- 最优组合Buf512+PTW64关键指标: IO avg e2e 1890.9ns/max 4952ns, 去重Cache命中86.31%,
+  PTW总任务3595(主902+预取2693), 主任务avg DDR 3.55, 预取2.00, PTW avg exec 290.87ns,
+  PTW注入/输出间隔56.46/52.86ns, Walker C3命中69.29%, S2 Walker Cache 100%, MSIPT 100%
+- 结论: Buffer>=峰值需求(391)彻底消除bypass; PTW并发64为最强吞吐杠杆且反向缓解Buffer压力
+
+变更文件: Makefile, rp/test_rp_rand4k_msi_mix_thread.cc, iommu/iommu_top.cc,
+iommu/iommu_top.hh, iommu/include/iommu_task.hh, iommu/cache_src/common/dedup_buffer.h

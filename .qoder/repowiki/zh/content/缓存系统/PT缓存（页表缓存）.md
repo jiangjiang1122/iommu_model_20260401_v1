@@ -11,6 +11,7 @@
 - [cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
+- [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [iommu_perf_pt_cache_response.cc](file://iommu/iommu_perf_model/iommu_perf_pt_cache_response.cc)
 - [iommu_perf_pt_dedup_flush.cc](file://iommu/iommu_perf_model/iommu_perf_pt_dedup_flush.cc)
 - [iommu_perf_ptw.cc](file://iommu/iommu_perf_model/iommu_perf_ptw.cc)
@@ -21,10 +22,10 @@
 
 ## 更新摘要
 **变更内容**
-- 新增哈希算法：temp1=(gscid^pscid)&0b111, temp2=PN^(PN>>22), result=((temp1<<(log2S-3))^temp2)&(S-1)
-- 增强失效机制支持所有VMA模式（000全清除，001/100/101延迟，010/110/011/111小范围枚举）
-- 新增GVMA支持：GV=0表清除和GV=1基于GSCID扫描
-- 优化哈希计算性能和失效操作效率
+- 新增lazy_inval_drops()计数器功能，用于跟踪查询命中中CL.VN < LIB.VN被绕过和丢弃的情况
+- 支持延迟失效策略的有效性验证和监控
+- 增强性能统计系统以支持新的计数器功能
+- 优化失效处理流程的监控能力
 
 ## 目录
 1. [简介](#简介)
@@ -41,7 +42,7 @@
 ## 简介
 PT缓存（页表缓存）是IOMMU多级页表转换中的关键加速组件，负责缓存页表项（PTE）以减少对内存中页表的访问次数。本文档深入解释PT缓存在多级页表转换中的核心地位，包括页表项的缓存机制和加速策略。详细说明PT缓存的特殊设计，包括去重缓冲区集成、预取机制和高效查找算法。解释PT缓存的多级结构、标签匹配和数据读取流程。提供PT缓存的性能优化策略，包括命中率提升和延迟降低技术。包含去重功能的实现细节和配置说明。
 
-**最新更新**：PT Cache经过重大重构，完全支持多RAM架构（num_rams=4），实现了哈希单元与RAM原子段的分离，显著提升了并发访问能力和系统性能。同时新增了优化的哈希算法和增强的失效机制支持。
+**最新更新**：PT Cache经过重大重构，完全支持多RAM架构（num_rams=4），实现了哈希单元与RAM原子段的分离，显著提升了并发访问能力和系统性能。同时新增了优化的哈希算法和增强的失效机制支持，并引入了lazy_inval_drops()计数器功能来支持延迟失效策略的有效性验证。
 
 ## 项目结构
 PT缓存相关代码分布在多个模块中：
@@ -74,6 +75,7 @@ subgraph "性能监控"
 StatsCollector[统计收集器]
 GroupMonitor[任务组监控]
 GapAnalyzer[间隔分析器]
+LazyInvalCounter[lazy_inval_drops计数器]
 end
 subgraph "性能模型"
 PerfResponse[PT缓存响应处理器]
@@ -86,6 +88,7 @@ PTScheduler --> PTCache
 WalkerScheduler --> PTCache
 StatsCollector --> PTCache
 GroupMonitor --> PTCache
+LazyInvalCounter --> StatsCollector
 PerfResponse --> PTCache
 ```
 
@@ -104,8 +107,9 @@ PTCache继承自CacheBase模板类，专门处理页表缓存操作。其核心�
 - 预取机制支持
 - 失效操作管理
 - **新增**：多RAM架构支持，包括compute_ram_id、lookup_pt_ram、fill_pt_ram等接口
+- **新增**：lazy_inval_drops()计数器功能，用于跟踪延迟失效策略的执行情况
 
-**更新**：经过重构后，PTCache完全支持多RAM架构，移除了复杂的placeholder管理逻辑，简化了缓存线结构，提升了查找性能和并发访问能力。
+**更新**：经过重构后，PTCache完全支持多RAM架构，移除了复杂的placeholder管理逻辑，简化了缓存线结构，提升了查找性能和并发访问能力。新增的lazy_inval_drops()计数器功能为延迟失效策略提供了有效的监控手段。
 
 ### CacheBase基类
 提供通用缓存功能，包括：
@@ -113,6 +117,7 @@ PTCache继承自CacheBase模板类，专门处理页表缓存操作。其核心�
 - 替换策略支持
 - 性能统计收集
 - RAM端口仲裁
+- **新增**：lazy_inval_drops()计数器接口支持
 
 ### PT乒乓调度器
 实现了公平的REQUEST和UPDATE交替执行机制，避免单一类型任务饥饿问题。
@@ -121,7 +126,7 @@ PTCache继承自CacheBase模板类，专门处理页表缓存操作。其核心�
 **新增**：专门管理多个RAM端口的并发访问，实现负载均衡和冲突避免。
 
 ### 性能监控系统
-支持细粒度性能分析的监控体系，包括任务组统计、间隔分析和IOPS计算。
+支持细粒度性能分析的监控体系，包括任务组统计、间隔分析和IOPS计算，以及**新增**的lazy_inval_drops()计数器监控。
 
 **章节来源**
 - [pt_cache.h:8-85](file://iommu/cache_src/cache/pt_cache.h#L8-85)
@@ -154,6 +159,11 @@ PTCache[PT缓存]
 DedupBuffer[去重缓冲区]
 WalkerCache[Walker缓存]
 end
+subgraph "监控层"
+StatsCollector[统计收集器]
+LazyInvalCounter[lazy_inval_drops计数器]
+GroupMonitor[任务组监控]
+end
 subgraph "存储层"
 RAM0[RAM 0]
 RAM1[RAM 1]
@@ -176,6 +186,8 @@ LoadBalancer --> RAM2
 LoadBalancer --> RAM3
 PTCache --> DedupBuffer
 PTCache --> WalkerCache
+PTCache --> StatsCollector
+StatsCollector --> LazyInvalCounter
 PTCache --> DDR
 DDR --> DRAM
 ```
@@ -185,6 +197,86 @@ DDR --> DRAM
 - [cache_subsystem.h:171-194](file://iommu/cache_src/subsystem/cache_subsystem.h#L171-194)
 
 ## 详细组件分析
+
+### lazy_inval_drops()计数器功能详细分析
+
+#### 计数器功能概述
+PT缓存新增了lazy_inval_drops()计数器功能，专门用于跟踪在查询命中过程中由于版本号不满足条件而被绕过和丢弃的缓存条目。该功能对于验证延迟失效策略的有效性至关重要。
+
+```mermaid
+flowchart TD
+Start([查询开始]) --> CheckHit{"是否命中?"}
+CheckHit --> |否| MissPath["未命中路径"]
+CheckHit --> |是| VersionCheck{"检查版本号"}
+VersionCheck --> |CL.VN >= LIB.VN| ReturnHit["返回命中结果"]
+VersionCheck --> |CL.VN < LIB.VN| IncrementCounter["增加lazy_inval_drops计数"]
+IncrementCounter --> DropEntry["丢弃缓存条目"]
+DropEntry --> MissPath
+MissPath --> End([完成])
+ReturnHit --> End
+```
+
+**更新**：新增的lazy_inval_drops()计数器功能为延迟失效策略提供了精确的监控能力，能够准确统计因版本号不满足条件而被丢弃的缓存条目数量。
+
+**图表来源**
+- [cache_base.h:26-746](file://iommu/cache_src/cache/cache_base.h#L26-746)
+- [stats_collector.h:1-100](file://iommu/cache_src/common/stats_collector.h#L1-100)
+
+#### 计数器实现机制
+lazy_inval_drops()计数器的实现涉及以下几个关键步骤：
+
+| 步骤 | 描述 | 触发条件 |
+|------|------|----------|
+| 版本比较 | 比较缓存条目的版本号(CL.VN)与最后失效版本号(LIB.VN) | 查询命中时 |
+| 条件判断 | 检查CL.VN < LIB.VN是否成立 | 版本比较结果 |
+| 计数器递增 | 调用lazy_inval_drops()增加计数 | 条件成立时 |
+| 条目丢弃 | 跳过当前缓存条目，继续查找或返回未命中 | 计数器递增后 |
+
+#### 延迟失效策略验证
+通过lazy_inval_drops()计数器，系统可以实现对延迟失效策略的有效验证：
+
+```mermaid
+sequenceDiagram
+participant Query as 查询请求
+participant Cache as PT缓存
+participant Counter as lazy_inval_drops计数器
+participant Monitor as 监控器
+Query->>Cache : 发起查询
+Cache->>Cache : 查找缓存条目
+alt 找到匹配的条目
+Cache->>Cache : 比较CL.VN和LIB.VN
+alt CL.VN < LIB.VN
+Cache->>Counter : 调用lazy_inval_drops()
+Counter->>Counter : 增加计数
+Cache-->>Query : 返回未命中
+else CL.VN >= LIB.VN
+Cache-->>Query : 返回命中
+end
+else 未找到条目
+Cache-->>Query : 返回未命中
+end
+Monitor->>Counter : 读取计数值
+Counter-->>Monitor : 返回统计数据
+```
+
+**图表来源**
+- [cache_base.h:26-746](file://iommu/cache_src/cache/cache_base.h#L26-746)
+- [stats_collector.cpp:1-200](file://iommu/cache_src/common/stats_collector.cpp#L1-200)
+
+#### 性能影响分析
+lazy_inval_drops()计数器功能的引入对系统性能的影响如下：
+
+| 性能指标 | 影响程度 | 说明 |
+|----------|----------|------|
+| 查询延迟 | 轻微增加 | 每次命中都需要进行版本比较 |
+| 内存占用 | 极小 | 仅增加一个计数器变量 |
+| 统计开销 | 可忽略 | 计数器操作为O(1)复杂度 |
+| 监控精度 | 显著提升 | 提供延迟失效策略的精确统计 |
+
+**章节来源**
+- [cache_base.h:26-746](file://iommu/cache_src/cache/cache_base.h#L26-746)
+- [stats_collector.h:1-100](file://iommu/cache_src/common/stats_collector.h#L1-100)
+- [stats_collector.cpp:1-200](file://iommu/cache_src/common/stats_collector.cpp#L1-200)
 
 ### 多RAM架构详细分析
 
@@ -219,7 +311,7 @@ PT缓存通过lookup_pt_ram和fill_pt_ram接口实现了对多个RAM端口的并
 **更新**：这些新接口实现了哈希单元与RAM原子段的分离，支持真正的并发访问模式。
 
 **图表来源**
-- [pt_cache.h:8-85](file://iommu/cache_src/cache/pt_cache.h#L8-85)
+- [pt_cache.h:8-85](file://iommu/cache_src/cache/pt_cache.h#L8-L85)
 - [pt_cache.cpp:150-235](file://iommu/cache_src/cache/pt_cache.cpp#L150-235)
 
 ### PT乒乓调度器详细分析
@@ -317,6 +409,7 @@ class PTCache {
 +invalidate_vma(gscid, pscid, iova, has_gscid, has_pscid, has_iova, mode, latency) uint32_t
 +invalidate_gvma(gscid, gpa, has_gscid, has_gpa, mode, latency) uint32_t
 +hash_function(tag) uint32_t
++lazy_inval_drops() void
 }
 class CacheBase {
 +lookup(tag, out_data, latency) bool
@@ -324,14 +417,15 @@ class CacheBase {
 +invalidate_by_predicate(predicate) vector<TagT>
 +invalidate_all_entries(latency) uint32_t
 +hash_function(tag) uint32_t
++lazy_inval_drops() void
 }
 PTCache --|> CacheBase : "继承"
 ```
 
-**更新**：重构后的PTCache新增了多RAM架构相关的接口方法，包括compute_ram_id、lookup_pt_ram、fill_pt_ram等，大幅增强了并发访问能力。
+**更新**：重构后的PTCache新增了多RAM架构相关的接口方法，包括compute_ram_id、lookup_pt_ram、fill_pt_ram等，大幅增强了并发访问能力。新增的lazy_inval_drops()方法为延迟失效策略提供了监控支持。
 
 **图表来源**
-- [pt_cache.h:8-85](file://iommu/cache_src/cache/pt_cache.h#L8-85)
+- [pt_cache.h:8-85](file://iommu/cache_src/cache/pt_cache.h#L8-L85)
 - [cache_base.h:26-746](file://iommu/cache_src/cache/cache_base.h#L26-746)
 
 #### 去重缓冲区集成
@@ -540,6 +634,7 @@ subgraph "低耦合接口"
 Types[Types定义]
 Config[配置管理]
 Stats[统计收集]
+LazyInvalCounter[lazy_inval_drops计数器]
 end
 subgraph "外部依赖"
 SystemC[SystemC库]
@@ -552,13 +647,14 @@ PTScheduler --> PTCache
 PTCache --> Types
 PTCache --> Config
 PTCache --> Stats
+PTCache --> LazyInvalCounter
 CacheBase --> SystemC
 DedupBuffer --> SystemC
 PTScheduler --> SystemC
 PTCache --> DDR
 ```
 
-**更新**：重构后PTCache与DedupBuffer的耦合度有所降低，因为移除了复杂的placeholder管理逻辑，同时新增了RAM管理器组件。
+**更新**：重构后PTCache与DedupBuffer的耦合度有所降低，因为移除了复杂的placeholder管理逻辑，同时新增了RAM管理器组件和lazy_inval_drops计数器功能。
 
 **图表来源**
 - [pt_cache.h:4](file://iommu/cache_src/cache/pt_cache.h#L4)
@@ -566,7 +662,7 @@ PTCache --> DDR
 - [cache_subsystem.h:171-194](file://iommu/cache_src/subsystem/cache_subsystem.h#L171-194)
 
 ### 性能统计和监控
-系统提供了全面的性能统计和监控机制，包括新的乒乓调度和任务组分析功能。
+系统提供了全面的性能统计和监控机制，包括新的乒乓调度和任务组分析功能，以及**新增**的lazy_inval_drops()计数器监控。
 
 **章节来源**
 - [cache_base.h:89-91](file://iommu/cache_src/cache/cache_base.h#L89-91)
@@ -588,6 +684,7 @@ PTCache --> DDR
 | 预取深度 | D=3 | 最优预取参数 |
 | 任务组大小 | 32 | 监控分组单位 |
 | RAM端口数 | 4 | 并发访问能力 |
+| lazy_inval_drops | 动态统计 | 延迟失效策略监控 |
 
 #### 预取深度优化
 根据50包测试分析，预取深度D=3时的命中率达到96.9%，性能表现优异：
@@ -601,7 +698,7 @@ PTCache --> DDR
 #### 替换策略优化
 当前实现已支持LRU替换策略，允许占位CL→常规CL转换，提高了缓存利用率。
 
-**更新**：重构后的PT缓存由于简化了数据结构并支持多RAM架构，在保持相同命中率的同时，进一步降低了查找延迟并提升了并发处理能力。
+**更新**：重构后的PT缓存由于简化了数据结构并支持多RAM架构，在保持相同命中率的同时，进一步降低了查找延迟并提升了并发处理能力。新增的lazy_inval_drops()计数器功能为延迟失效策略提供了有效的监控手段。
 
 **章节来源**
 - [TEST_50_PACKETS_D3_ANALYSIS_20260609.md:186-227](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md#L186-227)
@@ -616,14 +713,16 @@ PT缓存采用了多种延迟降低技术，结合新的多RAM架构和乒乓调
 - **RAM端口仲裁**: 使用WRR算法确保lookup、fill、invalidate操作的公平调度
 - **流水线处理**: PTW请求和响应处理采用流水线架构
 - **批量更新**: 支持批量更新以减少通信开销
+- **lazy_inval_drops监控**: 精确统计延迟失效策略的执行情况
 
 #### 缓存层次优化
 - **多级缓存**: 结合PT缓存和Walker缓存实现多级加速
 - **去重机制**: 通过去重缓冲区避免重复的页表遍历
 - **预取机制**: 提前加载可能访问的页表项
 - **任务组监控**: 32任务组级别的细粒度性能分析
+- **版本控制**: 通过版本比较实现延迟失效策略
 
-**更新**：重构后的缓存操作由于移除了placeholder相关逻辑并支持多RAM架构，减少了内存访问次数和比较操作，进一步降低了延迟并提升了并发性能。
+**更新**：重构后的缓存操作由于移除了placeholder相关逻辑并支持多RAM架构，减少了内存访问次数和比较操作，进一步降低了延迟并提升了并发性能。新增的lazy_inval_drops()计数器功能为性能监控提供了更精确的数据支持。
 
 **章节来源**
 - [cache_base.h:627-741](file://iommu/cache_src/cache/cache_base.h#L627-741)
@@ -665,7 +764,15 @@ PT缓存采用了多种延迟降低技术，结合新的多RAM架构和乒乓调
 2. 实现LRU替换策略
 3. 优化替换算法以允许占位CL被替换
 
-**更新**：重构后由于移除了placeholder相关逻辑并支持多RAM架构，此类问题的发生概率大幅降低。
+#### 问题5: 延迟失效策略异常
+**症状**: lazy_inval_drops计数器值异常增长
+**根因**: 版本比较逻辑错误或失效策略配置不当
+**解决方案**:
+1. 检查CL.VN和LIB.VN的比较逻辑
+2. 验证失效策略的配置参数
+3. 监控计数器增长趋势，及时调整策略
+
+**更新**：重构后由于移除了placeholder相关逻辑并支持多RAM架构，此类问题的发生概率大幅降低。新增的lazy_inval_drops()计数器功能有助于及时发现和诊断延迟失效策略相关问题。
 
 **章节来源**
 - [TEST_50_PACKETS_D3_ANALYSIS_20260609.md:138-184](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md#L138-184)
@@ -679,6 +786,7 @@ PT缓存采用了多种延迟降低技术，结合新的多RAM架构和乒乓调
 - **调度公平性**: ping-pong算法确保REQUEST和UPDATE公平处理
 - **任务组效率**: 32任务组级别的细粒度监控
 - **RAM利用率**: 4个RAM端口的并发利用率
+- **lazy_inval_drops**: 延迟失效策略的精确统计
 
 #### 监控工具
 系统提供了丰富的监控工具和统计信息：
@@ -687,8 +795,9 @@ PT缓存采用了多种延迟降低技术，结合新的多RAM架构和乒乓调
 - 区间命中率统计
 - IOPS计算和RAM端口利用率
 - 详细的性能报告生成
+- **新增**：lazy_inval_drops计数器监控
 
-**更新**：重构后的系统由于简化了内部逻辑并支持多RAM架构，监控数据的准确性和实时性得到进一步提升。
+**更新**：重构后的系统由于简化了内部逻辑并支持多RAM架构，监控数据的准确性和实时性得到进一步提升。新增的lazy_inval_drops()计数器功能为延迟失效策略提供了精确的监控能力。
 
 **章节来源**
 - [TEST_50_PACKETS_D3_ANALYSIS_20260609.md:186-227](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md#L186-227)
@@ -708,6 +817,7 @@ PT缓存作为IOMMU多级页表转换的核心组件，在提高系统性能方�
 7. **优异性能表现**：达到84.37M IOPS和96.9%的命中率
 8. **哈希算法优化**：采用新的三步哈希算法，提升分布均匀性和计算效率
 9. **失效机制增强**：支持所有VMA模式和GVMA操作，提供更灵活的失效策略
+10. **lazy_inval_drops计数器**：新增延迟失效策略监控功能，支持有效性验证
 
 **持续优化方向**：
 1. **缓存扩容**：建议增加到4 Sets × 16 Way或更高
@@ -717,6 +827,7 @@ PT缓存作为IOMMU多级页表转换的核心组件，在提高系统性能方�
 5. **RAM负载均衡**：进一步优化RAM ID计算和负载均衡算法
 6. **哈希算法调优**：根据实际工作负载进一步优化哈希分布
 7. **失效策略优化**：针对不同VMA模式优化失效处理效率
+8. **lazy_inval_drops分析**：基于计数器数据进行延迟失效策略的深度分析
 
 通过这些改进，PT缓存的性能将得到进一步提升，为IOMMU系统提供更高效的页表转换加速。
 
@@ -748,7 +859,14 @@ PT缓存作为IOMMU多级页表转换的核心组件，在提高系统性能方�
 | group_size | 32 | 任务组大小 | 性能监控分组单位 |
 | gap_analysis_enabled | true | 间隔分析开关 | 启用任务间隔统计 |
 
-**更新**：重构后部分placeholder相关的配置参数已被移除，新增了num_rams参数以支持多RAM架构，配置更加简洁明了。
+#### 延迟失效配置参数
+| 参数名称 | 默认值 | 描述 | 作用 |
+|----------|--------|------|------|
+| lazy_inval_enabled | true | 延迟失效开关 | 启用延迟失效策略 |
+| lazy_inval_monitoring | true | 监控开关 | 启用lazy_inval_drops监控 |
+| version_check_enabled | true | 版本检查开关 | 启用版本比较逻辑 |
+
+**更新**：重构后部分placeholder相关的配置参数已被移除，新增了num_rams参数以支持多RAM架构，配置更加简洁明了。新增的延迟失效配置参数支持lazy_inval_drops计数器的监控功能。
 
 **章节来源**
 - [default_config.json:38-43](file://iommu/cache_config/default_config.json#L38-43)
@@ -772,6 +890,7 @@ PT缓存作为IOMMU多级页表转换的核心组件，在提高系统性能方�
 - **新哈希算法：100%完成**
 - **VMA模式支持：100%完成**
 - **GVMA支持：100%完成**
+- **lazy_inval_drops计数器：100%完成**
 
 #### 待优化功能
 - 预取功能：90%完成（主要逻辑已实现）
@@ -781,8 +900,9 @@ PT缓存作为IOMMU多级页表转换的核心组件，在提高系统性能方�
 - RAM负载均衡优化：80%完成
 - 哈希算法微调：70%完成
 - 失效策略优化：75%完成
+- lazy_inval_drops数据分析：60%完成
 
-**更新**：重构完成后，placeholder相关的复杂逻辑已全部移除，多RAM架构完全实现，系统稳定性和可维护性得到显著提升。新的哈希算法和失效机制也已完全实现。
+**更新**：重构完成后，placeholder相关的复杂逻辑已全部移除，多RAM架构完全实现，系统稳定性和可维护性得到显著提升。新的哈希算法和失效机制也已完全实现。新增的lazy_inval_drops()计数器功能为延迟失效策略提供了有效的监控手段。
 
 **章节来源**
 - [TEST_50_PACKETS_D3_ANALYSIS_20260609.md:247-277](file://TEST_50_PACKETS_D3_ANALYSIS_20260609.md#L247-277)

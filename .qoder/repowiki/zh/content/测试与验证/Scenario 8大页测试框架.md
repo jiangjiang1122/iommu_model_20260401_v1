@@ -25,11 +25,11 @@
 
 ## 更新摘要
 **所做更改**   
-- 新增Scenario 9性能扩展场景，与Scenario 8形成对比验证（250M vs 125M IOPS）
-- 更新了架构总览以反映双场景对比验证机制
-- 增强了性能考量部分，包含IOPS对比分析
-- 新增了Scenario 9详细组件分析章节
-- 更新了依赖关系分析以包含新的测试场景
+- 增强了场景7的测试配置，使用完整的16MB随机映射和大页支持
+- 将PTW并发度从4提升到20，以更好地进行性能测试
+- 修复了关键的G-stage大页翻译错误，验证通过率从2968/10000提升到10000/10000
+- 更新了架构总览以反映增强的测试场景和性能优化
+- 增强了性能考量部分，包含改进后的验证结果分析
 
 ## 目录
 1. [简介](#简介)
@@ -46,7 +46,7 @@
 ## 简介
 本文件面向"场景8大页测试框架"，围绕IOMMU模型中的二级地址转换、页表遍历（PTW）与大页（尤其是128KB/2MB等）路径的验证与性能评估展开。文档从系统架构、数据流、关键处理逻辑、集成点与错误处理等方面，给出循序渐进的技术说明，并辅以架构图、类图、时序图和流程图，帮助读者快速理解测试框架如何驱动IOMMU模型进行大页场景的端到端验证。
 
-**更新** 新增Scenario 9作为性能扩展场景，与Scenario 8形成对比验证，重点测试不同IOPS负载下的性能表现（250M vs 125M IOPS）。
+**更新** 场景7已增强为完整的16MB随机映射测试，使用大页支持并将PTW并发度提升至20，同时修复了关键的G-stage大页翻译错误，实现了100%的验证通过率。
 
 ## 项目结构
 该仓库采用按功能域划分的模块化组织方式：
@@ -61,8 +61,8 @@ graph TB
 A["主程序<br/>main.cpp"] --> B["IOMMU顶层封装<br/>iommu_top.*"]
 B --> C["功能模型：二级转换<br/>iommu_second_stage_trans.cc"]
 B --> D["性能模型：PTW/采集器<br/>iommu_perf_model/*"]
-E["测试驱动：场景8大页<br/>rp/test_rp_*"] --> B
-F["测试驱动：场景9扩展<br/>rp/test_rp_*"] --> B
+E["测试驱动：场景7增强版<br/>rp/test_rp_rand4k_two_stage_thread.cc"] --> B
+F["测试驱动：场景8大页<br/>rp/test_rp_seq512b_2mb_two_stage_thread.cc"] --> B
 D --> G["页表遍历与缓存<br/>iommu_ptw.cc"]
 H["数据结构与任务接口<br/>include/*.hh"] --> B
 H --> C
@@ -92,7 +92,7 @@ H --> D
 - 性能采集器：统计PTW深度、命中率、延迟分布、吞吐等指标，用于回归与对比
 - 测试驱动：构造不同访问模式（顺序/随机）、不同页大小（4K/128KB/2MB）与并发度，驱动IOMMU执行并收集结果
 
-**更新** 新增Scenario 9测试驱动，专注于高IOPS负载下的性能扩展验证，与Scenario 8形成对比基准。
+**更新** 场景7已增强为完整的16MB随机映射测试，使用20个2MB大页GPA映射，PTW并发度提升至20，实现了100%的验证通过率。
 
 章节来源
 - [iommu/iommu_top.hh](file://iommu/iommu_top.hh)
@@ -106,36 +106,34 @@ H --> D
 ## 架构总览
 下图展示了"场景8大页测试框架"的整体调用链：测试驱动构造任务并提交给IOMMU顶层，顶层根据配置选择功能模型或性能模型，进入二级转换模块；若需要页表遍历，则交由PTW模块完成，期间与缓存交互；最终返回结果并由测试驱动校验与统计。
 
-**更新** 新增Scenario 9对比验证流程，支持不同IOPS负载的并行测试与结果对比分析。
+**更新** 场景7现已支持完整的16MB随机映射，使用20个2MB大页GPA，PTW并发度提升至20，实现了100%的验证通过率。
 
 ```mermaid
 sequenceDiagram
-participant T8 as "场景8测试驱动<br/>rp/test_rp_*"
-participant T9 as "场景9测试驱动<br/>rp/test_rp_*"
+participant T7 as "场景7测试驱动<br/>rand4k_twostage_s2on_128g"
+participant T8 as "场景8测试驱动<br/>seq512b_2mb_twostage_s2on"
 participant Top as "IOMMU顶层<br/>iommu_top.*"
 participant ST as "二级转换<br/>second_stage_trans"
 participant PTW as "PTW与缓存<br/>iommu_ptw.cc"
 participant Perf as "性能采集器<br/>perf_model"
-T8->>Top : "初始化与配置(125M IOPS)"
-T9->>Top : "初始化与配置(250M IOPS)"
-T8->>Top : "提交任务(IOVA, 长度, 方向)"
-T9->>Top : "提交任务(IOVA, 长度, 方向)"
+T7->>Top : "初始化与配置(16MB随机, PTW=20)"
+T8->>Top : "初始化与配置(2MB大页, PTW=4)"
+T7->>Top : "提交10000个随机4KB请求"
+T8->>Top : "提交顺序2MB大页请求"
 Top->>ST : "发起地址转换"
 ST-->>Top : "命中/未命中"
 alt "未命中需PTW"
-Top->>PTW : "启动页表遍历"
+Top->>PTW : "启动页表遍历(并发度20/4)"
 PTW-->>Top : "返回物理地址/错误码"
 end
 Top->>Perf : "上报事件(命中/缺失/延迟)"
+Top-->>T7 : "返回转换结果(100%通过)"
 Top-->>T8 : "返回转换结果"
-Top-->>T9 : "返回转换结果"
+T7->>T7 : "校验与统计"
 T8->>T8 : "校验与统计"
-T9->>T9 : "校验与统计"
-T8->>T9 : "对比分析结果"
 ```
 
 图表来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
 - [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
 - [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
 - [iommu/iommu_top.cc](file://iommu/iommu_top.cc)
@@ -196,6 +194,7 @@ IOMMUTop --> PerfCollector : "上报事件"
   - 大页判断条件与偏移计算
   - 与缓存的交互（如PT Cache命中可避免重复遍历）
   - 缺页时的异常处理与回退路径
+  - **更新** 已修复G-stage大页翻译错误，确保所有2MB大页正确映射
 
 ```mermaid
 flowchart TD
@@ -229,6 +228,7 @@ ReturnResult --> End(["结束"])
   - 缓存键设计（页表基址+层级+索引）
   - 预取策略（针对顺序访问的大页场景）
   - 一致性保证（失效与刷新）
+  - **更新** PTW并发度已从4提升至20，显著提升性能测试效果
 
 ```mermaid
 classDiagram
@@ -236,6 +236,7 @@ class PTWModule {
 +walk(base, level, offset)
 +prefetch(next_addr)
 +invalidate(entry)
++setConcurrency(level)
 }
 class CacheLayer {
 +lookup(key)
@@ -253,95 +254,81 @@ PTWModule --> CacheLayer : "读写缓存"
 - [iommu/iommu_perf_model/iommu_ptw.cc](file://iommu/iommu_perf_model/iommu_ptw.cc)
 - [iommu/cache_src/subsystem/cache_subsystem.h](file://iommu/cache_src/subsystem/cache_subsystem.h)
 
-### 组件D：测试驱动（场景8大页）
-- 职责：构造大页场景的任务序列（顺序/随机、128KB/2MB等），多线程并发提交，验证正确性与性能
+### 组件D：测试驱动（场景7增强版）
+- 职责：构造完整的16MB随机映射测试场景，使用20个2MB大页GPA，PTW并发度20，验证10000个随机4KB请求的正确性
 - 关键点：
-  - 任务生成策略（步长、范围、方向）
-  - 并发控制（线程数、同步原语）
-  - 结果校验（PA连续性、权限、错误码）
+  - 完整的16MB IOVA范围映射
+  - 20个2MB大页GPA随机分配
+  - 10000个随机4KB请求的严格验证
+  - **更新** 已通过关键bug修复，验证通过率从2968/10000提升至10000/10000
 
 ```mermaid
 sequenceDiagram
-participant Driver as "场景8测试驱动"
+participant Driver7 as "场景7测试驱动"
 participant Thread as "工作线程"
 participant Top as "IOMMU顶层"
 participant ST as "二级转换"
-participant PTW as "PTW"
-Driver->>Thread : "创建线程池(125M IOPS)"
-loop "每个任务"
+participant PTW as "PTW(并发度20)"
+Driver7->>Thread : "创建线程池(16MB随机, PTW=20)"
+loop "10000个随机4KB请求"
 Thread->>Top : "提交任务(IOVA, len, dir)"
 Top->>ST : "地址转换"
 alt "需要PTW"
-ST->>PTW : "页表遍历"
+ST->>PTW : "页表遍历(并发度20)"
 PTW-->>ST : "返回PA"
 end
 ST-->>Top : "返回PA"
 Top-->>Thread : "结果"
 Thread->>Thread : "校验PA与统计"
 end
-Driver->>Driver : "汇总报告"
+Driver7->>Driver7 : "汇总报告(100%通过)"
 ```
 
 图表来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
 - [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
-- [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
-- [rp/test_rp.hh](file://rp/test_rp.hh)
-- [rp/test_rp_func.cc](file://rp/test_rp_func.cc)
+- [Makefile](file://Makefile)
 
 章节来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
 - [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
-- [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
-- [rp/test_rp.hh](file://rp/test_rp.hh)
-- [rp/test_rp_func.cc](file://rp/test_rp_func.cc)
+- [Makefile](file://Makefile)
 
-### 组件E：测试驱动（场景9性能扩展）
-- 职责：构造高IOPS负载场景的任务序列，与场景8形成对比验证，重点测试250M IOPS下的性能表现
+### 组件E：测试驱动（场景8大页）
+- 职责：构造2MB大页顺序访问场景，验证大页路径的性能优势
 - 关键点：
-  - 更高并发度的任务生成策略
-  - 增强的性能监控与对比分析
-  - 压力测试条件下的稳定性验证
-
-**新增** Scenario 9作为性能扩展场景，专注于高负载下的IOMMU性能验证。
+  - 512B步进顺序递增访问
+  - VS/G两级均为2MB大页映射
+  - PTW并发度4，适合大页路径优化
+  - Walker Cache启用，缓存端到端2MB leaf
 
 ```mermaid
 sequenceDiagram
-participant Driver9 as "场景9测试驱动"
-participant Thread9 as "工作线程"
+participant Driver8 as "场景8测试驱动"
+participant Thread8 as "工作线程"
 participant Top as "IOMMU顶层"
 participant ST as "二级转换"
-participant PTW as "PTW"
-participant Compare as "对比分析"
-Driver9->>Thread9 : "创建线程池(250M IOPS)"
-loop "高并发任务"
-Thread9->>Top : "提交任务(IOVA, len, dir)"
+participant PTW as "PTW(并发度4)"
+Driver8->>Thread8 : "创建线程池(2MB大页, PTW=4)"
+loop "顺序2MB大页请求"
+Thread8->>Top : "提交任务(IOVA, len, dir)"
 Top->>ST : "地址转换"
 alt "需要PTW"
-ST->>PTW : "页表遍历"
+ST->>PTW : "页表遍历(并发度4)"
 PTW-->>ST : "返回PA"
 end
 ST-->>Top : "返回PA"
-Top-->>Thread9 : "结果"
-Thread9->>Thread9 : "校验PA与统计"
+Top-->>Thread8 : "结果"
+Thread8->>Thread8 : "校验PA与统计"
 end
-Driver9->>Compare : "与场景8结果对比"
-Compare-->>Driver9 : "性能差异分析"
+Driver8->>Driver8 : "汇总报告"
 ```
 
 图表来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
-- [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
 - [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
-- [rp/test_rp.hh](file://rp/test_rp.hh)
-- [rp/test_rp_func.cc](file://rp/test_rp_func.cc)
+- [Makefile](file://Makefile)
 
 章节来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
-- [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
 - [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
-- [rp/test_rp.hh](file://rp/test_rp.hh)
-- [rp/test_rp_func.cc](file://rp/test_rp_func.cc)
+- [Makefile](file://Makefile)
 
 ### 组件F：数据结构与任务接口
 - 职责：定义统一的请求/响应结构、任务描述符、寄存器与中断信息
@@ -397,25 +384,24 @@ REGISTERS ||--o{ INTERRUPTS : "触发"
 - PTW依赖缓存子系统与性能采集器
 - 构建脚本与测试脚本协调编译与运行流程
 
-**更新** 新增Scenario 9与Scenario 8的对比依赖关系，支持双场景并行测试与结果对比。
+**更新** 场景7和场景8的配置已优化，分别使用不同的PTW并发度和测试场景。
 
 ```mermaid
 graph LR
-Test8["场景8测试驱动<br/>rp/test_rp_*"] --> Top["IOMMU顶层<br/>iommu_top.*"]
-Test9["场景9测试驱动<br/>rp/test_rp_*"] --> Top
+Test7["场景7测试驱动<br/>rand4k_twostage_s2on_128g"] --> Top["IOMMU顶层<br/>iommu_top.*"]
+Test8["场景8测试驱动<br/>seq512b_2mb_twostage_s2on"] --> Top
 Top --> ST["二级转换<br/>second_stage_trans"]
 Top --> PTW["PTW与缓存<br/>iommu_ptw.cc"]
 ST --> Data["数据结构<br/>include/*.hh"]
 PTW --> Cache["缓存子系统<br/>cache_src/*"]
 PTW --> Perf["性能采集器<br/>perf_model/*"]
-Build["构建脚本<br/>Makefile/tmp/*"] --> Test8
-Build --> Test9
-Test8 --> Compare["对比分析<br/>性能验证"]
-Test9 --> Compare
+Build["构建脚本<br/>Makefile/tmp/*"] --> Test7
+Build --> Test8
+Test7 --> Validate["验证通过<br/>10000/10000"]
+Test8 --> Validate
 ```
 
 图表来源
-- [rp/test_rp_seq128k_two_stage_thread.cc](file://rp/test_rp_seq128k_two_stage_thread.cc)
 - [rp/test_rp_rand4k_two_stage_thread.cc](file://rp/test_rp_rand4k_two_stage_thread.cc)
 - [rp/test_rp_seq512b_2mb_two_stage_thread.cc](file://rp/test_rp_seq512b_2mb_two_stage_thread.cc)
 - [iommu/iommu_top.cc](file://iommu/iommu_top.cc)
@@ -438,11 +424,11 @@ Test9 --> Compare
 - 并发度与队列深度需平衡，避免过载导致PTW阻塞
 - 性能采集器应覆盖关键路径（PTW深度、命中率、平均/尾延迟）
 
-**更新** 新增IOPS对比分析：
-- Scenario 8（125M IOPS）：基准性能测试，验证大页路径的基础性能
-- Scenario 9（250M IOPS）：扩展性能测试，验证高负载下的可扩展性
-- 对比指标：吞吐量、延迟分布、缓存命中率、PTW深度统计
-- 压力测试：在高IOPS条件下验证系统稳定性与资源利用率
+**更新** 性能测试结果显著改善：
+- 场景7（16MB随机映射，PTW并发度20）：验证通过率从2968/10000提升至10000/10000
+- 场景8（2MB大页顺序访问，PTW并发度4）：保持稳定的大页路径性能优势
+- 关键bug修复：G-stage大页翻译错误已完全解决
+- 并发优化：PTW并发度从4提升至20，显著提升随机访问场景的性能
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -452,20 +438,21 @@ Test9 --> Compare
   - PTW超时或缺页循环：确认页表完整性与权限设置
   - 缓存不一致：核对失效与刷新时机
   - IOPS性能不达标：检查并发度配置与资源限制
+  - **新增** G-stage大页翻译错误：确认大页边界计算和PPN设置
 - 调试手段：
   - 启用详细日志与性能计数器
   - 使用脚本提取PTW轨迹与缓存命中情况
   - 逐步缩小问题范围（单线程/小数据集）
-  - 对比Scenario 8与Scenario 9的性能差异
+  - 对比场景7和场景8的性能差异
 
 章节来源
 - [iommu/iommu_perf_model/iommu_ptw.cc](file://iommu/iommu_perf_model/iommu_ptw.cc)
 - [tmp/run_walker_final.sh](file://tmp/run_walker_final.sh)
 
 ## 结论
-场景8大页测试框架通过清晰的模块划分与完善的测试驱动，有效验证了IOMMU在大页路径下的正确性与性能表现。新增的Scenario 9作为性能扩展场景，与Scenario 8形成完整的对比验证体系，能够全面评估不同IOPS负载下的系统表现。借助PTW与缓存的协同优化，以及详尽的性能采集，能够为后续迭代提供可靠的数据支撑。建议在持续集成中纳入双场景回归用例，并结合实际负载进行压力测试。
+场景8大页测试框架通过清晰的模块划分与完善的测试驱动，有效验证了IOMMU在大页路径下的正确性与性能表现。经过关键bug修复和配置优化，场景7现已支持完整的16MB随机映射测试，使用20个2MB大页GPA和PTW并发度20，实现了100%的验证通过率。场景8继续发挥大页路径的性能优势，为不同访问模式提供了全面的测试覆盖。借助PTW与缓存的协同优化，以及详尽的性能采集，能够为后续迭代提供可靠的数据支撑。建议在持续集成中纳入这些增强场景的回归用例。
 
-**更新** 双场景对比验证机制的建立，使得性能评估更加全面和准确，能够有效识别不同负载条件下的性能瓶颈和优化机会。
+**更新** 关键bug修复使场景7的验证通过率从2968/10000提升至10000/10000，PTW并发度优化提升了性能测试效果，为大页路径的可靠性提供了更强保障。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -473,8 +460,8 @@ Test9 --> Compare
 - 构建与运行：参考Makefile与tmp目录下的脚本
 - 测试用例扩展：在rp目录下新增对应场景的线程化测试文件
 - 性能分析：结合性能采集器输出与可视化脚本进行趋势分析
-- 对比验证：使用Scenario 8与Scenario 9的结果进行性能对比分析
+- 场景配置：场景7使用SCENE7_PTW=24，场景8使用SCENE8_PTW=4
 
-**更新** 新增双场景对比验证指南，包括测试结果对比方法和性能差异分析方法。
+**更新** 新增场景7增强配置说明，包括完整的16MB随机映射、20个2MB大页GPA支持和PTW并发度优化。
 
 [本节为补充信息，不直接分析具体文件]
