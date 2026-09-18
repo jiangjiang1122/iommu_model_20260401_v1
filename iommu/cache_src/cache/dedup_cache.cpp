@@ -97,7 +97,8 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
         }
     }
 
-    // 步骤2: 有 V=1 & is_req=0(预取占位) 的 way -> 随机淘汰其一
+    // 步骤iii: 有 V=1 & is_req=0(预取占位) 的 way -> 随机淘汰其一并写入
+    //   (架构定义的条件替换: 仅允许淘汰预取占位; is_req=1 主占位受保护不可替换)
     uint32_t victim_count = 0;
     for (uint32_t w = 0; w < num_ways_; w++) {
         if (cache_array_[set][w].valid && !cache_array_[set][w].is_req) {
@@ -118,8 +119,20 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
         }
     }
 
-    // 步骤3: 全部为 is_req=1 受保护占位 -> 插入失败
+    // 步骤iv: 无空位置可写(全为 V=1 & is_req=1) = hash冲突 -> 插入失败,
+    //   调用方(execute_dedup_request)将任务 bypass 直转 PTW(Walk), 不记录在 Cache 和 Buffer 中
     return false;
+}
+
+// [hash冲突判定] 目标 set 是否还有可写位置: V=0 空 way 或 V=1&is_req=0 可淘汰预取占位 (无延时预检)
+bool DedupCache::set_has_writable_way(gscid_t gscid, pscid_t pscid, iova_t iova) const {
+    iova_t iova_aligned = align_iova_4k(iova);
+    uint32_t set = hash_function(gscid, pscid, iova_aligned);
+    for (uint32_t w = 0; w < num_ways_; w++) {
+        const DedupCacheLine& line = cache_array_[set][w];
+        if (!line.valid || !line.is_req) return true;  // V=0 空位 或 可淘汰的预取占位
+    }
+    return false;  // 全为 V=1 & is_req=1 -> hash冲突
 }
 
 void DedupCache::clear_line(DedupCacheLine* line) {

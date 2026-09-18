@@ -36,11 +36,13 @@ struct DedupCacheLine {
 // 去重 Cache 管理类
 //
 // 特点(与常规 Cache 不同):
-//   - 无 LRU/替换算法, 命中时不更新替换信息
-//   - 自定义替换策略(见 insert):
-//       1) 有 V=0 的 way -> 直接写入
-//       2) 否则有 V=1 & is_req=0(预取占位) 的 way -> 随机淘汰其一并写入
-//       3) 否则(全部 is_req=1 受保护) -> 插入失败(调用方降级直接转发 PTW)
+//   - 无常规替换算法(LRU等), 命中时不更新任何替换信息
+//   - 架构定义的条件替换策略(见 insert):
+//       i.   按 Tag hash 找 set 并读数据
+//       ii.  有 V=0 的 way -> 直接写入
+//       iii. 有 V=1 & is_req=0(预取占位) 的 way -> 随机淘汰其一并写入
+//       iv.  无空位置可写(全为 V=1 & is_req=1) = hash冲突 -> 插入失败,
+//            调用方将地址翻译任务直转 Walk(PTW), 不记录在 Cache 和 Buffer 中
 // ============================================================
 class DedupCache {
 public:
@@ -50,10 +52,14 @@ public:
     // 匹配键: gscid + pscid + iova(4KB 页对齐)
     DedupCacheLine* lookup(gscid_t gscid, pscid_t pscid, iova_t iova);
 
-    // 插入占位(自定义替换策略)
-    // 返回: true=插入成功, false=失败(该 set 全部为 is_req=1 受保护占位)
+    // 插入占位(架构定义的条件替换: V=0直写 -> 淘汰预取占位 -> 失败=hash冲突)
+    // 返回: true=插入成功, false=失败(set 内全为 V=1&is_req=1, 无空位置可写)
     bool insert(gscid_t gscid, pscid_t pscid, iova_t iova,
                 uint16_t head_index, bool is_req);
+    
+    // [hash冲突判定] 目标 set 是否还有可写位置(V=0 空 way 或 V=1&is_req=0 可淘汰预取占位),
+    //   无延时预检, 供调用方在分配 Buffer 前判定; false = hash冲突(步骤iv)
+    bool set_has_writable_way(gscid_t gscid, pscid_t pscid, iova_t iova) const;
 
     // 清除 line (置 V=0)
     void clear_line(DedupCacheLine* line);

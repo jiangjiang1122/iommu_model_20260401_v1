@@ -176,6 +176,14 @@ static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（e
 #else
 static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
 #endif
+// [准入控制开关] Buffer满后的处理机制, 两套机制共存, 编译期切换(Makefile: DEDUP_ADM=0/1):
+//   0 = bypass机制(默认): execute_dedup_request分配失败时旁路直转PTW(dedup_bypass);
+//   1 = 准入控制机制: scheduler出队request前检查 valid+reserved, 满则跳过出队(任务滞留
+//       dedup_request_fifo形成反压, 不阻塞scheduler), worker侧allocate由预留计数保证成功,
+//       释放仍走update刷新路径(free_entry), 释放路径全程畅通, 无环形等待死锁环。
+#ifndef TEST_CFG_DEDUP_ADMISSION_CTRL
+#define TEST_CFG_DEDUP_ADMISSION_CTRL 0
+#endif
 // 预取深度（页数量，D=0表示关闭预取）
 // 允许通过Makefile TEST_FLAGS传入 -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=0 覆盖
 #ifndef TEST_CFG_PT_DEDUP_PREFETCH_DEPTH

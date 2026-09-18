@@ -768,7 +768,37 @@ void CacheSubsystem::dedup_scheduler_thread() {
         bool has_ins = (dedup_inside_request_fifo.num_available() > 0);
         bool has_upd = (dedup_update_fifo.num_available() > 0);
 
+        // [STAT] dedup_request_fifo占用峰值(准入控制模式下反压积压观测)
+        {
+            int occ = dedup_request_fifo.num_available();
+            if (occ > dedup_request_fifo_peak_) dedup_request_fifo_peak_ = occ;
+        }
+
+        // [准入控制] Buffer满(valid+reserved>=SIZE)时本轮不出队request:
+        //   任务滞留dedup_request_fifo形成反压(非阻塞跳过), scheduler继续服务inside/update,
+        //   保证释放路径(update->flush->free_entry)始终畅通, 打破环形等待死锁环。
+        const bool req_pending_raw = has_req;
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+        if (has_req && !dedup_admission_ok()) {
+            has_req = false;  // 仲裁视角本轮request不可用(跳过)
+        }
+#endif
+
         if (!has_req && !has_ins && !has_upd) {
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            if (req_pending_raw) {
+                // 准入停滞: request积压但Buffer满, 组合事件等待(释放事件|三FIFO写入),
+                // 避免只等free_event时错过update到达(update须经本线程才能变成free_entry)
+                dedup_admission_wait_cnt_++;
+                const double t0 = sc_time_stamp().to_seconds() * 1e9;
+                wait(dedup_request_fifo.data_written_event() |
+                     dedup_inside_request_fifo.data_written_event() |
+                     dedup_update_fifo.data_written_event() |
+                     dedup_buffer_->free_event);
+                dedup_admission_wait_ns_ += sc_time_stamp().to_seconds() * 1e9 - t0;
+                continue;
+            }
+#endif
             wait(dedup_request_fifo.data_written_event() |
                  dedup_inside_request_fifo.data_written_event() |
                  dedup_update_fifo.data_written_event());
@@ -791,6 +821,13 @@ void CacheSubsystem::dedup_scheduler_thread() {
                 msg = dedup_inside_request_fifo.read();
             } else {
                 msg = dedup_request_fifo.read();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+                // 准入预留: 预占1个未来Buffer槽(read前已判准入, 此处无wait, 天然原子)
+                dedup_reserved_count_++;
+                if (dedup_reserved_count_ > dedup_reserved_peak_) {
+                    dedup_reserved_peak_ = dedup_reserved_count_;
+                }
+#endif
             }
             dedup_sched_next_is_request_ = false;
         } else {
@@ -885,10 +922,17 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
             // ============ 预取REQUEST: 插预取占位CL(无响应输出) ============
             uint64_t page_iova = msg.iova & ~0xFFFULL;
             if (dedup_cache_->lookup(msg.gscid, msg.pscid, page_iova) == nullptr) {
-                dedup_cache_->insert(msg.gscid, msg.pscid, page_iova,
+                bool ins_ok = dedup_cache_->insert(msg.gscid, msg.pscid, page_iova,
                                      0xFFFF, false /*is_req=0 预取占位*/);
-                printf("[DEDUP_PREFETCH] task_id=%u -> prefetch placeholder inserted (iova=0x%lx, RAM%d)\n",
-                       (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
+                if (ins_ok) {
+                    printf("[DEDUP_PREFETCH] task_id=%u -> prefetch placeholder inserted (iova=0x%lx, RAM%d)\n",
+                           (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
+                } else {
+                    // [hash冲突] set无空位置可写: 跳过预取占位插入(仅性能降级, 不影响功能)
+                    dedup_pf_setfull_skip_++;
+                    printf("[DEDUP_PREFETCH] task_id=%u -> no writable way (hash conflict), prefetch placeholder skipped (iova=0x%lx, RAM%d)\n",
+                           (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
+                }
             } else {
                 printf("[DEDUP_PREFETCH] task_id=%u -> placeholder exists, skip (iova=0x%lx, RAM%d)\n",
                        (unsigned)msg.task_id, (unsigned long)page_iova, ram_id);
@@ -1296,6 +1340,26 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
     printf("    Dropped (inside_fifo full): %lu\n", (unsigned long)dedup_prefetch_dropped_);
     printf("  [Buffer Full Bypass]\n");
     printf("    Bypass to PTW count:        %lu\n", (unsigned long)dedup_buffer_full_bypass_count_);
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+    printf("  [Admission Control] ENABLED (Buffer满跳过出队, request FIFO排队反压)\n");
+    printf("    Admission stall waits:      %lu\n", (unsigned long)dedup_admission_wait_cnt_);
+    printf("    Admission stall total:      %.1f ns (%.3f us)\n",
+           dedup_admission_wait_ns_, dedup_admission_wait_ns_ / 1000.0);
+    printf("    dedup_request_fifo peak:    %d\n", dedup_request_fifo_peak_);
+    printf("    Reserved peak:              %u\n", (unsigned)dedup_reserved_peak_);
+#else
+    printf("  [Admission Control] DISABLED (bypass mode)\n");
+#endif
+    printf("  [Hash Conflict Bypass] (步骤iv: 无空位置可写(全V=1&is_req=1) -> bypass PTW)\n");
+    printf("    Conflict count (main MISS & set-full): %lu\n", (unsigned long)dedup_hash_conflict_count_);
+    printf("    Conflict ratio (of main lookups %lu): %.2f%%\n",
+           (unsigned long)dedup_req_lookup_total_,
+           dedup_req_lookup_total_ ? 100.0 * dedup_hash_conflict_count_ / dedup_req_lookup_total_ : 0.0);
+    printf("    Conflict ratio (of main MISS %lu):    %.2f%%\n",
+           (unsigned long)dedup_req_lookup_miss_,
+           dedup_req_lookup_miss_ ? 100.0 * dedup_hash_conflict_count_ / dedup_req_lookup_miss_ : 0.0);
+    printf("    Conflict bypass to PTW tasks: %lu\n", (unsigned long)dedup_conflict_bypass_count_);
+    printf("    Prefetch set-full skipped:    %lu\n", (unsigned long)dedup_pf_setfull_skip_);
     // [STAT需求2] 去重Cache命中率(总查询/命中/未命中)
     printf("  [去重Cache命中率 (execute_dedup_request lookup)]\n");
     printf("    总查询(lookup):            %lu\n", (unsigned long)dedup_lookup_total_);
@@ -1945,6 +2009,17 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
 
             uint16_t new_idx = dedup_buffer_->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
+                // 准入控制模式: scheduler预留保证有空槽, 理论不可达; 若到达为计数异常, 回退等释放兕底(仅诊断)
+                printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (main HIT, valid=%u reserved=%u)\n",
+                       (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+                fflush(stdout);
+                while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
+                new_idx = dedup_buffer_->allocate_entry();
+            }
+            dedup_reserved_count_--;  // reserved -> valid
+#else
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
                 // 避免通过多级FIFO转发后再在PTW入口阻塞, 直接在源头控制流量
@@ -1967,6 +2042,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 fflush(stdout);
                 return resp;
             }
+#endif
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
                 auto& new_entry = dedup_buffer_->entries[new_idx];
                 new_entry.gscid = req.gscid;
@@ -1993,6 +2069,16 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         } else {
             // -------- 分支2: 预取占位CL (is_req=0) 升级为主占位 --------
             uint16_t new_idx = dedup_buffer_->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
+                printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (prefetch HIT, valid=%u reserved=%u)\n",
+                       (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+                fflush(stdout);
+                while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
+                new_idx = dedup_buffer_->allocate_entry();
+            }
+            dedup_reserved_count_--;  // reserved -> valid
+#else
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
                 while (ptw_capacity_check_cb_ && !ptw_capacity_check_cb_()) {
@@ -2014,6 +2100,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 fflush(stdout);
                 return resp;
             }
+#endif
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
                 auto& entry = dedup_buffer_->entries[new_idx];
                 entry.gscid = req.gscid;
@@ -2041,7 +2128,35 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         }
     } else {
         // ============ MISS ============
+        // [hash冲突(步骤iv)] 目标set无空位置可写(全为 V=1&is_req=1, 无 V=0 且无可淘汰预取占位) ->
+        //   该笔任务直接bypass给PTW(Walk): 不写去重cacheline, 不占去重Buffer;
+        //   PTW完成后走late-spawn预取, 刷新时跳过dedup(is_bypass组)
+        if (!dedup_cache_->set_has_writable_way(req.gscid, req.pscid, page_iova)) {
+            dedup_hash_conflict_count_++;
+            dedup_conflict_bypass_count_++;
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            dedup_reserved_count_--;  // 归还准入预留(该任务不占Buffer)
+#endif
+            resp.hit = false;
+            resp.dedup_bypass = true;
+            resp.prefetch_enabled = req.prefetch_enabled;
+            resp.prefetch_depth = req.prefetch_depth;
+            printf("[DEDUP_HASH_CONFLICT] task_id=%u -> no writable way (all V=1&is_req=1), bypass to PTW (conflict=%lu)\n",
+                   (unsigned)req.task_id, (unsigned long)dedup_hash_conflict_count_);
+            fflush(stdout);
+            return resp;
+        }
         uint16_t head_idx = dedup_buffer_->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL
+        if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
+            printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (MISS, valid=%u reserved=%u)\n",
+                   (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+            fflush(stdout);
+            while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
+            head_idx = dedup_buffer_->allocate_entry();
+        }
+        dedup_reserved_count_--;  // reserved -> valid
+#else
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
             // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
             while (ptw_capacity_check_cb_ && !ptw_capacity_check_cb_()) {
@@ -2063,6 +2178,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             fflush(stdout);
             return resp;
         }
+#endif
 
         if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
             auto& entry = dedup_buffer_->entries[head_idx];

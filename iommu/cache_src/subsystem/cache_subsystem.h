@@ -355,6 +355,26 @@ private:
     uint64_t dedup_prefetch_dropped_ = 0;
     // [STAT] Buffer满旁路计数: Buffer<全局outstanding时, Buffer满则任务旁路直转PTW(防死锁)
     uint64_t dedup_buffer_full_bypass_count_ = 0;
+    // [准入控制] 预留计数: scheduler从request_fifo出队时+1(预占1个未来Buffer槽),
+    //   worker allocate成功时-1(reserved->valid); 准入条件 valid+reserved < PT_DEDUP_BUFFER_SIZE
+    uint16_t dedup_reserved_count_ = 0;
+    uint16_t dedup_reserved_peak_  = 0;
+    // [准入控制] 统计: scheduler因Buffer满跳过request出队后无事可做而等待的次数/累计时长,
+    //   以及dedup_request_fifo占用峰值(反压积压观测)
+    uint64_t dedup_admission_wait_cnt_ = 0;
+    double   dedup_admission_wait_ns_  = 0.0;
+    int      dedup_request_fifo_peak_  = 0;
+    // [hash冲突] 去重cache set满(无空way且不可替换)冲突统计:
+    //   主请求MISS且set满 -> 任务bypass直转PTW(不写cacheline/不占Buffer)
+    uint64_t dedup_hash_conflict_count_  = 0;   // 主请求hash冲突次数
+    uint64_t dedup_conflict_bypass_count_ = 0;  // 因hash冲突 bypass 到 PTW 的任务数
+    uint64_t dedup_pf_setfull_skip_      = 0;   // 预取占位因set满跳过插入次数
+    // [准入控制] 准入判定: 还有空闲槽(含预留)则允许出队; 检查与后续reserved++之间无wait,
+    //   SystemC协作式调度下天然原子
+    bool dedup_admission_ok() const {
+        if (!dedup_buffer_) return true;
+        return dedup_buffer_->get_valid_count() + dedup_reserved_count_ < PT_DEDUP_BUFFER_SIZE;
+    }
     // [STAT需求2] 去重Cache命中率统计(execute_dedup_request的lookup)
     uint64_t dedup_lookup_total_ = 0;      // 全部lookup次数(主任务请求+预取占位)
     uint64_t dedup_lookup_hit_ = 0;        // 命中占位CL次数(line!=nullptr)
