@@ -112,12 +112,15 @@ void RP_Module::send_translation_request_1_thread()
 #else
         const int PAGES_NEEDED     = TEST_CFG_NUM_PAGES;
 #endif
+#ifndef TEST_CFG_TAIL_MSI
+#define TEST_CFG_TAIL_MSI 1                            // 默认末尾补1个MSI(保持旧负载形状)
+#endif
         const int REQ_PER_PAGE     = 8;                // 8 × 512B = 4KB Data
         const int NUM_GROUPS       = PAGES_NEEDED;     // 每组 = 8 Data + 1 SQ + 1 CQ + 1 MSI
         const int NUM_IO_REQS      = NUM_GROUPS * REQ_PER_PAGE;   // Data请求数(计入IOPS)
         const int NUM_SQ_REQS      = NUM_GROUPS;                  // SQ请求数(不计入IOPS)
         const int NUM_CQ_REQS      = NUM_GROUPS;                  // CQ请求数(不计入IOPS)
-        const int NUM_MSI_REQS     = NUM_GROUPS + 1;              // MSI请求数(末尾补1个, 不计入IOPS)
+        const int NUM_MSI_REQS     = NUM_GROUPS + TEST_CFG_TAIL_MSI;  // MSI请求数(末尾补齐, 不计入IOPS)
         const int NUM_REQUESTS     = NUM_IO_REQS + NUM_SQ_REQS + NUM_CQ_REQS + NUM_MSI_REQS;  // 总包数
         const int TOTAL_PAGES_IN_RANGE = (int)(IOVA_RANGE / 0x1000);  // 4096(16MB) / 131072(512MB)
 
@@ -661,8 +664,8 @@ void RP_Module::send_translation_request_1_thread()
             }
         }
 
-        // ---- 末尾补1个MSI, 凑满10000包 ----
-        {
+        // ---- 末尾补TEST_CFG_TAIL_MSI个MSI, 凑满总包数(默认1个=10000包) ----
+        for (int t = 0; t < TEST_CFG_TAIL_MSI; t++) {
             int v = S13_MSI_FIXED_VEC;
             uint64_t msi_iova = S13_MSI_IOVA_BASE + (uint64_t)msi_pages[v] * 0x1000 + S13_MSI_OFFSET;
             trans_array[req_idx] = new tlm_generic_payload();

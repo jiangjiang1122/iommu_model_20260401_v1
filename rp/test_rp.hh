@@ -9,6 +9,10 @@
 #include "iommu_struct.hh"
 #include "../ddr/test_ddr.hh"
 #include <vector>       // [虚拟化] vIOMMU 虚拟CQ / Guest Flush Queue 容器
+#include "iommu_perf_params.hh"
+#if TEST_CFG_MULTI_DEVICE_SCENE
+#include <functional>
+#endif
 
 using namespace std;
 using namespace sc_core;
@@ -72,6 +76,11 @@ public:
     int response_count;
     sc_event response_count_event;
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    // 新场景按payload身份分发；不改变旧场景的单响应同步接口。
+    std::function<void(tlm_generic_payload&)> md_response_handler;
+#endif
+
     SC_HAS_PROCESS(RP_Module);
 
     RP_Module(sc_module_name name, iommu_top* iommu_module, DDR_Module* ddr_module) :
@@ -94,6 +103,9 @@ public:
         tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
     {
         if (phase == tlm::BEGIN_RESP) {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            if (md_response_handler) md_response_handler(trans);
+#endif
             printf("[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x%lx, status=%s\n",
                    (uint64_t)trans.get_address(), trans.get_response_string().c_str());
             fflush(stdout);

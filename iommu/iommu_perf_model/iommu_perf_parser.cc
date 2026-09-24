@@ -15,6 +15,10 @@ void iommu_top::parser_thread() {
 
         // 1. Read task from inbound FIFO
         iommu_task_t* task = inbound_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_trace.active);
+        md_trace.stamp(task->task_id, iommu_md::Point::POP);
+#endif
         task->timestamp = sc_time_stamp();  // [STAT] 记录IO入口时刻
         printf("[PARSER] task_id=%u popped from inbound_fifo\n", task->task_id);
         fflush(stdout);
@@ -33,6 +37,9 @@ void iommu_top::parser_thread() {
 
         // 1.1 入口注册到 reorder buffer，并申请全局 outstanding 槽
         reorder_register_task(task);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.stamp(task->task_id, iommu_md::Point::ADMIT);
+#endif
 
         task->state = TASK_PARSING;
         // [PERF] Parser无需串行延时：瓶颈由并发outstanding数和下游模块决定

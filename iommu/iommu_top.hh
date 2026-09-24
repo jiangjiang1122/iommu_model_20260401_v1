@@ -14,6 +14,7 @@
 #include "iommu_task.hh"
 #include "iommu_perf_params.hh"
 #include "iommu_perf_model.hh"
+#include "iommu_multidev_trace.hh"
 
 #include "json_config.h"
 #include "cache_subsystem.h"
@@ -58,6 +59,16 @@ public:
 
     // 从 JSON 配置文件加载（推荐，参数已与架构对齐）
     iommu::GlobalConfig cfg = iommu::load_config("iommu/cache_config/default_config.json");
+
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::Trace md_trace;
+    bool md_quiescent() const;
+    void md_update_write_hol();
+    // [STAT] 去重Buffer持有延时细分: W1=alloc->组完成, W2=组完成->聚合刷新执行, W3=聚合刷新->entry释放
+    uint64_t md_hold_main_cnt = 0, md_hold_susp_cnt = 0;
+    double md_hold_main_sum[3] = {0, 0, 0}, md_hold_susp_sum[3] = {0, 0, 0};
+    double md_hold_main_max[3] = {0, 0, 0}, md_hold_susp_max[3] = {0, 0, 0};
+#endif
 
     // 创建 CacheSubsystem
     iommu::CacheSubsystem cache_sub{"cache_sub", cfg};
@@ -182,6 +193,7 @@ public:
         bool     is_bypass = false;
         bool     slot_invalid[17] = {false};
         double   group_start_ns = 0.0;        // [STAT] 组起始时间(主任务进入PTW时刻, ns)
+        double   group_complete_ns = 0.0;     // [STAT] 组完成时间(pending=0且main_done时刻, ns)
         uint32_t group_ddr_reads = 0;         // [STAT] 组内所有任务DDR读次数累加
         
         // 收集所有walk结果
@@ -218,6 +230,10 @@ public:
         uint32_t gscid = 0;
         uint32_t pscid = 0;
         std::vector<uint64_t> pa_bases;  // 每iova的PA基址(pt_updates[i].pa & ~0xFFF)
+        // [STAT] 去重Buffer持有延时细分: 组完成/聚合刷新时刻随消息传递
+        double group_start_ns = 0.0;
+        double group_complete_ns = 0.0;
+        double agg_flush_ns = 0.0;
     };
 
     // ===================== IOMMU/PTW IOPS Counters =====================
@@ -316,6 +332,24 @@ public:
     uint64_t ptw_front_leaf_hits;          // 前置leaf命中短路完成数(0次DDR)
     std::vector<double> ptw_output_interval_values;  // 所有输出间隔值(ns), 用于波动曲线
     std::vector<double> ptw_task_latency_values;     // 所有任务执行延时(ns), 用于分布统计
+    // [STAT] PTW主任务/预取任务执行延时拆分统计 (主任务+预取任务口径)
+    //   主任务: 由ptw_req_thread入口, walk_ctx.is_prefetch_task=false
+    //   预取任务: 由late/early-spawn生成, walk_ctx.is_prefetch_task=true
+    double   ptw_main_total_exec_ns = 0.0;         // 主任务执行延时总和(ns)
+    double   ptw_main_max_task_latency_ns = 0.0;   // 主任务最大延时(ns)
+    double   ptw_main_min_task_latency_ns = 999999999.0;  // 主任务最小延时(ns)
+    std::vector<double> ptw_main_task_latency_values;    // 主任务延时序列
+    double   ptw_prefetch_total_exec_ns = 0.0;     // 预取任务执行延时总和(ns)
+    double   ptw_prefetch_max_task_latency_ns = 0.0;    // 预取任务最大延时(ns)
+    double   ptw_prefetch_min_task_latency_ns = 999999999.0; // 预取任务最小延时(ns)
+    std::vector<double> ptw_prefetch_task_latency_values; // 预取任务延时序列
+    // [STAT] PTW并发任务数时间加权平均(Little's Law精确版):
+    //   每次ptw_outstanding_task_count变化前, 累加 (旧值 × 距上次变化的时长);
+    //   输出时: 平均并发 = 累计面积 / (末次采样时刻 - 首次采样时刻)
+    double   ptw_concurrency_area_ns = 0.0;        // Σ(count × Δt), 单位 task·ns
+    double   ptw_concurrency_last_change_ns = 0.0; // 上一次count变化时刻(ns)
+    double   ptw_concurrency_first_sample_ns = -1.0; // 首次采样时刻(ns), -1表示未开始
+    double   ptw_concurrency_last_sample_ns = 0.0;   // 末次采样时刻(ns), 用于计算窗口
     // [STAT] PTW任务组执行时间统计 (1主+D预取为一组)
     double   ptw_group_exec_total_ns;        // 所有组执行时间总和(ns)
     double   ptw_group_exec_max_ns;          // 单组最大执行时间(ns)
@@ -465,8 +499,32 @@ public:
     };
     std::map<uint32_t, reorder_entry_t> reorder_buf;   // key = task_id
     std::queue<uint32_t> reorder_write_order;          // 写请求到达顺序（task_id）
+#if TEST_CFG_MULTI_DEVICE_SCENE && TEST_CFG_PERDEV_WRITE_ORDER
+    // [写保序=每设备] 队列数=设备数: 设备内写严格保序, 设备间写互不阻塞
+    std::queue<uint32_t> reorder_write_order_dev[iommu_md::MAX_DEVICE_COUNT];
+#endif
     sc_mutex reorder_mtx;
     sc_event reorder_ready_event;
+
+    // ===================== 流水线延时静态延时线 =====================
+    // [静态化改造] 入口(200ns)/出口(400ns)流水线延时原先对每个 task 调用 sc_spawn
+    //   派生独立协程；在多设备(N=16)大事务量(16万包)下会累积数十万动态进程, 触发
+    //   SystemC 协程栈分配断言 (F4 assertion failed: ret == 0 @ sc_cor_qt.cpp) 而崩溃。
+    //   改为两条静态 SC_THREAD 延时线: 到达侧仅入队(task + 到期时刻), 由常驻线程按
+    //   FIFO 到期顺序统一执行"写 inbound_fifo"/"发送响应+统计+释放"。因入队不阻塞且
+    //   延时固定, 到期顺序即到达顺序, 与原并行协程的时序语义等价, 且进程数恒定。
+    struct pipeline_delay_item_t {
+        iommu_task_t* task;
+        double        due_ns;   // 到期时刻(ns): 入队时刻 + 流水线延时
+    };
+    std::queue<pipeline_delay_item_t> input_delay_queue;   // 入口延时线队列
+    sc_mutex input_delay_mtx;
+    sc_event input_delay_event;
+    std::queue<pipeline_delay_item_t> output_delay_queue;  // 出口延时线队列
+    sc_mutex output_delay_mtx;
+    sc_event output_delay_event;
+    void input_delay_thread();    // 常驻: 到期后写入 inbound_fifo
+    void output_delay_thread();   // 常驻: 到期后发送响应并统计/释放 task
 
     // 全局 outstanding：parser 入侧申请，reorder 出口释放
     int iommu_global_outstanding;
@@ -762,6 +820,10 @@ public:
         msi_notice_count(0)
     {
         iommu_inst.top = this;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.configure(TEST_CFG_NUM_DEVICES);
+        cache_sub.set_md_trace(&md_trace);
+#endif
 
         // Register AT nb_transport callbacks for inbound and DDR
         axi_slave_from_pcie_noc_0_socket.register_nb_transport_fw(
@@ -803,6 +865,9 @@ public:
         SC_THREAD(fault_cq_proc_thread);
         SC_THREAD(ddr_arbiter_thread);
         SC_THREAD(reorder_output_thread);   // 出口重排序线程
+        // [静态延时线] 入口/出口流水线延时常驻线程(替代 per-task sc_spawn)
+        SC_THREAD(input_delay_thread);
+        SC_THREAD(output_delay_thread);
 
         // [重构] 绑定去重模块回调: 转发 FIFO + Buffer 刷新回调
         // dedup_scheduler_thread 处理 dedup_update 时经此回调刷新 Buffer 并转发任务
@@ -825,10 +890,59 @@ public:
 
     // PTW完成后释放并发计数（无延时）
     void ptw_release_outstanding() {
+        ptw_sample_concurrency_before_change();  // [STAT] 采样当前count×时长
         ptw_outstanding_task_count--;
         assert(ptw_outstanding_task_count >= 0);
         ptw_task_completed_event.notify(SC_ZERO_TIME);
         cache_sub.get_dedup_buffer_full_event().notify(SC_ZERO_TIME);
+    }
+
+    // [STAT] PTW并发数采样: 在ptw_outstanding_task_count变化前调用,
+    //   累计 "旧count × 距上次变化时长" 得到时间加权面积
+    void ptw_sample_concurrency_before_change() {
+        const double now_ns = sc_core::sc_time_stamp().to_seconds() * 1e9;
+        if (ptw_concurrency_first_sample_ns < 0.0) {
+            ptw_concurrency_first_sample_ns = now_ns;
+            ptw_concurrency_last_change_ns = now_ns;
+        } else {
+            const double delta = now_ns - ptw_concurrency_last_change_ns;
+            if (delta > 0.0) {
+                ptw_concurrency_area_ns += (double)ptw_outstanding_task_count * delta;
+            }
+            ptw_concurrency_last_change_ns = now_ns;
+        }
+        ptw_concurrency_last_sample_ns = now_ns;
+    }
+
+    // [STAT] PTW任务执行延时统一记录入口: 同时更新
+    //   - 合并口径(ptw_total_exec_ns / ptw_task_latency_values / max/min)
+    //   - 主任务或预取任务拆分口径(按is_prefetch_task分类)
+    // 调用位置需与原有 ptw_task_start_ns 查找/擦除代码配套使用
+    void ptw_record_task_latency(uint32_t task_id, bool is_prefetch) {
+        auto it = ptw_task_start_ns.find(task_id);
+        if (it == ptw_task_start_ns.end()) return;
+        const double now_ns = sc_core::sc_time_stamp().to_seconds() * 1e9;
+        const double lat = now_ns - it->second;
+        ptw_task_start_ns.erase(it);
+
+        // 合并口径(向后兼容既有报表)
+        ptw_total_exec_ns += lat;
+        ptw_task_latency_values.push_back(lat);
+        if (lat > ptw_max_task_latency_ns) ptw_max_task_latency_ns = lat;
+        if (lat < ptw_min_task_latency_ns) ptw_min_task_latency_ns = lat;
+
+        // 主/预取拆分口径
+        if (is_prefetch) {
+            ptw_prefetch_total_exec_ns += lat;
+            ptw_prefetch_task_latency_values.push_back(lat);
+            if (lat > ptw_prefetch_max_task_latency_ns) ptw_prefetch_max_task_latency_ns = lat;
+            if (lat < ptw_prefetch_min_task_latency_ns) ptw_prefetch_min_task_latency_ns = lat;
+        } else {
+            ptw_main_total_exec_ns += lat;
+            ptw_main_task_latency_values.push_back(lat);
+            if (lat > ptw_main_max_task_latency_ns) ptw_main_max_task_latency_ns = lat;
+            if (lat < ptw_main_min_task_latency_ns) ptw_main_min_task_latency_ns = lat;
+        }
     }
 };
 

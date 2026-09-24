@@ -13,6 +13,7 @@
 #include "cache/pt_cache.h"
 #include "cache/dedup_cache.h"
 #include "cache/walker_cache.h"
+#include "iommu_multidev_trace.hh"
 
 #include <memory>
 #include <functional>
@@ -83,6 +84,14 @@ public:
     // 全局 invalidation pipeline：走失效控制器的专用请求/响应通道。
     sc_fifo<CacheMessage> invalidation_request_fifo;
     sc_fifo<CacheMessage> invalidation_response_fifo;
+
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    void set_md_trace(iommu_md::Trace* trace) { md_trace_ = trace; }
+    bool md_quiescent() const;
+    void md_record(const CacheMessage& msg, const std::string& source,
+                   const std::string& operation, double start, bool hit = false,
+                   int bank = -1, int level = 0, uint64_t value = 1);
+#endif
 
     // 获取各组件引用
     DCCache&     dc_cache()     { return *dc_cache_; }
@@ -160,6 +169,10 @@ public:
     uint64_t get_dc_query_total_count() const { return dc_query_total_count_; }
 
 private:
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::Trace* md_trace_ = nullptr;
+    unsigned md_active_ = 0;
+#endif
     GlobalConfig cfg_;
     sc_time clock_period_;
     StatsCollector stats_;

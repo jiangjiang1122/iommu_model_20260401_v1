@@ -222,6 +222,9 @@ else ifeq ($(TEST), rand4k_msi_mix_s2on_128g_512mb)
     #   [v2回归] 读写分离并发(写265+读243=508) + Buffer266 + PTW并发27
     SCENE13_PTW ?= 27
     SCENE13_BUFFER ?= 266
+    # [负载规模] 组数与末尾MSI数: 默认909组+1尾MSI=10000包; 1818组+2尾MSI=20000包
+    SCENE13_PAGES ?= 909
+    SCENE13_TAILS ?= 1
     # [准入控制开关] 0=Buffer满bypass直转PTW(默认); 1=准入控制(满则跳过出队, request FIFO排队反压)
     DEDUP_ADM ?= 0
     TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_thread.cc
@@ -237,7 +240,71 @@ else ifeq ($(TEST), rand4k_msi_mix_s2on_128g_512mb)
                  -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
                  -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
                  -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
-                 -DTEST_CFG_NUM_PAGES=909
+                 -DTEST_CFG_NUM_PAGES=$(SCENE13_PAGES) \
+                 -DTEST_CFG_TAIL_MSI=$(SCENE13_TAILS)
+else ifeq ($(TEST), rand4k_msi_mix_multidev)
+    # 多设备V2：单端口、独立VM、逐包轮询，旧场景不启用新增代码。
+    MULTIDEV_N ?= 2
+    MULTIDEV_IOVA_MB ?= 16
+    MULTIDEV_GROUPS ?= 909
+    MULTIDEV_QUEUE_DEPTH ?= 32
+    MULTIDEV_PATTERN ?= overlap
+    MULTIDEV_LOAD_MODE ?= per_device
+    MULTIDEV_RR_START ?= 0
+    MULTIDEV_D ?= 3
+    # [写保序队列] 0=全局单队列(默认); 1=每设备独立写保序队列(队列数=设备数)
+    MULTIDEV_PERDEV_WO ?= 0
+    DEDUP_ADM ?= 0
+    ifeq ($(filter $(MULTIDEV_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTIDEV_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTIDEV_IOVA_MB),16 512),)
+        $(error MULTIDEV_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(MULTIDEV_PATTERN),overlap independent),)
+        $(error MULTIDEV_PATTERN must be overlap or independent)
+    endif
+    ifeq ($(filter $(MULTIDEV_LOAD_MODE),per_device fixed_total),)
+        $(error MULTIDEV_LOAD_MODE must be per_device or fixed_total)
+    endif
+    ifeq ($(MULTIDEV_LOAD_MODE),fixed_total)
+        ifeq ($(filter $(MULTIDEV_N),1 2 4 8 16),)
+            $(error fixed_total requires MULTIDEV_N=1/2/4/8/16)
+        endif
+    endif
+    ifeq ($(MULTIDEV_IOVA_MB),512)
+        SCENE13_PTW ?= 27
+        SCENE13_BUFFER ?= 266
+        # [并发资源] 默认与单设备512MB基线一致; 可以命令行升级(如 PTW64/Buf320/640/320/320)
+        SCENE13_GLOBAL ?= 508
+        SCENE13_READ ?= 243
+        SCENE13_WRITE ?= 265
+        MULTIDEV_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        SCENE13_PTW ?= 64
+        SCENE13_BUFFER ?= 320
+        MULTIDEV_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=640 \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=320 \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=320
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multidev_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=$(MULTIDEV_N) \
+        -DTEST_CFG_NUM_PAGES=$(MULTIDEV_GROUPS) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=$(MULTIDEV_QUEUE_DEPTH) \
+        -DTEST_CFG_MD_INDEPENDENT=$(if $(filter independent,$(MULTIDEV_PATTERN)),1,0) \
+        -DTEST_CFG_MD_FIXED_TOTAL=$(if $(filter fixed_total,$(MULTIDEV_LOAD_MODE)),1,0) \
+        -DTEST_CFG_MD_RR_START=$(MULTIDEV_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=$(MULTIDEV_PERDEV_WO) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTIDEV_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_LAYOUT_FLAGS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)

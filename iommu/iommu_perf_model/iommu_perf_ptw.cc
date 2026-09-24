@@ -59,6 +59,9 @@ void iommu_top::ptw_req_thread() {
         }
 
         iommu_task_t* task = pt_cache_to_ptw_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.operation(task->task_id, "ptw", "main_start", task->device_id, iommu_md::now_ns());
+#endif
         // [STAT] 记录PTW任务入口时刻
         const double current_ns = sc_time_stamp().to_seconds() * 1e9;
         ptw_task_start_ns[task->task_id] = current_ns;
@@ -76,6 +79,7 @@ void iommu_top::ptw_req_thread() {
         ptw_last_inject_ns = current_ns;
         
         task->state = TASK_PTW_REQ;
+        ptw_sample_concurrency_before_change();  // [STAT] 采样(count++前)
         ptw_outstanding_task_count++;
         if (ptw_outstanding_task_count > peak_ptw_outstanding) {
             peak_ptw_outstanding = ptw_outstanding_task_count;
@@ -90,6 +94,9 @@ void iommu_top::ptw_req_thread() {
         fflush(stdout);
 
         // Pipeline delay via PEQ (non-blocking, parallel timing)
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        ++md_trace.req_peq_pending;
+#endif
         ptw_req_peq.notify(*task, sc_time(PTW_REQ_PIPELINE_DELAY_NS, SC_NS));
     }
 }
@@ -102,6 +109,10 @@ void iommu_top::ptw_req_process_thread() {
     while (true) {
         iommu_task_t* task = ptw_req_peq.get_next_transaction();
         if (!task) { wait(ptw_req_peq.get_event()); continue; }
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        --md_trace.req_peq_pending;
+        iommu_md::BusyGuard md_busy(md_trace.active);
+#endif
 
         // ========== 1. Bare mode fast path ==========
         // Corresponds to iommu_two_stage_trans.cc L39-82
@@ -207,12 +218,8 @@ void iommu_top::ptw_req_process_thread() {
                 ptw_main_gs_ddr_sum += task->walk_ctx.gs_stage_ddr_reads;
                 ptw_main_ad_ddr_sum += task->walk_ctx.ad_update_ddr_writes;
                 ptw_main_stage_count++;
-                { auto _s = ptw_task_start_ns.find(task->task_id);
-                  if (_s != ptw_task_start_ns.end()) {
-                      double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                      ptw_total_exec_ns += lat;
-                      ptw_task_latency_values.push_back(lat);
-                      ptw_task_start_ns.erase(_s); } }
+                // [STAT] Bare直通路径: 主任务延时(拆分统计)
+                ptw_record_task_latency(task->task_id, false);
 
                 
                 // Convert task to CacheMessage and write to cache_sub.pt_update_fifo
@@ -327,12 +334,8 @@ void iommu_top::ptw_req_process_thread() {
                 ptw_main_gs_ddr_sum += task->walk_ctx.gs_stage_ddr_reads;
                 ptw_main_ad_ddr_sum += task->walk_ctx.ad_update_ddr_writes;
                 ptw_main_stage_count++;
-                { auto _s = ptw_task_start_ns.find(task->task_id);
-                  if (_s != ptw_task_start_ns.end()) {
-                      double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                      ptw_total_exec_ns += lat;
-                      ptw_task_latency_values.push_back(lat);
-                      ptw_task_start_ns.erase(_s); } }
+                // [STAT] canonical fault路径: 主任务延时(拆分统计)
+                ptw_record_task_latency(task->task_id, false);
 
                 
                 // Convert task to CacheMessage and write to cache_sub.pt_update_fifo (for fault recording)
@@ -398,12 +401,8 @@ void iommu_top::ptw_req_process_thread() {
                     ptw_main_ddr_reads_distribution[0]++;
                     ptw_main_task_count++;
                     ptw_late_spawn_skipped_bypass++;  // [STAT] 因bypass跳过late-spawn的主任务数
-                    { auto _s = ptw_task_start_ns.find(task->task_id);
-                      if (_s != ptw_task_start_ns.end()) {
-                          double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                          ptw_total_exec_ns += lat;
-                          ptw_task_latency_values.push_back(lat);
-                          ptw_task_start_ns.erase(_s); } }
+                    // [STAT] 大页leaf bypass路径: 主任务延时(拆分统计)
+                    ptw_record_task_latency(task->task_id, false);
                     pt_cache_to_fwd_fifo.write(task);
                     va_dedup_recover(task, false);
                     continue;
@@ -433,6 +432,7 @@ void iommu_top::ptw_req_process_thread() {
                 hp_group.pending_tasks = 0;
                 hp_group.total_tasks = 1 + D_eff;
                 hp_group.completed = true;
+                hp_group.group_complete_ns = sc_time_stamp().to_seconds() * 1e9;
                 hp_group.main_task_done = true;
                 hp_group.is_hugepage = true;
                 { auto _s = ptw_task_start_ns.find(task->task_id);
@@ -593,7 +593,10 @@ void iommu_top::ptw_req_process_thread() {
                                 pf_task->GSCID = task->GSCID;
                                 pf_task->PSCID = task->PSCID;
                                 pf_task->device_id = task->device_id;
-
+                                #if TEST_CFG_MULTI_DEVICE_SCENE
+                                                                md_trace.add_prefetch(pf_task->task_id, task->task_id, task->device_id);
+                                #endif
+                                
                                 // 预取专用标志
                                 pf_task->walk_ctx.is_prefetch_task = true;
                                 pf_task->walk_ctx.prefetch_group_id = group_id;
@@ -702,6 +705,9 @@ void iommu_top::ptw_rsp_thread() {
         ddr_rsp_entry_t rsp = ptw_rsp_ddr_fifo.read();
         // Heap-allocate to ensure lifetime across PEQ delay
         ddr_rsp_entry_t* rsp_ptr = new ddr_rsp_entry_t(rsp);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        ++md_trace.rsp_peq_pending;
+#endif
         ptw_rsp_peq.notify(*rsp_ptr, sc_time(PTW_RSP_PIPELINE_DELAY_NS, SC_NS));
     }
 }
@@ -714,6 +720,11 @@ void iommu_top::ptw_rsp_process_thread() {
     while (true) {
         ddr_rsp_entry_t* rsp_ptr = ptw_rsp_peq.get_next_transaction();
         if (!rsp_ptr) { wait(ptw_rsp_peq.get_event()); continue; }
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        --md_trace.rsp_peq_pending;
+        iommu_md::BusyGuard md_busy(md_trace.active);
+        md_trace.progress();
+#endif
         ddr_rsp_entry_t rsp = *rsp_ptr;
         delete rsp_ptr;
 
@@ -835,6 +846,11 @@ void iommu_top::ptw_rsp_process_thread() {
                    task->task_id, group.pending_tasks);
             fflush(stdout);
             
+            // [FIX] Burst响应是主任务最后一次DDR，从active_walks移除
+            ptw_walks_mtx.lock();
+            ptw_active_walks.erase(rsp.task_id);
+            ptw_walks_mtx.unlock();
+
             if (group.pending_tasks == 0 && group.completed) {
                 printf("[PTW_PREFETCH] task_id=%u -> Notifying monitor (all pending done)\n",
                        task->task_id);
@@ -1690,12 +1706,8 @@ void iommu_top::ptw_rsp_process_thread() {
                 ptw_main_ad_ddr_sum += task->walk_ctx.ad_update_ddr_writes;
                 ptw_main_stage_count++;
             }
-            { auto _s = ptw_task_start_ns.find(task->task_id);
-              if (_s != ptw_task_start_ns.end()) {
-                  double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                  ptw_total_exec_ns += lat;
-                  ptw_task_latency_values.push_back(lat);
-                  ptw_task_start_ns.erase(_s); } }
+            // [STAT] WALK FAULT路径: 按is_prefetch_task分类记录延时(拆分统计)
+            ptw_record_task_latency(task->task_id, task->walk_ctx.is_prefetch_task);
             
             // [FIX] 预取任务fault: 递减group.pending_tasks并通知monitor
             if (task->walk_ctx.is_prefetch_task) {
@@ -1857,6 +1869,7 @@ void iommu_top::ptw_rsp_process_thread() {
                 // 检查是否可以触发monitor: 预取任务全部完成 + 主任务已完成
                 if (group.pending_tasks == 0 && group.main_task_done && !group.completed) {
                     group.completed = true;
+                    group.group_complete_ns = sc_time_stamp().to_seconds() * 1e9;
                     printf("[PTW_PREFETCH] Group %u ALL COMPLETED (pending=0, main_done)! Trigger batch update.\n", group_id);
                     fflush(stdout);
                     
@@ -1899,17 +1912,8 @@ void iommu_top::ptw_rsp_process_thread() {
                         ptw_max_ddr_reads = task->walk_ctx.ddr_read_count;
                     if (task->walk_ctx.ddr_read_count < ptw_min_ddr_reads)
                         ptw_min_ddr_reads = task->walk_ctx.ddr_read_count;
-                    { auto _s = ptw_task_start_ns.find(task->task_id);
-                      if (_s != ptw_task_start_ns.end()) {
-                          double lat = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                          ptw_total_exec_ns += lat;
-                          ptw_task_latency_values.push_back(lat);
-                          if (lat > ptw_max_task_latency_ns)
-                              ptw_max_task_latency_ns = lat;
-                          if (lat < ptw_min_task_latency_ns)
-                              ptw_min_task_latency_ns = lat;
-                          ptw_task_start_ns.erase(_s);
-                      } }
+                    // [STAT] 预取任务walk完成路径: 延时(拆分统计)
+                    ptw_record_task_latency(task->task_id, true);
                     printf("[PTW_PREFETCH] Prefetch task %u completed, deferred to flush. DDR_reads=%u\n",
                            task->task_id, task->walk_ctx.ddr_read_count);
                     fflush(stdout);
@@ -1985,6 +1989,7 @@ void iommu_top::ptw_rsp_process_thread() {
                 hp_group.pending_tasks = 0;
                 hp_group.total_tasks = 1 + D_eff;
                 hp_group.completed = true;
+                hp_group.group_complete_ns = sc_time_stamp().to_seconds() * 1e9;
                 hp_group.main_task_done = true;
                 hp_group.is_hugepage = true;
                 { auto _s = ptw_task_start_ns.find(task->task_id);
@@ -2009,6 +2014,10 @@ void iommu_top::ptw_rsp_process_thread() {
 
                 prefetch_group_completed_event.notify(SC_ZERO_TIME);
 
+                // [FIX] 主任务walk已完成，从active_walks移除（monitor线程负责后续释放）
+                ptw_walks_mtx.lock();
+                ptw_active_walks.erase(rsp.task_id);
+                ptw_walks_mtx.unlock();
                 // 主任务不进入normal cleanup路径, 等待monitor线程处理
                 goto skip_walk_cleanup;
             }
@@ -2125,6 +2134,9 @@ void iommu_top::ptw_rsp_process_thread() {
                     pf_task->GSCID = task->GSCID;
                     pf_task->PSCID = task->PSCID;
                     pf_task->device_id = task->device_id;
+                    #if TEST_CFG_MULTI_DEVICE_SCENE
+                                                    md_trace.add_prefetch(pf_task->task_id, task->task_id, task->device_id);
+                    #endif
                     
                     // 预取专用标志
                     pf_task->walk_ctx.is_prefetch_task = true;
@@ -2205,6 +2217,7 @@ void iommu_top::ptw_rsp_process_thread() {
                 // 检查是否可以触发monitor（预取任务可能已全部完成）
                 if (group.pending_tasks == 0 && !group.completed) {
                     group.completed = true;
+                    group.group_complete_ns = sc_time_stamp().to_seconds() * 1e9;
                     printf("[PTW_PREFETCH] Group %u ALL COMPLETED (2stage_init, pending=0, main_done)! Trigger.\n", group_id);
                     fflush(stdout);
                     prefetch_group_completed_event.notify(SC_ZERO_TIME);
@@ -2212,6 +2225,10 @@ void iommu_top::ptw_rsp_process_thread() {
                 
                 prefetch_group_mtx.unlock();
                 
+                // [FIX] 主任务walk已完成，从active_walks移除（monitor线程负责后续释放）
+                ptw_walks_mtx.lock();
+                ptw_active_walks.erase(rsp.task_id);
+                ptw_walks_mtx.unlock();
                 // 主任务不进入normal cleanup路径，等待monitor线程释放
                 goto skip_walk_cleanup;
             }
@@ -2540,20 +2557,15 @@ void iommu_top::ptw_rsp_process_thread() {
             }
             
             // [STAT] 打印每个PTW任务的详细统计
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_trace.operation(task->task_id, "ptw", "main_complete", task->device_id,
+                               ptw_task_start_ns[task->task_id], true, -1, 0, 0, task->walk_ctx.ddr_read_count);
+#endif
             print_ptw_task_summary(task, "walk_complete");
             
             // [STAT] 计算任务总延时
-            { auto _s = ptw_task_start_ns.find(task->task_id);
-              if (_s != ptw_task_start_ns.end()) {
-                  double task_latency = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                  ptw_total_exec_ns += task_latency;
-                  ptw_task_latency_values.push_back(task_latency);
-                  if (task_latency > ptw_max_task_latency_ns)
-                      ptw_max_task_latency_ns = task_latency;
-                  if (task_latency < ptw_min_task_latency_ns)
-                      ptw_min_task_latency_ns = task_latency;
-                  ptw_task_start_ns.erase(_s);
-              } }
+            // [STAT] D=0路径主任务walk完成: 延时(拆分统计)
+            ptw_record_task_latency(task->task_id, false);
             
             // =====================================================================
             // [D=0] 无预取场景: 写 dedup_update_fifo 清除 dedup 占位并刷新 Buffer(转发本任务)
@@ -2714,6 +2726,9 @@ void iommu_top::prefetch_group_monitor_thread() {
     while (true) {
         // 等待预取组完成事件
         wait(prefetch_group_completed_event);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_trace.active);
+#endif
         
         // [FIX-V2] 收集待处理的组数据
         // 两阶段模式: 持锁仅收集数据+标记处理中, 释放锁后经PEQ延时执行flush和FIFO写入
@@ -2768,6 +2783,8 @@ void iommu_top::prefetch_group_monitor_thread() {
                 pgu.has_fault = group.has_fault;
                 pgu.is_hugepage = group.is_hugepage;  // [大页]
                 pgu.is_bypass = group.is_bypass;      // [bypass预取]
+                pgu.group_start_ns = group.group_start_ns;      // [STAT] 持有延时细分
+                pgu.group_complete_ns = group.group_complete_ns;
                 // [200ns PEQ 自包含] 拷贝flush所需字段, process线程不再解引用main_task(防use-after-free)
                 pgu.task_id = main_task->task_id;
                 pgu.gscid   = main_task->GSCID;
@@ -2859,18 +2876,13 @@ void iommu_top::prefetch_group_monitor_thread() {
                 ptw_main_gs_ddr_sum += main_task->walk_ctx.gs_stage_ddr_reads;
                 ptw_main_ad_ddr_sum += main_task->walk_ctx.ad_update_ddr_writes;
                 ptw_main_stage_count++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+                md_trace.operation(main_task->task_id, "ptw", "group_complete", main_task->device_id,
+                                   group.group_start_ns, !group.has_fault, -1, 0, 0, group.total_tasks);
+#endif
                 print_ptw_task_summary(main_task, main_task->walk_ctx.is_two_stage_prefetch ? "two_stage_pf_complete" : "burst_complete");
-                { auto _s = ptw_task_start_ns.find(main_task->task_id);
-                  if (_s != ptw_task_start_ns.end()) {
-                      double task_latency = sc_time_stamp().to_seconds()*1e9 - _s->second;
-                      ptw_total_exec_ns += task_latency;
-                      ptw_task_latency_values.push_back(task_latency);
-                      if (task_latency > ptw_max_task_latency_ns)
-                          ptw_max_task_latency_ns = task_latency;
-                      if (task_latency < ptw_min_task_latency_ns)
-                          ptw_min_task_latency_ns = task_latency;
-                      ptw_task_start_ns.erase(_s);
-                  } }
+                // [STAT] 组路径主任务完成: 延时(拆分统计)
+                ptw_record_task_latency(main_task->task_id, false);
 
                 
                 // [STAT] 任务组执行时间统计 (1主+D预取为一组)
@@ -2917,6 +2929,9 @@ void iommu_top::prefetch_group_monitor_thread() {
             // [FIX] peq_with_get::notify仅存储指针(&trans), 不拷贝。必须堆分配以保证
             //       200ns延时期间生命周期(对齐ptw_rsp_peq的 new + notify(*ptr) + process端delete 模式)。
             pending_group_update* pgu_p = new pending_group_update(std::move(pgu));
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            ++md_trace.aggregate_pending;
+#endif
             agg_flush_peq.notify(*pgu_p, sc_time(IOMMU_AGG_FLUSH_PIPELINE_DELAY_NS, SC_NS));
         }
         printf("[MONITOR_PHASE] %zu groups scheduled to agg_flush_peq (+%u ns agg-flush delay)\n",
@@ -2958,9 +2973,15 @@ void iommu_top::agg_flush_process_thread() {
         pending_group_update* pgu_p = agg_flush_peq.get_next_transaction();
         if (!pgu_p) { wait(agg_flush_peq.get_event()); continue; }
         pending_group_update& pgu = *pgu_p;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_trace.active);
+        --md_trace.aggregate_pending;
+        iommu_md::require(!pgu.has_fault, "预取组包含fault，禁止将无效结果刷新为成功翻译");
+#endif
 
         // [MONITOR] 记录单个group刷新开始时间(不含200ns PEQ调度延时, 延时为等待非busy)
         const double group_process_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        pgu.agg_flush_ns = group_process_start_ns;  // [STAT] 持有延时细分
 
         // [重构] 统一处理: 每个 iova 写 dedup_update_fifo(刷 Buffer + 清 dedup 占位),
         //        正常组额外写 pt_update_fifo(填 PT Cache 常规 CL)。
@@ -2970,6 +2991,10 @@ void iommu_top::agg_flush_process_thread() {
             uint64_t iova = pgu.batch_updates[i].first;
             const iommu::PTData& pt_data = pgu.batch_updates[i].second;
             if (iova == 0) continue;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::require(pt_data.vs_pte.V != 0 && pt_data.g_pte.V != 0,
+                              "两阶段聚合结果PTE无效，禁止写入缓存或唤醒等待者");
+#endif
 
             uint64_t pa_base = (i < pgu.pa_bases.size()) ? pgu.pa_bases[i] : 0ULL;
 
@@ -2986,6 +3011,9 @@ void iommu_top::agg_flush_process_thread() {
                 dedup_upd.dedup_pa_base = pa_base;
                 dedup_upd.pt_data = pt_data;
                 dedup_upd.timestamp = sc_time_stamp();
+                dedup_upd.md_group_start_ns = pgu.group_start_ns;        // [STAT] 持有延时细分
+                dedup_upd.md_group_complete_ns = pgu.group_complete_ns;
+                dedup_upd.md_agg_flush_ns = pgu.agg_flush_ns;
                 cache_sub.dedup_update_fifo.write(dedup_upd);
             }
 

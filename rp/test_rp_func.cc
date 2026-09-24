@@ -10,12 +10,20 @@ using namespace std;
 
 uint8_t RP_Module::read_memory_test_rp(uint64_t addr, uint8_t size, char *data)
 {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::require(addr <= DDR_Module::DDR_MEMORY_SIZE && size <= DDR_Module::DDR_MEMORY_SIZE - addr,
+                      "RP直接读取越界");
+#endif
     memcpy(data, &ddr_ptr->memory[addr], size);
     return 0;
 }
 
 uint8_t RP_Module::write_memory_test_rp(char *data, uint64_t addr, uint32_t size)
 {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::require(addr <= DDR_Module::DDR_MEMORY_SIZE && size <= DDR_Module::DDR_MEMORY_SIZE - addr,
+                      "RP直接写入越界");
+#endif
     // 如果是写入 DC 区域，打印详细信息
     if (addr <= 0x200 && addr + size >= 0x140) {
         printf("[WRITE_MEMORY_RP] Writing to addr=0x%lx, size=%d, data[0]=0x%lx\n", 
@@ -306,6 +314,11 @@ uint64_t RP_Module::get_free_ppn(
         next_free_page = next_free_page & ~(num_ppn -1);
     }
     free_ppn = next_free_page;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    const uint64_t max_ppn = DDR_Module::DDR_MEMORY_SIZE / PAGESIZE;
+    iommu_md::require(num_ppn > 0 && free_ppn <= max_ppn && num_ppn <= max_ppn - free_ppn,
+                      "页表物理页分配超过DDR容量");
+#endif
     next_free_page += num_ppn;
     memset(&ddr_ptr->memory[free_ppn * PAGESIZE], 0, num_ppn * PAGESIZE);
     return free_ppn;

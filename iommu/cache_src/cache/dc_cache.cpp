@@ -46,7 +46,11 @@ uint32_t DCCache::invalidate_global(sc_time* latency) {
 
 uint32_t DCCache::hash_function(const DCTag& tag) const {
     uint32_t mask = num_sets_ - 1;
-    return ((tag.device_id >> 16) ^ ((tag.device_id >> 8) << 2)) & mask;
+    // [FIX] 原实现 ((did>>16)^((did>>8)<<2)) 丢弃 device_id 低8位,
+    // 导致 DID<256 的全部设备哈希到 set 0 (N=8 时 8 上下文挤 4 路产生替换抖动)。
+    // 现混入低8位(devfn)与 bus 位: 小 DID 分散到不同 set, 大 RID 仍保持混合。
+    uint32_t did = tag.device_id;
+    return ((did >> 16) ^ (did >> 8) ^ (did << 2)) & mask;
 }
 
 } // namespace iommu

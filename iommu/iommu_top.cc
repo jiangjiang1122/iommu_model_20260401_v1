@@ -251,6 +251,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
 
         task->timestamp = sc_time_stamp();
         task->state = TASK_INIT;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
+#endif
 
         // [STAT] 控制包(SQ/CQ/MSI)入口计数
         if (task->is_ctrl) {
@@ -292,12 +295,21 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         }
         iommu_in_last_ns = ts_ns;
 
-        // [流水线延时] sc_spawn独立进程: 200ns后写入inbound_fifo
-        // 每个请求独立计时，不同请求并行不阻塞
-        sc_spawn([this, task]() {
-            wait(IOMMU_INPUT_PIPELINE_DELAY_NS, SC_NS);
-            inbound_fifo.write(task);
-        });
+        // [流水线延时] 静态延时线: 仅入队(task + 到期时刻), 由常驻 input_delay_thread
+        //   在到期后写入 inbound_fifo。替代 per-task sc_spawn, 避免多设备大事务量下协程池溢出。
+        //   入队不阻塞, 且延时固定 -> 到期顺序即到达顺序, 时序语义与原并行协程等价。
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        ++md_trace.input_pending;
+#endif
+        {
+            pipeline_delay_item_t item;
+            item.task = task;
+            item.due_ns = ts_ns + (double)IOMMU_INPUT_PIPELINE_DELAY_NS;
+            input_delay_mtx.lock();
+            input_delay_queue.push(item);
+            input_delay_mtx.unlock();
+            input_delay_event.notify(SC_ZERO_TIME);
+        }
 
         // 4. Return END_REQ (request accepted)
         phase = tlm::END_REQ;
@@ -311,12 +323,49 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
 }
 
 /**********************************************/
+// input_delay_thread - 入口流水线延时线(常驻静态线程)
+//   替代原 per-task sc_spawn: 从 input_delay_queue 按 FIFO 取出 task,
+//   等待到其到期时刻(入队时刻 + IOMMU_INPUT_PIPELINE_DELAY_NS)后写入 inbound_fifo。
+//   因延时固定, 队首即最早到期, 单线程串行下发的时序与原并行协程等价,
+//   且进程数恒定(不随事务量增长), 规避 SystemC 协程栈溢出。
+/**********************************************/
+void iommu_top::input_delay_thread() {
+    while (true) {
+        iommu_task_t* task = nullptr;
+        double due_ns = 0.0;
+
+        input_delay_mtx.lock();
+        while (input_delay_queue.empty()) {
+            input_delay_mtx.unlock();
+            wait(input_delay_event);
+            input_delay_mtx.lock();
+        }
+        task = input_delay_queue.front().task;
+        due_ns = input_delay_queue.front().due_ns;
+        input_delay_queue.pop();
+        input_delay_mtx.unlock();
+
+        double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (due_ns > now_ns) wait(due_ns - now_ns, SC_NS);
+
+        inbound_fifo.write(task);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        --md_trace.input_pending;
+        md_trace.progress();
+#endif
+    }
+}
+
+/**********************************************/
 // DDR response AT nb_transport_bw callback (DDR -> IOMMU)
 /**********************************************/
 tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
     tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
 {
     if (phase == tlm::BEGIN_RESP) {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_trace.active);
+#endif
         // Pop from ddr_pending_queue head (FIFO ordering guarantee)
         ddr_queue_mtx.lock();
         if (ddr_pending_queue.empty()) {
@@ -337,6 +386,15 @@ tlm::tlm_sync_enum iommu_top::ddr_nb_transport_bw(
         if (rsp.data_length > sizeof(rsp.data)) rsp.data_length = sizeof(rsp.data);
         memcpy(rsp.data, trans.get_data_ptr(), rsp.data_length);
         rsp.error = (trans.get_response_status() != tlm::TLM_OK_RESPONSE);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.progress();
+        if (pending.task_id) {
+            auto& owner = md_trace.task(pending.task_id);
+            md_trace.operation(pending.task_id, "ddr", pending.is_write ? "write" : "read",
+                               owner.device, pending.submit_time_ns, !rsp.error, pending.source_module,
+                               0, 0, pending.size);
+        }
+#endif
         rsp.submit_time_ns = pending.submit_time_ns;  // [STAT] 传递时间戳
 
         // Route to corresponding rsp_ddr_fifo based on source_module
@@ -463,6 +521,9 @@ void iommu_top::ddr_arbiter_thread() {
             }
 
             if (!found) break;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_trace.active);
+#endif
             processed_any = true;
 
             const char* src_name = (source_module == DDR_SRC_XDTW) ? "XDTW" :
@@ -562,6 +623,9 @@ void iommu_top::send_response_to_initiator(iommu_task_t* task) {
            task->task_id, task->pa, task->state, entry_ns, ts_ns, e2e_ns);
     fflush(stdout);
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    md_trace.stamp(task->task_id, iommu_md::Point::RESPONSE);
+#endif
     // Send nb_transport_bw to notify initiator
     tlm::tlm_phase phase = tlm::BEGIN_RESP;
     sc_time delay = SC_ZERO_TIME;
@@ -577,6 +641,11 @@ void iommu_top::configure_and_route(iommu_task_t* task) {
     task->GV = (task->iohgatp.MODE == IOHGATP_Bare) ? 0 : 1;
     task->GSCID = (task->GV == 0) ? 0 : task->iohgatp.GSCID;
     task->PSCID = (task->PSCV == 0) ? 0 : task->PSCID;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::require(task->device_id < md_trace.devices && task->GSCID == task->device_id + 1 &&
+                      task->PSCID == 0, "DC配置后任务GSCID/PSCID与设备身份不匹配");
+    md_trace.progress();
+#endif
     task->check_access_perms =
         (task->TTYP != PCIE_ATS_TRANSLATION_REQUEST) ? 1 : 0;
 
@@ -787,6 +856,55 @@ void iommu_top::va_dedup_recover(iommu_task_t* completed_task, bool is_fault) {
 /**********************************************/
 // print_cache_statistics - 打印Cache命中率统计信息
 /**********************************************/
+#if TEST_CFG_MULTI_DEVICE_SCENE
+bool iommu_top::md_quiescent() const {
+    if (!md_trace.all_responded() || md_trace.input_pending || md_trace.output_pending ||
+        md_trace.aggregate_pending || md_trace.req_peq_pending || md_trace.rsp_peq_pending || md_trace.active)
+        return false;
+    if (!pending_tasks.empty() || !pt_cache_pending_tasks.empty() || !walker_front_pending.empty() ||
+        !xdtw_active_walks.empty() || !ptw_active_walks.empty() || !msiptw_active_walks.empty() ||
+        !prefetch_groups.empty() || !reorder_buf.empty() || !reorder_write_order.empty() ||
+        !ddr_pending_queue.empty() || iommu_global_outstanding || iommu_read_outstanding ||
+        iommu_write_outstanding || ptw_outstanding_task_count || msiptw_outstanding_task_count ||
+        axi_master_1_to_cmn_rnd_outstanding || axi_master_0_to_pcie_noc_outstanding)
+        return false;
+#if TEST_CFG_PERDEV_WRITE_ORDER
+    for (unsigned d = 0; d < iommu_md::MAX_DEVICE_COUNT; d++)
+        if (!reorder_write_order_dev[d].empty()) return false;
+#endif
+    const sc_fifo<iommu_task_t*>* task_fifos[] = {
+        &inbound_fifo, &parser_to_collector_fifo, &collector_to_xdtw_dc_fifo, &collector_to_xdtw_pc_fifo,
+        &collector_to_msipt_cache_query_fifo, &collector_to_fault_fifo, &xdtw_to_collector_fifo,
+        &pt_cache_to_ptw_fifo, &ptw_to_pt_cache_fifo, &pt_cache_to_fwd_fifo,
+        &msipt_cache_to_msiptw_fifo, &msiptw_to_msipt_cache_fifo, &msipt_cache_to_fwd_fifo, &ptw_response_fifo};
+    for (auto* f : task_fifos) if (f->num_available()) return false;
+    if (xdtw_req_ddr_fifo.num_available() || xdtw_rsp_ddr_fifo.num_available() ||
+        ptw_req_ddr_fifo.num_available() || ptw_rsp_ddr_fifo.num_available() ||
+        msiptw_req_ddr_fifo.num_available() || msiptw_rsp_ddr_fifo.num_available() ||
+        msi_mrif_req_ddr_fifo.num_available() || ctrl_path_req_ddr_fifo.num_available()) return false;
+    return cache_sub.md_quiescent();
+}
+
+void iommu_top::md_update_write_hol() {
+    std::map<uint32_t, uint32_t> blocked;
+#if TEST_CFG_PERDEV_WRITE_ORDER
+    // [每设备写保序] 跨设备写HOL按定义不存在: 仅关闭未结算区间
+    md_trace.update_hol(blocked);
+    (void)reorder_buf;
+#else
+    uint32_t head = 0;
+    for (const auto& pair : reorder_buf) {
+        const auto& entry = pair.second;
+        if (!entry.is_write) continue;
+        if (!head && !entry.ready) head = pair.first;
+        if (head && entry.ready && md_trace.task(head).device != entry.task->device_id)
+            blocked.emplace(pair.first, head);
+    }
+    md_trace.update_hol(blocked);
+#endif
+}
+#endif
+
 void iommu_top::print_cache_statistics() {
     // [FIX] 等待 pt_update_worker_thread 处理完 FIFO 中所有剩余请求，修正仿真终止时的统计误差
     // [多RAM] 同时等待内部 RAM FIFO 排空(多RAM改造后任务可能滞留在分发FIFO中)
@@ -1451,6 +1569,128 @@ void iommu_top::print_cache_statistics() {
                100.0 * ptw_total_completed / iommu_total_completed);
     }
     printf("================================================\n\n");
+
+    // [STAT-NEW] PTW 并发任务数与主/预取执行延时统计
+    //   需求: N=8等场景补充 PTW 模块的实际平均并发/最大并发/主+预取执行延时
+    printf("========== PTW Concurrency & Execution Latency ==========\n");
+    {
+        // --- (1) PTW 并发任务数(主任务+预取任务合并计入 outstanding) ---
+        // 时间加权平均: 累计area / 采样窗口; 峰值直接取peak_ptw_outstanding
+        double window_ns = 0.0;
+        double area_ns = ptw_concurrency_area_ns;
+        if (ptw_concurrency_first_sample_ns >= 0.0) {
+            // 收尾: 加上从上次变化到当前仿真时刻的面积
+            const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+            const double tail = now_ns - ptw_concurrency_last_change_ns;
+            if (tail > 0.0) {
+                area_ns += (double)ptw_outstanding_task_count * tail;
+            }
+            window_ns = now_ns - ptw_concurrency_first_sample_ns;
+        }
+        const double avg_conc = (window_ns > 0.0) ? (area_ns / window_ns) : 0.0;
+        printf("  PTW concurrent tasks (main + prefetch, outstanding计数单位=单任务):\n");
+        printf("    Avg concurrency (time-weighted): %.3f tasks\n", avg_conc);
+        printf("    Max concurrency (peak):          %d tasks  (limit=%d)\n",
+               peak_ptw_outstanding, (int)PTW_MAX_OUTSTANDING_TASKS);
+        printf("    Sampling window:                 %.1f ns (%.3f us)\n",
+               window_ns, window_ns / 1000.0);
+        printf("    Utilization (avg/limit):         %.2f%%\n",
+               PTW_MAX_OUTSTANDING_TASKS > 0
+                   ? 100.0 * avg_conc / (double)PTW_MAX_OUTSTANDING_TASKS : 0.0);
+        printf("    Saturation (peak/limit):         %.2f%%\n",
+               PTW_MAX_OUTSTANDING_TASKS > 0
+                   ? 100.0 * (double)peak_ptw_outstanding / (double)PTW_MAX_OUTSTANDING_TASKS : 0.0);
+
+        // --- (2) PTW 执行延时: 主任务 / 预取任务 / 合并 ---
+        printf("  ---\n");
+        printf("  PTW execution latency (task enter PTW -> walk complete):\n");
+        // 合并(主+预取)
+        if (ptw_total_completed > 0) {
+            printf("    [ALL]      count=%-8lu avg=%8.2f ns  max=%8.2f ns  min=%8.2f ns\n",
+                   (unsigned long)ptw_total_completed,
+                   ptw_total_exec_ns / ptw_total_completed,
+                   ptw_max_task_latency_ns,
+                   ptw_min_task_latency_ns == 999999999.0 ? 0.0 : ptw_min_task_latency_ns);
+        }
+        // 主任务
+        if (ptw_main_task_count > 0) {
+            printf("    [MAIN]     count=%-8lu avg=%8.2f ns  max=%8.2f ns  min=%8.2f ns\n",
+                   (unsigned long)ptw_main_task_count,
+                   ptw_main_total_exec_ns / ptw_main_task_count,
+                   ptw_main_max_task_latency_ns,
+                   ptw_main_min_task_latency_ns == 999999999.0 ? 0.0 : ptw_main_min_task_latency_ns);
+        } else {
+            printf("    [MAIN]     count=0        (no main task recorded)\n");
+        }
+        // 预取任务
+        if (ptw_prefetch_task_count > 0) {
+            printf("    [PREFETCH] count=%-8lu avg=%8.2f ns  max=%8.2f ns  min=%8.2f ns\n",
+                   (unsigned long)ptw_prefetch_task_count,
+                   ptw_prefetch_total_exec_ns / ptw_prefetch_task_count,
+                   ptw_prefetch_max_task_latency_ns,
+                   ptw_prefetch_min_task_latency_ns == 999999999.0 ? 0.0 : ptw_prefetch_min_task_latency_ns);
+        } else {
+            printf("    [PREFETCH] count=0        (no prefetch task recorded)\n");
+        }
+        // 主+预取合并再核对一次(与[ALL]口径一致, 用于交叉校验)
+        const uint64_t mp_count = ptw_main_task_count + ptw_prefetch_task_count;
+        if (mp_count > 0) {
+            const double mp_avg = (ptw_main_total_exec_ns + ptw_prefetch_total_exec_ns) / mp_count;
+            printf("    [MAIN+PF]  count=%-8lu avg=%8.2f ns  (合并校验口径)\n",
+                   (unsigned long)mp_count, mp_avg);
+        }
+
+        // --- (3) 主/预取延时分布直方图(与既有ALL口径分桶一致) ---
+        auto dump_bucket = [](const char* tag, const std::vector<double>& vals) {
+            if (vals.empty()) return;
+            uint32_t b[5] = {0};
+            for (auto v : vals) {
+                if (v < 100) b[0]++;
+                else if (v < 500) b[1]++;
+                else if (v < 1000) b[2]++;
+                else if (v < 5000) b[3]++;
+                else b[4]++;
+            }
+            const char* lbl[5] = {"0~100ns", "100~500ns", "500~1000ns", "1000~5000ns", ">5000ns"};
+            printf("    %s latency distribution (n=%zu):\n", tag, vals.size());
+            for (int i = 0; i < 5; i++) {
+                if (b[i] > 0) {
+                    printf("      %-12s %-8u %.2f%%\n", lbl[i], b[i],
+                           100.0 * (double)b[i] / (double)vals.size());
+                }
+            }
+        };
+        printf("  ---\n");
+        dump_bucket("[MAIN]    ", ptw_main_task_latency_values);
+        dump_bucket("[PREFETCH]", ptw_prefetch_task_latency_values);
+
+        // --- (4) CSV导出: 便于N=8等场景做曲线/对比 ---
+        {
+            FILE* fp = fopen("ptw_main_task_latency.csv", "w");
+            if (fp) {
+                fprintf(fp, "index,latency_ns\n");
+                for (size_t i = 0; i < ptw_main_task_latency_values.size(); i++) {
+                    fprintf(fp, "%zu,%.2f\n", i, ptw_main_task_latency_values[i]);
+                }
+                fclose(fp);
+                printf("  Main task latency exported to: ptw_main_task_latency.csv (%zu samples)\n",
+                       ptw_main_task_latency_values.size());
+            }
+        }
+        {
+            FILE* fp = fopen("ptw_prefetch_task_latency.csv", "w");
+            if (fp) {
+                fprintf(fp, "index,latency_ns\n");
+                for (size_t i = 0; i < ptw_prefetch_task_latency_values.size(); i++) {
+                    fprintf(fp, "%zu,%.2f\n", i, ptw_prefetch_task_latency_values[i]);
+                }
+                fclose(fp);
+                printf("  Prefetch task latency exported to: ptw_prefetch_task_latency.csv (%zu samples)\n",
+                       ptw_prefetch_task_latency_values.size());
+            }
+        }
+    }
+    printf("=========================================================\n\n");
 
     // Outstanding Peak Statistics
     printf("========== Outstanding Peak Statistics ==========\n");

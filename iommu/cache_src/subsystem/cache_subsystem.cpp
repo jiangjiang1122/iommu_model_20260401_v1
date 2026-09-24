@@ -254,6 +254,42 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     fflush(stdout);
 }
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+bool CacheSubsystem::md_quiescent() const {
+    if (md_active_ || !walker_join_pending_.empty() || pt_inval_remaining_ || walker_inval_remaining_ ||
+        dedup_reserved_count_ || (dedup_buffer_ && dedup_buffer_->get_valid_count())) return false;
+    const sc_fifo<CacheMessage>* fifos[] = {
+        &dc_request_fifo,&pc_request_fifo,&pt_request_fifo,&walker_request_fifo,&msi_request_fifo,
+        &walker_front_request_fifo,&walker_front_response_fifo,&dedup_request_fifo,&dedup_update_fifo,
+        &dedup_inside_request_fifo,&dedup_hash_in_fifo,&dc_response_fifo,&pc_response_fifo,
+        &pt_hit_response_fifo,&pt_miss_response_fifo,&walker_response_fifo,&msi_response_fifo,
+        &dc_update_fifo,&pc_update_fifo,&pt_update_fifo,&walker_update_fifo,&msi_update_fifo,
+        &dc_invalidate_fifo,&pc_invalidate_fifo,&pt_invalidate_fifo,&walker_invalidate_fifo,&msi_invalidate_fifo,
+        &dc_invalidate_response_fifo,&pc_invalidate_response_fifo,&pt_invalidate_response_fifo,
+        &walker_invalidate_response_fifo,&msi_invalidate_response_fifo,&invalidation_request_fifo,
+        &invalidation_response_fifo,&walker_join_fifo,&walker_serial_fifo};
+    for(auto* f:fifos) if(f->num_available()) return false;
+    for(const auto* banks:{&pt_ram_fifo_,&dedup_ram_fifo_,&walker_ram_fifo_,&walker_ram_upd_fifo_})
+        for(const auto& f:*banks) if(f->num_available()) return false;
+    return true;
+}
+void CacheSubsystem::md_record(const CacheMessage& msg, const std::string& source,
+                               const std::string& op, double start, bool hit,
+                               int bank, int level, uint64_t value) {
+    if (!md_trace_) return;
+    const bool context_cache = source.find("pt_cache") == 0 || source.find("dedup") == 0 ||
+                               source.find("walker") == 0;
+    if (!msg.task_id) { md_trace_->progress(); return; }
+    unsigned did = msg.device_id;
+    if (context_cache) {
+        iommu_md::require(msg.gscid > 0 && msg.gscid <= md_trace_->devices, "Cache消息GSCID非法");
+        did = msg.gscid - 1;
+    }
+    md_trace_->operation(msg.task_id, source, op, did, start, hit, bank, level,
+                         start - msg.timestamp.to_seconds()*1e9, value);
+}
+#endif
+
 void CacheSubsystem::set_task_trace_enabled(bool enabled) {
     task_trace_level_ = enabled ? TaskTraceLevel::DETAIL : TaskTraceLevel::OFF;
 }
@@ -281,6 +317,9 @@ void CacheSubsystem::process_next_invalidation_request() {
     if (!pop_fifo(invalidation_request_fifo, msg)) {
         return;
     }
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::BusyGuard md_busy(md_active_);
+#endif
     const sc_time start = sc_time_stamp();
     trace_task_event("begin", "invalidation_pipeline", "invalidate", msg, start);
     CacheMessage resp = execute_invalidation_pipeline(msg);
@@ -306,6 +345,14 @@ void CacheSubsystem::trace_task_event(const char* phase,
                                       const CacheMessage& msg,
                                       const sc_time& start_time,
                                       const CacheMessage* resp) {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    if (std::string(phase) == "end" && op_name != "invalidate") {
+        const std::string source = cache_name == "walker_cache" ?
+            (msg.walker_is_s2_lookup ? "walker_s2" : "walker_vs") : cache_name;
+        md_record(msg, source, op_name, start_time.to_seconds()*1e9,
+                  resp && resp->hit, -1, resp ? resp->walker_level : 0);
+    }
+#endif
     if (task_trace_level_ == TaskTraceLevel::OFF) return;
 
     const bool is_begin = std::string(phase) == "begin";
@@ -372,6 +419,9 @@ void CacheSubsystem::dc_scheduler_thread() {
     while (true) {
         if (dc_invalidate_fifo.num_available() > 0) {
             CacheMessage req = dc_invalidate_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "dc_cache", "invalidate", req, start);
             CacheMessage resp = execute_dc_invalidate_request(req);
@@ -382,6 +432,9 @@ void CacheSubsystem::dc_scheduler_thread() {
         }
         if (dc_update_fifo.num_available() > 0) {
             CacheMessage req = dc_update_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "dc_cache", "update", req, start);
             CacheMessage resp = execute_dc_update_request(req);
@@ -391,6 +444,9 @@ void CacheSubsystem::dc_scheduler_thread() {
         }
         if (dc_request_fifo.num_available() > 0) {
             CacheMessage req = dc_request_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "dc_cache", "lookup", req, start);
             CacheMessage resp = execute_dc_request(req);
@@ -427,6 +483,9 @@ void CacheSubsystem::pc_scheduler_thread() {
     while (true) {
         if (pc_invalidate_fifo.num_available() > 0) {
             CacheMessage req = pc_invalidate_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "pc_cache", "invalidate", req, start);
             CacheMessage resp = execute_pc_invalidate_request(req);
@@ -437,6 +496,9 @@ void CacheSubsystem::pc_scheduler_thread() {
         }
         if (pc_update_fifo.num_available() > 0) {
             CacheMessage req = pc_update_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "pc_cache", "update", req, start);
             CacheMessage resp = execute_pc_update_request(req);
@@ -446,6 +508,9 @@ void CacheSubsystem::pc_scheduler_thread() {
         }
         if (pc_request_fifo.num_available() > 0) {
             CacheMessage req = pc_request_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "pc_cache", "lookup", req, start);
             CacheMessage resp = execute_pc_request(req);
@@ -504,6 +569,9 @@ void CacheSubsystem::pt_hash_thread() {
             pt_sched_next_is_request_ = true;
         }
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const sc_time dequeue_time = sc_time_stamp();
         const double dequeue_ns = dequeue_time.to_seconds() * 1e9;
         double fifo_wait_ns = dequeue_ns - req.timestamp.to_seconds() * 1e9;
@@ -556,6 +624,9 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
     (void)pt_req_counter;
     while (true) {
         CacheMessage req = my_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const sc_time dequeue_time = sc_time_stamp();
         const double start_ns = dequeue_time.to_seconds() * 1e9;
         const bool is_update = (req.msg_type == CacheMsgType::PT_UPDATE);
@@ -639,6 +710,9 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
             record_task_completion("pt_cache", dequeue_time, end);
             stats_.record_pt_phase_timestamp("pt_cache", 0, start_ns, end_ns);
             trace_task_event("end", "pt_cache", "lookup", req, dequeue_time, &resp);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(req, "pt_cache_ram", "lookup", start_ns, resp.hit, ram_id);
+#endif
 
             // 区间命中率统计(全局REQUEST序号)
             int interval_idx = static_cast<int>(pt_sched_req_count_ / 1000);
@@ -836,6 +910,9 @@ void CacheSubsystem::dedup_scheduler_thread() {
         }
 
         // 下发Hash单元: 阻塞写 = hash忙时scheduler阻塞(反压上游)
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         dedup_hash_in_fifo.write(msg);
     }
 }
@@ -848,6 +925,9 @@ void CacheSubsystem::dedup_scheduler_thread() {
 void CacheSubsystem::dedup_hash_process_thread() {
     while (true) {
         CacheMessage msg = dedup_hash_in_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const double dequeue_ns = sc_time_stamp().to_seconds() * 1e9;
 
         // Hash 单元执行 1 拍 (忙)
@@ -890,6 +970,9 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
     sc_fifo<CacheMessage>& my_fifo = *dedup_ram_fifo_[ram_id];
     while (true) {
         CacheMessage msg = my_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const sc_time dequeue_time = sc_time_stamp();
         const double start_ns = dequeue_time.to_seconds() * 1e9;
 
@@ -941,6 +1024,9 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
             // 预取任务同样消耗1个原子段
             wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
             dedup_last_end_ns_ = sc_time_stamp().to_seconds() * 1e9;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(msg, "dedup_ram", "prefetch_placeholder", start_ns, false, ram_id);
+#endif
             dedup_ram_prefetch_count_[ram_id]++;
         } else {
             // ============ 普通REQUEST: 分支1/2/3 + 响应路由 ============
@@ -961,6 +1047,9 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
 
             record_task_completion("dedup_cache", dequeue_time, end_time);
             trace_task_event("end", "dedup_cache", "lookup", msg, dequeue_time, &resp);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(msg, "dedup_ram", "lookup", start_ns, resp.hit, ram_id);
+#endif
 
             // 响应路由:
             //   dedup_suspended: 任务已挂Buffer -> pt_hit_response_fifo(collector识别后挂起)
@@ -992,6 +1081,9 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
 //   SCAN/GLOBAL: 每 RAM 扫本区间
 // ============================================================
 void CacheSubsystem::dispatch_pt_invalidate(const CacheMessage& cmd) {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::BusyGuard md_busy(md_active_);
+#endif
     const sc_time start = sc_time_stamp();
     trace_task_event("begin", "pt_cache", "invalidate", cmd, start);
 
@@ -1461,6 +1553,9 @@ void CacheSubsystem::walker_hash_thread() {
         // 1. update优先: 保证Walker更新及时可见(后续同段任务二次校验可命中)
         else if (walker_update_fifo.num_available() > 0) {
             req = walker_update_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             if (req.walker_is_s2_lookup) {
                 // S2 Cache更新: 零延时, 内联执行
                 const sc_time start = sc_time_stamp();
@@ -1476,6 +1571,9 @@ void CacheSubsystem::walker_hash_thread() {
         // 2. [串行查询] 续查优先: 完成 in-flight 查询的下一级(有界: 每lookup至多2次续查)
         else if (walker_serial_fifo.num_available() > 0) {
             req = walker_serial_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             // 续查hash 1拍后分发单级子查询
             wait(clock_period_);
             dispatch_walker_sub_lookup(req, req.walker_sub_level);
@@ -1486,6 +1584,9 @@ void CacheSubsystem::walker_hash_thread() {
         // 避免高速前置流饿死PTW查询
         else if (walker_request_fifo.num_available() > 0) {
             req = walker_request_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             req.walker_origin = 0;
             if (req.walker_is_s2_lookup) {
                 // S2 Cache查询: 零延时, 内联执行
@@ -1504,6 +1605,9 @@ void CacheSubsystem::walker_hash_thread() {
         // 4. 前置lookup(主数据通路, 非关键路径)
         else if (walker_front_request_fifo.num_available() > 0) {
             req = walker_front_request_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             req.walker_origin = 1;
             walker_front_lookup_count_++;
             dispatch_walker_lookup(req);
@@ -1660,6 +1764,9 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
             wait(my_upd_fifo.data_written_event() | my_fifo.data_written_event());
             continue;
         }
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const double start_ns = sc_time_stamp().to_seconds() * 1e9;
         if (walker_ram_first_start_ns_ < 0.0) walker_ram_first_start_ns_ = start_ns;
 
@@ -1697,6 +1804,9 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
                 sub.walker_addr_is_va, sub.walker_from_two_stage,
                 sub.walker_sv48, sub.walker_x4_mode, data, ram_latency);
             wait(ram_latency);  // RAM原子段延时(同RAM串行, 跨RAM并发)
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(sub, "walker_vs_ram", "lookup", start_ns, hit, ram_id, sub.walker_sub_level);
+#endif
             CacheMessage jr = sub;
             jr.hit = hit;
             if (hit) jr.walker_data = data;
@@ -1712,6 +1822,9 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
             walker_cache_->update_level_ram(sub.walker_sub_level, sub.gscid,
                                             sub.pscid, sub.iova, d, ram_latency);
             wait(ram_latency);
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(sub, "walker_vs_ram", "update", start_ns, false, ram_id, sub.walker_sub_level);
+#endif
             walker_ram_update_count_[ram_id]++;
         }
 
@@ -1728,6 +1841,9 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
 void CacheSubsystem::walker_join_thread() {
     while (true) {
         CacheMessage jr = walker_join_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        iommu_md::BusyGuard md_busy(md_active_);
+#endif
         const uint64_t key = (static_cast<uint64_t>(jr.walker_origin) << 56) |
                              jr.task_id;
         auto it = walker_join_pending_.find(key);
@@ -1815,6 +1931,9 @@ void CacheSubsystem::walker_join_thread() {
 // 这里以 SCAN 覆盖全部组合(与旧 invalidate_vma 的多组合枚举等效)。
 // ============================================================
 void CacheSubsystem::dispatch_walker_invalidate(const CacheMessage& cmd) {
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    iommu_md::BusyGuard md_busy(md_active_);
+#endif
     const sc_time start = sc_time_stamp();
     trace_task_event("begin", "walker_cache", "invalidate", cmd, start);
 
@@ -1873,6 +1992,9 @@ void CacheSubsystem::msi_scheduler_thread() {
         //    与 lookup/update 同线程串行, 消除阵列竞态并保证失效及时可见。
         if (msi_invalidate_fifo.num_available() > 0) {
             CacheMessage req = msi_invalidate_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "msipt_cache", "invalidate", req, start);
             CacheMessage resp = execute_msi_invalidate_request(req);
@@ -1883,6 +2005,9 @@ void CacheSubsystem::msi_scheduler_thread() {
         }
         if (msi_update_fifo.num_available() > 0) {
             CacheMessage req = msi_update_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "msipt_cache", "update", req, start);
             CacheMessage resp = execute_msi_update_request(req);
@@ -1892,6 +2017,9 @@ void CacheSubsystem::msi_scheduler_thread() {
         }
         if (msi_request_fifo.num_available() > 0) {
             CacheMessage req = msi_request_fifo.read();
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::BusyGuard md_busy(md_active_);
+#endif
             const sc_time start = sc_time_stamp();
             trace_task_event("begin", "msipt_cache", "lookup", req, start);
             CacheMessage resp = execute_msi_request(req);
@@ -2006,6 +2134,17 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         if (line->is_req) {
             // -------- 分支1: 主占位CL (is_req=1) 挂 Buffer 链尾 --------
             uint16_t head_idx = line->head_index;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            iommu_md::require(head_idx < PT_DEDUP_BUFFER_SIZE, "去重链头越界");
+            auto check_entry = [&](uint16_t idx) {
+                iommu_md::require(idx < PT_DEDUP_BUFFER_SIZE, "去重链尾越界");
+                const auto& e = dedup_buffer_->entries[idx];
+                iommu_md::require(e.is_valid() && e.task_ptr && e.gscid == req.gscid &&
+                    e.pscid == req.pscid && (e.iova & ~0xFFFULL) == page_iova, "去重挂链上下文不匹配");
+            };
+            check_entry(head_idx);
+            check_entry(dedup_buffer_->entries[head_idx].tail_index);
+#endif
             uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
 
             uint16_t new_idx = dedup_buffer_->allocate_entry();
@@ -2031,6 +2170,9 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 }
                 // PTW有空闲槽位, 执行bypass
                 dedup_buffer_full_bypass_count_++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+                md_record(req, "dedup", "buffer_full_bypass", iommu_md::now_ns());
+#endif
                 resp.hit = false;
                 resp.dedup_bypass = true;
                 // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
@@ -2089,6 +2231,9 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 }
                 // PTW有空闲槽位, 执行bypass
                 dedup_buffer_full_bypass_count_++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+                md_record(req, "dedup", "buffer_full_bypass", iommu_md::now_ns());
+#endif
                 resp.hit = false;
                 resp.dedup_bypass = true;
                 // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
@@ -2134,6 +2279,9 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
         if (!dedup_cache_->set_has_writable_way(req.gscid, req.pscid, page_iova)) {
             dedup_hash_conflict_count_++;
             dedup_conflict_bypass_count_++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(req, "dedup", "hash_conflict_bypass", iommu_md::now_ns());
+#endif
 #if TEST_CFG_DEDUP_ADMISSION_CTRL
             dedup_reserved_count_--;  // 归还准入预留(该任务不占Buffer)
 #endif
@@ -2167,6 +2315,9 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             }
             // PTW有空闲槽位, 执行bypass
             dedup_buffer_full_bypass_count_++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_record(req, "dedup", "buffer_full_bypass", iommu_md::now_ns());
+#endif
             resp.hit = false;
             resp.dedup_bypass = true;
             // [bypass预取] bypass任务保留预取能力, PTW完成后走late-spawn预取(组标记is_bypass)
@@ -2225,6 +2376,9 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                             prefetch_issued++;
                         } else {
                             dedup_prefetch_dropped_++;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+                            md_record(req, "dedup", "prefetch_drop", iommu_md::now_ns());
+#endif
                             printf("[DEDUP_PREFETCH_DROP] task_id=%u -> inside_fifo full, prefetch iova=0x%lx dropped\n",
                                    (unsigned)req.task_id, (unsigned long)pf.iova);
                             fflush(stdout);

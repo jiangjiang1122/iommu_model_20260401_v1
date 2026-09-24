@@ -3,6 +3,17 @@
 
 #include <stdint.h>
 
+// 多设备测试专用代码，旧场景默认在编译期完全关闭。
+#ifndef TEST_CFG_MULTI_DEVICE_SCENE
+#define TEST_CFG_MULTI_DEVICE_SCENE 0
+#endif
+
+// [写保序队列模式] 0=全局单一写保序队列(默认, 与历史行为一致);
+// 1=每设备独立写保序队列(队列数=设备数, 设备间写不互相阻塞, 设备内严格保序)。
+#ifndef TEST_CFG_PERDEV_WRITE_ORDER
+#define TEST_CFG_PERDEV_WRITE_ORDER 0
+#endif
+
 // ===================== FIFO深度参数 =====================
 // Parser输出
 static const uint32_t FIFO_DEPTH_PARSER_TO_COLLECTOR = 4;

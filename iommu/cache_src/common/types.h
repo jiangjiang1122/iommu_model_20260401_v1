@@ -604,6 +604,10 @@ struct CacheMessage {
     bool            dedup_suspended = false;    // 命中占位CL, 任务已挂入Buffer(等待PTW), 无需转发
     bool            dedup_bypass = false;       // 降级: dedup_cache插入失败, 直接转发PTW, PTW完成不刷Buffer
     uint64_t        dedup_pa_base = 0;          // dedup_update携带: 该iova已解析的最终PA页基址(用于Buffer刷新算PA)
+    // [STAT] 去重Buffer持有延时细分时间戳(仅统计用途, 默认0不影响行为)
+    double          md_group_start_ns = 0.0;
+    double          md_group_complete_ns = 0.0;
+    double          md_agg_flush_ns = 0.0;
     // [dedup多RAM] 预取任务标记: MISS时生成的D个预取占位任务(经 dedup_inside_request_fifo 重新调度)
     //   RAM Worker处理: lookup已存在则跳过, 否则 insert(is_req=0, head_index=0xFFFF); 无响应输出
     bool            dedup_is_prefetch = false;

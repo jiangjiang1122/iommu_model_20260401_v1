@@ -35,7 +35,12 @@ void iommu_top::reorder_register_task(iommu_task_t* task) {
     entry.is_write = is_write;
     reorder_buf[task->task_id] = entry;
     if (is_write) {
+#if TEST_CFG_MULTI_DEVICE_SCENE && TEST_CFG_PERDEV_WRITE_ORDER
+        iommu_md::require(task->device_id < iommu_md::MAX_DEVICE_COUNT, "写保序队列设备号越界");
+        reorder_write_order_dev[task->device_id].push(task->task_id);
+#else
         reorder_write_order.push(task->task_id);
+#endif
         iommu_write_outstanding++;
         if (iommu_write_outstanding > peak_iommu_write_outstanding)
             peak_iommu_write_outstanding = iommu_write_outstanding;
@@ -77,7 +82,13 @@ void iommu_top::reorder_mark_ready(iommu_task_t* task) {
         else task->state = TASK_DONE;
         return;
     }
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    md_trace.stamp(task->task_id, iommu_md::Point::READY_OUT);
+#endif
     it->second.ready = true;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+    md_update_write_hol();
+#endif
     it->second.ready_ns = sc_time_stamp().to_seconds() * 1e9;  // [MONITOR] 记录ready时刻
     reorder_total_marked_count++;  // [MONITOR] 总标记计数
     
@@ -135,7 +146,31 @@ void iommu_top::reorder_output_thread() {
             }
         }
 
-        // 2) 写请求：按 reorder_write_order 队头严格保序
+        // 2) 写请求：按保序队列队头严格保序
+#if TEST_CFG_MULTI_DEVICE_SCENE && TEST_CFG_PERDEV_WRITE_ORDER
+        // [每设备写保序] 逐设备推进各自队头; 设备间写互不阻塞
+        for (unsigned d = 0; d < iommu_md::MAX_DEVICE_COUNT; d++) {
+            std::queue<uint32_t>& q = reorder_write_order_dev[d];
+            while (!q.empty()) {
+                uint32_t head_id = q.front();
+                auto it = reorder_buf.find(head_id);
+                if (it == reorder_buf.end()) {
+                    printf("[REORDER] WARN: write head task_id=%u not in buf, drop\n", head_id);
+                    fflush(stdout);
+                    q.pop();
+                    continue;
+                }
+                if (it->second.ready) {
+                    to_send.push_back({it->second.task, it->second.ready_ns});
+                    reorder_buf.erase(it);
+                    q.pop();
+                } else {
+                    reorder_wait_for_head_count++;
+                    break;
+                }
+            }
+        }
+#else
         while (!reorder_write_order.empty()) {
             uint32_t head_id = reorder_write_order.front();
             auto it = reorder_buf.find(head_id);
@@ -157,9 +192,13 @@ void iommu_top::reorder_output_thread() {
                 break;
             }
         }
+#endif
 
         reorder_mtx.unlock();
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_update_write_hol();
+#endif
         // 出锁后真实下发响应
         for (auto& [task, ready_ns] : to_send) {
             if (!task) continue;
@@ -214,54 +253,24 @@ void iommu_top::reorder_output_thread() {
                    axi_master_0_to_pcie_noc_outstanding);
             fflush(stdout);
 
-            // [流水线延时] sc_spawn独立进程: 400ns后发送响应并记录统计
-            // 每个请求独立计时，不同请求并行不阻塞
-            sc_spawn([this, task]() {
-                wait(IOMMU_OUTPUT_PIPELINE_DELAY_NS, SC_NS);
-                send_response_to_initiator(task);
-
-                // [STAT] IOMMU 完成翻译计数
-                iommu_total_completed++;
-
-                // [STAT] 累加端到端延时
-                double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
-                iommu_total_e2e_latency_ns += e2e_ns;
-                if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
-                if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
-                iommu_e2e_values.push_back(e2e_ns);
-
-                // [STAT] IOMMU输出端口任务间隔采样
-                {
-                    double out_ts_ns = sc_time_stamp().to_seconds() * 1e9;
-                    if (iommu_out_last_ns > 0.0) {
-                        double out_interval = out_ts_ns - iommu_out_last_ns;
-                        iommu_out_interval_total_ns += out_interval;
-                        if (out_interval > iommu_out_interval_max_ns) iommu_out_interval_max_ns = out_interval;
-                        if (out_interval < iommu_out_interval_min_ns) iommu_out_interval_min_ns = out_interval;
-                        iommu_out_interval_count++;
-                        iommu_out_interval_values.push_back(out_interval);
-                        iommu_out_interval_end_ns.push_back(out_ts_ns);  // [STAT需求1] 记录该间隔结束时刻(稳态窗口筛选)
-                    }
-                    iommu_out_last_ns = out_ts_ns;
-                }
-
-                // [STAT] 稳态IOPS采样
-                if (steady_start_ns == 0.0 && steady_start_count > 0 &&
-                    iommu_total_completed >= steady_start_count) {
-                    steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
-                    ptw_steady_start_completed = ptw_total_completed;
-                }
-                if (steady_end_ns == 0.0 && steady_end_count > 0 &&
-                    iommu_total_completed >= steady_end_count) {
-                    steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
-                    ptw_steady_end_completed = ptw_total_completed;
-                }
-
-                // task 释放
-                if (!task->is_b_transport) {
-                    delete task;
-                }
-            });
+            // [流水线延时] 静态延时线: 仅入队(task + 到期时刻), 由常驻 output_delay_thread
+            //   在到期后发送响应并统计/释放 task。替代 per-task sc_spawn, 避免多设备大事务量
+            //   下协程池溢出。入队不阻塞 -> reorder 线程立即继续做带宽控制/释放 outstanding,
+            //   task 在本线程后续(带宽 wait, 数十 ns)仍被安全使用, 远早于 400ns 后的删除。
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_trace.stamp(task->task_id, iommu_md::Point::OUT_LAUNCH);
+            ++md_trace.output_pending;
+#endif
+            {
+                pipeline_delay_item_t item;
+                item.task = task;
+                item.due_ns = sc_time_stamp().to_seconds() * 1e9
+                            + (double)IOMMU_OUTPUT_PIPELINE_DELAY_NS;
+                output_delay_mtx.lock();
+                output_delay_queue.push(item);
+                output_delay_mtx.unlock();
+                output_delay_event.notify(SC_ZERO_TIME);
+            }
 
             // ===== Bandwidth control: master_0 port (翻译输出) =====
             // delay_ns = 1000 * length * 8 / bandwidth_mbps
@@ -277,6 +286,9 @@ void iommu_top::reorder_output_thread() {
             // 标记完成
             task->state = TASK_DONE;
 
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            md_trace.stamp(task->task_id, iommu_md::Point::RELEASE);
+#endif
             // 释放 IOMMU 全局 outstanding + 读写分离 outstanding
             reorder_mtx.lock();
             if (iommu_global_outstanding > 0) iommu_global_outstanding--;
@@ -294,7 +306,7 @@ void iommu_top::reorder_output_thread() {
                 iommu_read_outstanding_freed_event.notify(SC_ZERO_TIME);
             }
 
-            // [流水线延时] task删除和响应发送已移至sc_spawn独立进程
+            // [流水线延时] task删除和响应发送已移至静态 output_delay_thread 延时线
         }
 
         // 若本轮无任何输出，等待下一次 ready 通知
@@ -303,3 +315,80 @@ void iommu_top::reorder_output_thread() {
         }
     }
 }
+
+// ------------------------------------------------------------------
+// output_delay_thread - 出口流水线延时线(常驻静态线程)
+//   替代原 per-task sc_spawn: 从 output_delay_queue 按 FIFO 取出 task,
+//   等待到其到期时刻(launch + IOMMU_OUTPUT_PIPELINE_DELAY_NS)后发送响应、
+//   累计 e2e/输出间隔/稳态 IOPS 统计, 并释放 task。因延时固定, 队首即最早
+//   到期, 单线程串行处理时序与原并行协程等价, 且进程数恒定(不随事务量增长)。
+// ------------------------------------------------------------------
+void iommu_top::output_delay_thread() {
+    while (true) {
+        iommu_task_t* task = nullptr;
+        double due_ns = 0.0;
+
+        output_delay_mtx.lock();
+        while (output_delay_queue.empty()) {
+            output_delay_mtx.unlock();
+            wait(output_delay_event);
+            output_delay_mtx.lock();
+        }
+        task = output_delay_queue.front().task;
+        due_ns = output_delay_queue.front().due_ns;
+        output_delay_queue.pop();
+        output_delay_mtx.unlock();
+
+        double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (due_ns > now_ns) wait(due_ns - now_ns, SC_NS);
+
+        send_response_to_initiator(task);
+
+        // [STAT] IOMMU 完成翻译计数
+        iommu_total_completed++;
+
+        // [STAT] 累加端到端延时
+        double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
+        iommu_total_e2e_latency_ns += e2e_ns;
+        if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
+        if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
+        iommu_e2e_values.push_back(e2e_ns);
+
+        // [STAT] IOMMU输出端口任务间隔采样
+        {
+            double out_ts_ns = sc_time_stamp().to_seconds() * 1e9;
+            if (iommu_out_last_ns > 0.0) {
+                double out_interval = out_ts_ns - iommu_out_last_ns;
+                iommu_out_interval_total_ns += out_interval;
+                if (out_interval > iommu_out_interval_max_ns) iommu_out_interval_max_ns = out_interval;
+                if (out_interval < iommu_out_interval_min_ns) iommu_out_interval_min_ns = out_interval;
+                iommu_out_interval_count++;
+                iommu_out_interval_values.push_back(out_interval);
+                iommu_out_interval_end_ns.push_back(out_ts_ns);  // [STAT需求1] 记录该间隔结束时刻(稳态窗口筛选)
+            }
+            iommu_out_last_ns = out_ts_ns;
+        }
+
+        // [STAT] 稳态IOPS采样
+        if (steady_start_ns == 0.0 && steady_start_count > 0 &&
+            iommu_total_completed >= steady_start_count) {
+            steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
+            ptw_steady_start_completed = ptw_total_completed;
+        }
+        if (steady_end_ns == 0.0 && steady_end_count > 0 &&
+            iommu_total_completed >= steady_end_count) {
+            steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
+            ptw_steady_end_completed = ptw_total_completed;
+        }
+
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        --md_trace.output_pending;
+        md_trace.progress();
+#endif
+        // task 释放
+        if (!task->is_b_transport) {
+            delete task;
+        }
+    }
+}
+
