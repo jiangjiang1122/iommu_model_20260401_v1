@@ -305,6 +305,77 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev)
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multichan)
+    # 单设备多通道激励注入: 同一设备(device_id=0/GSCID=1)内 n 路并发通道,
+    #   每通道各自在 IOVA 范围内随机选 4KB(组内 8x512B 连续) + 共享 SQ/CQ/MSI 控制包,
+    #   经"逐包轮询仲裁 + 统一输出口"注入(n producer 有界队列 + 1 RR scheduler + 1 watchdog)。
+    #   复用多设备追踪: MULTI_DEVICE_SCENE=1 + NUM_DEVICES=1 -> md_trace 按设备(did=0)聚合,
+    #   Jain 恒=1(退化, 预期); 入口 4ns(数据)/2ns(控制) 节拍与单流基线逐包一致。
+    #   默认对齐九逸单设备基线(512MB/PTW64/Buf320/Global640/Read320/Write320/ADM1), 可命令行覆盖。
+    MULTICHAN_N ?= 8
+    MULTICHAN_IOVA_MB ?= 512
+    MULTICHAN_GROUPS ?= 909
+    MULTICHAN_QUEUE_DEPTH ?= 32
+    MULTICHAN_D ?= 3
+    MULTICHAN_RR_START ?= 0
+    # [DDR页表访问延时] SLINK单趟延时(ns): 一次DDR页表访问 = 前向SLINK + DDR内部100 + 回程SLINK。
+    #   默认50(合计200ns); 传100则合计300ns(100+100+100), 观测页表访问延时上升对性能的影响。
+    MULTICHAN_SLINK_NS ?= 50
+    # [负载口径] fixed_total(默认)=全部通道合计 MULTICHAN_GROUPS(909) 组 + 1 tail MSI = 10000 包
+    #            (与单流基线逐包同量), 用于对比"多通道交织"对性能的影响; 工作集小(建表~3.5k页),
+    #            可规避 per_channel 大工作集触发的 IOMMU 既有"两阶段预取+S2 Walker Cache大页"缺陷;
+    #            per_channel=每通道 MULTICHAN_GROUPS 组(总 n x 10000 包), 注意: n>=8 时大共享工作集
+    #            会触发上述预取无效页缺陷(agg_flush require g_pte.V!=0 失败 abort), 暂不推荐。
+    MULTICHAN_LOAD_MODE ?= fixed_total
+    # [准入控制开关] 默认1(对齐九逸基线ADM1); 0=Buffer满bypass直转PTW
+    DEDUP_ADM ?= 1
+    ifeq ($(filter $(MULTICHAN_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTICHAN_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTICHAN_IOVA_MB),16 512),)
+        $(error MULTICHAN_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(MULTICHAN_LOAD_MODE),per_channel fixed_total),)
+        $(error MULTICHAN_LOAD_MODE must be per_channel or fixed_total)
+    endif
+    ifeq ($(MULTICHAN_LOAD_MODE),fixed_total)
+        ifeq ($(filter $(MULTICHAN_N),1 2 4 8 16),)
+            $(error fixed_total requires MULTICHAN_N=1/2/4/8/16)
+        endif
+    endif
+    # [并发资源] 默认对齐九逸单设备基线; 可命令行升级/降级
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(MULTICHAN_IOVA_MB),512)
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multichan_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTI_CHANNEL_SCENE=1 \
+        -DTEST_CFG_NUM_CHANNELS=$(MULTICHAN_N) \
+        -DTEST_CFG_MC_QUEUE_DEPTH=$(MULTICHAN_QUEUE_DEPTH) \
+        -DTEST_CFG_MC_RR_START=$(MULTICHAN_RR_START) \
+        -DTEST_CFG_MC_LOAD_MODE=$(if $(filter fixed_total,$(MULTICHAN_LOAD_MODE)),1,0) \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=1 \
+        -DTEST_CFG_NUM_PAGES=$(MULTICHAN_GROUPS) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTICHAN_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) $(MULTICHAN_LAYOUT_FLAGS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)

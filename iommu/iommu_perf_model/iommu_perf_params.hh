@@ -271,7 +271,16 @@ static const uint32_t IOMMU_READ_MAX_OUTSTANDING = TEST_CFG_IOMMU_READ_MAX_OUTST
 static const uint32_t REORDER_OUTPUT_DELAY = 1;
 
 // ===================== SLINK NoC延迟参数 =====================
+// SLINK 位于 IOMMU->DDR 页表访问路径(main.cpp: axi_master_1 -> slink -> ddr), 为单趟延时。
+//   一次 DDR 页表访问延时 = 前向SLINK + DDR_INTERNAL_LATENCY_NS(100) + 回程SLINK。
+//   默认 50ns -> DDR 访问合计 50+100+50=200ns; 可经 Makefile -DTEST_CFG_SLINK_NOC_LATENCY_NS
+//   覆盖(如 100ns -> 100+100+100=300ns), 用于观测页表访问延时对整体性能的影响。
+//   注: SLINK 仅在 DDR 页表路径, 不影响 IO 入口/出口 4ns/2ns 注入节拍。
+#ifndef TEST_CFG_SLINK_NOC_LATENCY_NS
 static const uint32_t SLINK_NOC_LATENCY_NS = 50;            // SLINK NoC单趟延时(ns)，50ns（低延时场景）
+#else
+static const uint32_t SLINK_NOC_LATENCY_NS = TEST_CFG_SLINK_NOC_LATENCY_NS;
+#endif
 
 // ===================== 稳态IOPS采样窗口 =====================
 // 跳过前10%和后10%，只统计中间80%稳定段的IOPS
