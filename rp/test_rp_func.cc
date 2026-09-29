@@ -368,8 +368,8 @@ uint64_t RP_Module::add_g_stage_pte (
         vpn[0] = get_bits(20, 12, gpa);
         vpn[1] = get_bits(29, 21, gpa);
         vpn[2] = get_bits(38, 30, gpa);
-        vpn[3] = get_bits(47, 39, gpa);
-        vpn[4] = get_bits(58, 48, gpa);
+        vpn[3] = get_bits(49, 39, gpa);  // 11-bit: 16KB root page table
+        vpn[4] = get_bits(58, 50, gpa);  // 9-bit: level-4 index
         LEVELS = 5;
     }
     
@@ -528,8 +528,8 @@ uint64_t RP_Module::translate_gpa (
         vpn[0] = get_bits(20, 12, gpa);
         vpn[1] = get_bits(29, 21, gpa);
         vpn[2] = get_bits(38, 30, gpa);
-        vpn[3] = get_bits(47, 39, gpa);
-        vpn[4] = get_bits(58, 48, gpa);
+        vpn[3] = get_bits(49, 39, gpa);  // 11-bit: 16KB root page table
+        vpn[4] = get_bits(58, 50, gpa);  // 9-bit: level-4 index
         gst_page_sz = 512UL * 512UL * 512UL * 512UL * PAGESIZE;
         LEVELS = 5;
     }
@@ -1266,8 +1266,8 @@ uint64_t RP_Module::unmap_g_stage_pte(iommu_top* iommu, iohgatp_t iohgatp,
         vpn[2] = get_bits(38, 30, gpa); vpn[3] = get_bits(49, 39, gpa); LEVELS = 4;
     } else if (iohgatp.MODE == IOHGATP_Sv57x4) {
         vpn[0] = get_bits(20, 12, gpa); vpn[1] = get_bits(29, 21, gpa);
-        vpn[2] = get_bits(38, 30, gpa); vpn[3] = get_bits(47, 39, gpa);
-        vpn[4] = get_bits(58, 48, gpa); LEVELS = 5;
+        vpn[2] = get_bits(38, 30, gpa); vpn[3] = get_bits(49, 39, gpa);  // 11-bit
+        vpn[4] = get_bits(58, 50, gpa); LEVELS = 5;  // 9-bit: level-4 index
     } else {
         return (uint64_t)-1;
     }

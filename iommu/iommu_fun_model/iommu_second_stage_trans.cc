@@ -105,8 +105,8 @@ second_stage_address_translation(
         vpn[0] = get_bits(20, 12, gpa);
         vpn[1] = get_bits(29, 21, gpa);
         vpn[2] = get_bits(38, 30, gpa);
-        vpn[3] = get_bits(47, 39, gpa);
-        vpn[4] = get_bits(58, 48, gpa);
+        vpn[3] = get_bits(49, 39, gpa);  // 11-bit: 16KB root page table
+        vpn[4] = get_bits(58, 50, gpa);  // 9-bit: level-4 index
         gpa_upper_bits = get_bits(63, 59, gpa);
         LEVELS = 5;
         PTESIZE = 8;

@@ -91,14 +91,17 @@ static inline void extract_gs_vpn(uint64_t gpa, uint8_t mode,
     gs_vpn[0] = get_bits(20, 12, gpa);
     gs_vpn[1] = get_bits(29, 21, gpa);
     gs_vpn[2] = get_bits(38, 30, gpa);
-    gs_vpn[3] = get_bits(47, 39, gpa);
-    gs_vpn[4] = get_bits(56, 48, gpa);
+    gs_vpn[3] = get_bits(47, 39, gpa);  // default 9-bit for Sv39x4
+    gs_vpn[4] = get_bits(56, 48, gpa);  // default for Sv57x4 (overridden below)
 
     if (mode == IOHGATP_Sv39x4) {
         *GS_LEVELS = 3;
     } else if (mode == IOHGATP_Sv48x4) {
+        gs_vpn[3] = get_bits(49, 39, gpa);  // 11-bit: 16KB root page table
         *GS_LEVELS = 4;
     } else if (mode == IOHGATP_Sv57x4) {
+        gs_vpn[3] = get_bits(49, 39, gpa);  // 11-bit: 16KB root page table
+        gs_vpn[4] = get_bits(58, 50, gpa);  // 9-bit: level-4 index
         *GS_LEVELS = 5;
     } else if (mode == IOHGATP_Sv32x4) {
         *GS_LEVELS = 2;
