@@ -376,6 +376,83 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) $(MULTICHAN_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
+    # [MPS/MRRS=128B 小包场景] 在 rand4k_msi_mix_multichan 基线(单设备/8通道/512MB/DDR页表200ns/
+    #   PTW64/Buf320/Global640/Read320/Write320/ADM1/D3, 稳态ALL=250.43 Mreq/s)之上,
+    #   只改 PCIe MPS/MRRS 切割粒度: 1个4KB 由 8x512B 改为 32x128B,
+    #   组内包数 11 -> 35, 正式包数 10000 -> 31816(=909x35+1), 多通道机制完全不变。
+    # [A/B 不变量] ① 入口端口占用逐组相同(8x4ns+3x2ns = 32x1ns+3x2ns = 38ns);
+    #   ② 数据总字节相同(7272x512B = 29088x128B = 3723264B), SQ/CQ/MSI 包数与字节不变;
+    #   ③ 工作集相同(909个4KB页, 建表逻辑复用); ④ 并发资源相同。
+    # [注入节拍] 128B 数据包经入口带宽公式 1000*128*8/1024000 = 1.0ns/包, 即"每1ns注入1包"
+    #   由 IOMMU 既有代码自然成立, 无需新增节拍逻辑; 控制包仍为固定2ns。
+    # [统计口径] IOPS 以每个小请求包为单位(每个128B数据包 + 每个SQ/CQ/MSI 各计1个任务)。
+    #   期望: DATA IOPS 4x(182.63->730.5), ALL IOPS 3.18x(250.43->~797, 控制包数不随MPS变),
+    #         带宽与基线一致(67.0 GB/s)。低于此即为 IOMMU 小包处理惩罚。
+    # [报告前缀] multichan_mps128_n8_512mb_*.csv, 与基线 multichan_n8_512mb_*.csv 完全隔离。
+    MULTICHAN_N ?= 8
+    MULTICHAN_IOVA_MB ?= 512
+    MULTICHAN_GROUPS ?= 909
+    MULTICHAN_QUEUE_DEPTH ?= 32
+    MULTICHAN_D ?= 3
+    MULTICHAN_RR_START ?= 0
+    MULTICHAN_SLINK_NS ?= 50
+    MULTICHAN_LOAD_MODE ?= fixed_total
+    # [MPS/MRRS 粒度(字节)] 默认128; 传512 可退化为基线切割, 用于自检参数化中性。
+    MULTICHAN_MPS ?= 128
+    DEDUP_ADM ?= 1
+    ifeq ($(filter $(MULTICHAN_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTICHAN_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTICHAN_IOVA_MB),16 512),)
+        $(error MULTICHAN_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(MULTICHAN_LOAD_MODE),per_channel fixed_total),)
+        $(error MULTICHAN_LOAD_MODE must be per_channel or fixed_total)
+    endif
+    ifeq ($(filter $(MULTICHAN_MPS),16 32 64 128 256 512 1024 2048 4096),)
+        $(error MULTICHAN_MPS must be a power-of-2 divisor of 4096: 16/32/64/128/256/512/1024/2048/4096)
+    endif
+    ifeq ($(MULTICHAN_LOAD_MODE),fixed_total)
+        ifeq ($(filter $(MULTICHAN_N),1 2 4 8 16),)
+            $(error fixed_total requires MULTICHAN_N=1/2/4/8/16)
+        endif
+    endif
+    # [并发资源] 默认对齐九逸单设备基线; 可命令行升级/降级
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(MULTICHAN_IOVA_MB),512)
+        MULTICHAN_MPS_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        MULTICHAN_MPS_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multichan_mps128_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MC_MPS_SCENE=1 \
+        -DTEST_CFG_MPS_BYTES=$(MULTICHAN_MPS) \
+        -DTEST_CFG_IO_PACKET_BYTES=$(MULTICHAN_MPS) \
+        -DTEST_CFG_NUM_CHANNELS=$(MULTICHAN_N) \
+        -DTEST_CFG_MC_QUEUE_DEPTH=$(MULTICHAN_QUEUE_DEPTH) \
+        -DTEST_CFG_MC_RR_START=$(MULTICHAN_RR_START) \
+        -DTEST_CFG_MC_LOAD_MODE=$(if $(filter fixed_total,$(MULTICHAN_LOAD_MODE)),1,0) \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=1 \
+        -DTEST_CFG_NUM_PAGES=$(MULTICHAN_GROUPS) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTICHAN_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) $(MULTICHAN_MPS_LAYOUT_FLAGS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)

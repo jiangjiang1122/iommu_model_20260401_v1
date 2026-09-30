@@ -210,7 +210,8 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         trans.get_extension(ext);
 
         // ===== Bandwidth control: slave port accept delay =====
-        // [v5] 512B data -> 4ns (128GB/s), ctrl(SQ/CQ/MSI) -> 2ns fixed
+        // [v5] 数据包按长度计时: 128GB/s 下 512B -> 4ns, 128B(PCIe MPS/MRRS=128) -> 1ns;
+        //      ctrl(SQ/CQ/MSI) -> 2ns fixed (与包长无关)
         unsigned int data_len = trans.get_data_length();
         slave_0_total_bytes += data_len;  // [STAT] 入口字节计数
         double slave_bw_delay_ns;
@@ -1438,14 +1439,15 @@ void iommu_top::print_cache_statistics() {
             double steady_duration_ns = steady_end_ns - steady_start_ns;
             uint64_t steady_trans = steady_end_count - steady_start_count;
             double steady_iops = (double)steady_trans / steady_duration_ns * 1e3; // M trans/s
-            double theory_iops = (double)AXI_SLAVE_0_BANDWIDTH_MBPS / 8.0 / 512.0; // Mbps / 8 / 512B = M/s
+            // [MPS/MRRS] 理论峰值按 IO_PACKET_BYTES 换算(默认512B; 小包场景传128B -> 1000 M/s)
+            double theory_iops = (double)AXI_SLAVE_0_BANDWIDTH_MBPS / 8.0 / IO_PACKET_BYTES; // Mbps / 8 / pkt_bytes = M/s
             printf("  ---\n");
             printf("  Steady IOPS:          %.2f M trans/s  (window: #%lu ~ #%lu, %.1f ns)\n",
                    steady_iops,
                    (unsigned long)steady_start_count, (unsigned long)steady_end_count,
                    steady_duration_ns);
-            printf("  Theory peak:          %.2f M trans/s  (%.0f GB/s / 512B)\n",
-                   theory_iops, AXI_SLAVE_0_BANDWIDTH_MBPS / 8000.0);
+            printf("  Theory peak:          %.2f M trans/s  (%.0f GB/s / %uB)\n",
+                   theory_iops, AXI_SLAVE_0_BANDWIDTH_MBPS / 8000.0, IO_PACKET_BYTES);
             printf("  Efficiency:           %.1f%%\n", steady_iops / theory_iops * 100.0);
 
             // [STAT需求1] 稳态窗口[#start~#end]内的输入/输出端口平均间隔

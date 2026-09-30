@@ -115,6 +115,19 @@ static const uint32_t AXI_MASTER_1_FREQ_MHZ = 1000;   // axi_master_1_to_cmn_rnd
 static const uint32_t AXI_MASTER_1_WIDTH_BIT = 128;    // axi_master_1_to_cmn_rnd 数据位宽(bit)
 static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_MASTER_1_WIDTH_BIT;  // 128000 Mbps = 16GB/s
 
+// ===================== IO 数据包粒度 (PCIe MPS/MRRS) =====================
+// [统计口径] 仅用于"理论峰值 IOPS / 效率"的换算, 不参与任何时序计算:
+//   theory_iops = AXI_SLAVE_0_BANDWIDTH_MBPS / 8 / IO_PACKET_BYTES。
+//   入口/出口的实际带宽延时一律按 trans.get_data_length() 逐包计算
+//   (delay_ns = 1000 * len * 8 / bandwidth_mbps), 故本参数改动对仿真时序完全中性。
+// 默认 512(历史口径: 4KB 切成 8x512B); PCIe MPS/MRRS=128 的小包场景经 Makefile
+//   传入 -DTEST_CFG_IO_PACKET_BYTES=128 -> 128GB/s 下理论峰值 250 M/s 变为 1000 M/s。
+#ifndef TEST_CFG_IO_PACKET_BYTES
+static const uint32_t IO_PACKET_BYTES = 512;
+#else
+static const uint32_t IO_PACKET_BYTES = TEST_CFG_IO_PACKET_BYTES;
+#endif
+
 // ===================== Walker Outstanding 限制 =====================
 static const uint32_t XDTW_MAX_DC_OUTSTANDING_TASKS = 64;   // xDTW DC(DDT) walk outstanding
 static const uint32_t XDTW_MAX_PC_OUTSTANDING_TASKS = 64;   // xDTW PC(PDT) walk outstanding
