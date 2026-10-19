@@ -107,6 +107,24 @@ public:
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     uint64_t get_dedup_buffer_full_bypass_count() const { return dedup_buffer_full_bypass_count_; }
+
+    // ============================================================
+    // [STAT需求2] 去重Cache 有效 cacheline 占用统计透传接口
+    //   每次查询去重cache时采样当前有效cacheline占用数,
+    //   用于判断总共 num_sets*num_ways 条 cacheline 是否被占满。
+    // ============================================================
+    uint32_t get_dedup_total_lines() const { return dedup_cache_ ? dedup_cache_->total_lines() : 0; }
+    uint32_t get_dedup_num_sets() const { return dedup_cache_ ? dedup_cache_->num_sets() : 0; }
+    uint32_t get_dedup_num_ways() const { return dedup_cache_ ? dedup_cache_->num_ways() : 0; }
+    uint32_t get_dedup_valid_line_count() const { return dedup_cache_ ? dedup_cache_->valid_line_count() : 0; }
+    uint32_t get_dedup_req_line_count() const { return dedup_cache_ ? dedup_cache_->req_line_count() : 0; }
+    uint64_t get_dedup_valid_sample_count() const { return dedup_cache_ ? dedup_cache_->sample_count() : 0; }
+    double   get_dedup_avg_valid_lines() const { return dedup_cache_ ? dedup_cache_->avg_valid_lines() : 0.0; }
+    double   get_dedup_avg_req_lines() const { return dedup_cache_ ? dedup_cache_->avg_req_lines() : 0.0; }
+    uint32_t get_dedup_max_valid_lines() const { return dedup_cache_ ? dedup_cache_->max_valid_lines() : 0; }
+    uint32_t get_dedup_min_valid_lines() const { return dedup_cache_ ? dedup_cache_->min_valid_lines() : 0; }
+    // 仅清采样累加器(不影响cache内容): 供测量 epoch 开始前重置统计窗口
+    void reset_dedup_valid_line_stats() { if (dedup_cache_) dedup_cache_->reset_valid_line_stats(); }
     // [FIX] Buffer满时等待PTW并发释放的机制:
     // - ptw_capacity_check_cb_: 回调函数, 检查PTW是否有空闲并发槽位
     // - dedup_buffer_full_event_: 事件, PTW每完成一个任务时notify

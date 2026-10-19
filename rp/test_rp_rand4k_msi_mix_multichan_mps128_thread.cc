@@ -65,6 +65,9 @@
 #ifndef TEST_CFG_NUM_PAGES               // 兜底: 每通道组数(per_channel)或总组数(fixed_total)
 #define TEST_CFG_NUM_PAGES 909
 #endif
+#ifndef TEST_CFG_MC_RW_QUEUE_DEPTH       // [读写端口分离] 读/写发送队列深度(近乎无界)
+#define TEST_CFG_MC_RW_QUEUE_DEPTH 65536
+#endif
 // [MPS/MRRS] PCIe 最大负载/最大读请求粒度(字节): 4KB 数据被切成 4096/MPS 个小包。
 //   本测试项默认 128(=32包/4KB); 传 512 则退化为基线切割(=8包/4KB), 可用于自检参数化中性。
 #ifndef TEST_CFG_MPS_BYTES
@@ -81,6 +84,7 @@ namespace {
 using iommu_md::require;
 constexpr unsigned NCHAN = TEST_CFG_NUM_CHANNELS;
 constexpr unsigned QUEUE_DEPTH = TEST_CFG_MC_QUEUE_DEPTH;
+constexpr uint64_t RWQ_DEPTH = TEST_CFG_MC_RW_QUEUE_DEPTH;   // [读写端口分离] 发送队列深度上限(近乎无界, 仅记录峰值)
 constexpr bool FIXED_TOTAL = (TEST_CFG_MC_LOAD_MODE != 0);
 constexpr unsigned RR_START = TEST_CFG_MC_RR_START;
 
@@ -143,7 +147,7 @@ struct Channel {
     std::deque<iommu_md::Request> queue;
     sc_event space_event;
     bool ready = false, done = false;
-    uint64_t injected = 0, peak_queue = 0, full_waits = 0;
+    uint64_t injected = 0, scheduled = 0, peak_queue = 0, full_waits = 0;
     double full_wait_ns = 0;
 };
 
@@ -166,6 +170,29 @@ class MultiChannelMpsScenario {
     double start_ns = 0;
     uint64_t last_progress = 0;
     double last_progress_ns = 0;
+
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] scheduler 按 RR 选出的请求按方向压入读/写发送队列, 由 sender_r/sender_w
+    //   各自调用对应端口 socket 的 nb_transport_fw 发送。回调内的带宽延时+并发门控自然阻塞
+    //   本方向发送进程, 读写互不影响; 写方向 FIFO 天然保持每设备写注入顺序(写保序)。
+    struct SendItem {
+        tlm_generic_payload* ptr;      // 已 register_request 的 payload
+        iommu_md::Request    record;   // 请求副本(用于发送后打印/计数)
+        Channel*             chan;     // 所属通道(++injected)
+    };
+    std::deque<SendItem> rw_queue_r, rw_queue_w;
+    sc_event rw_event_r, rw_event_w;
+    bool sender_busy_r = false, sender_busy_w = false;   // sender 正在 nb_transport_fw 内阻塞
+    uint64_t rw_peak_r = 0, rw_peak_w = 0;               // 两队列峰值占用(报告用)
+    // [供给验证] 发送侧饥饿统计: sender 因本方向队列为空而等待的次数/时长。
+    //   注入窗口内 starve_ns≈0 即证明 RP 供给侧始终有请求可发,
+    //   IOMMU 端口不会因缺请求而空闲(读写均可持续尝试准入)。
+    uint64_t starve_cnt_r = 0, starve_cnt_w = 0;
+    double   starve_ns_r = 0.0, starve_ns_w = 0.0;
+    double   last_send_ns_r = 0.0, last_send_ns_w = 0.0;  // 各口最后一次送出请求的时刻
+    bool senders_idle() const { return !sender_busy_r && !sender_busy_w; }
+    // sender(bool is_write) 定义于下方 scheduler 之后(类内联定义, 不在此重复声明)
+#endif
 
     static std::vector<unsigned> choose(unsigned count, unsigned range, unsigned seed, unsigned shuffle_seed) {
         std::mt19937 rng(seed), permutation(shuffle_seed);
@@ -368,7 +395,8 @@ class MultiChannelMpsScenario {
                 auto& chan=channels[c];
                 auto record=chan.queue.front(); chan.queue.pop_front();
                 chan.space_event.notify(SC_ZERO_TIME);
-                require(record.epoch==current && record.sequence==chan.injected,"队列内请求顺序错误");
+                require(record.epoch==current && record.sequence==chan.scheduled,"队列内请求顺序错误");
+                ++chan.scheduled;
                 record.grant_ns=iommu_md::now_ns();
                 auto trans=std::make_unique<tlm_generic_payload>();
                 trans->set_address(record.iova);
@@ -385,20 +413,90 @@ class MultiChannelMpsScenario {
                 auto* ptr=trans.get();
                 payloads.push_back(std::move(trans));
                 top.md_trace.register_request(ptr,record);
+                next=(c+1)%NCHAN;
+#if TEST_CFG_SPLIT_RW_PORTS
+                // [读写端口分离] scheduler 不再直接 nb_transport_fw: 按方向压入读/写发送队列,
+                //   由 sender_r/sender_w 发送(每端口独立 64GB/s: 128B 数据包=2ns/端口, 控制包=1ns)。
+                if(record.write) {
+                    rw_queue_w.push_back(SendItem{ptr,record,&chan});
+                    rw_peak_w=std::max<uint64_t>(rw_peak_w,rw_queue_w.size());
+                    rw_event_w.notify(SC_ZERO_TIME);
+                } else {
+                    rw_queue_r.push_back(SendItem{ptr,record,&chan});
+                    rw_peak_r=std::max<uint64_t>(rw_peak_r,rw_queue_r.size());
+                    rw_event_r.notify(SC_ZERO_TIME);
+                }
+#else
                 sc_time delay=SC_ZERO_TIME; tlm_phase phase=BEGIN_REQ;
                 // 入口握手内的带宽等待即注入节拍: 128B 数据包 = 1.0ns/包(128GB/s),
                 //   控制包 = 固定 2ns/包 -> "小包每 1ns 注入 1 个"由 IOMMU 既有公式自然实现。
                 auto status=rp.axi_master_to_pcie_noc_0_socket->nb_transport_fw(*ptr,phase,delay);
                 require(status==TLM_UPDATED && phase==END_REQ,"入口握手异常，禁止重发");
                 ++chan.injected;
-                next=(c+1)%NCHAN;
                 std::cout << "[MD_GRANT] epoch=" << current << " chan=" << c << " did=0 seq=" << record.sequence
                           << " type=" << record.type << " grant=" << record.grant_ns
                           << " accept=" << iommu_md::now_ns() << '\n';
+#endif
             }
+#if TEST_CFG_SPLIT_RW_PORTS
+            // [读写端口分离] 置 sent 前等待两个 rw 队列排空且 sender 全部发完,
+            //   避免 epoch 1/2 残留请求串入测量 epoch。
+            while(!stopped && !(rw_queue_r.empty() && rw_queue_w.empty() && senders_idle()))
+                wait(1,SC_NS);
+            if(stopped) return;
+            // 全部请求已送达端口 => 注入结束: 关闭 IOMMU 侧"注入并发窗口"。
+            //   (窗口仅在测量 epoch 前被打开, epoch 1/2 时此调用为 no-op)
+            top.conc_window_close();
+            if(current==iommu_md::MEASUREMENT_EPOCH)
+                std::cout << "[MC_INJECT_END] epoch=" << current
+                          << " t=" << iommu_md::now_ns()
+                          << " last_send_r=" << last_send_ns_r
+                          << " last_send_w=" << last_send_ns_w << '\n';
+#endif
             previous=current; sent=true;
         }
     }
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] 方向发送进程: 从对应 rw 队列取出请求, 置 grant_ns 后调用对应端口 socket
+    //   的 nb_transport_fw(回调内带宽延时+并发门控自然阻塞本方向, 读写互不影响)。
+    //   写方向单一 FIFO 队列天然保持写注入顺序(写保序)。
+    void sender(bool is_write) {
+        auto& q   = is_write ? rw_queue_w : rw_queue_r;
+        auto& evt = is_write ? rw_event_w : rw_event_r;
+        bool& busy= is_write ? sender_busy_w : sender_busy_r;
+        uint64_t& scnt = is_write ? starve_cnt_w : starve_cnt_r;
+        double&   sns  = is_write ? starve_ns_w  : starve_ns_r;
+        double&   last = is_write ? last_send_ns_w : last_send_ns_r;
+        while(!stopped) {
+            if(q.empty()) {
+                // 供给侧饥饿: 本方向无请求可发(只应发生在注入开始前/全部注入结束后)
+                const double t0=iommu_md::now_ns();
+                ++scnt;
+                wait(evt);
+                sns+=iommu_md::now_ns()-t0;
+                continue;
+            }
+            SendItem item=q.front(); q.pop_front();
+            busy=true;
+            const double g=iommu_md::now_ns();
+            top.md_trace.request(item.ptr).grant_ns=g;   // 更新报告用权威 grant 时刻(端口发送点)
+            sc_time delay=SC_ZERO_TIME; tlm_phase phase=BEGIN_REQ;
+            // [读写端口分离] 读口 socket -> axi_slave_r_nb_transport_fw(只处理读),
+            //   写口 socket -> axi_slave_w_nb_transport_fw(只处理写) —— 两个独立注册函数。
+            auto status = is_write
+                ? rp.axi_master_to_pcie_noc_0w_socket->nb_transport_fw(*item.ptr,phase,delay)
+                : rp.axi_master_to_pcie_noc_0_socket->nb_transport_fw(*item.ptr,phase,delay);
+            require(status==TLM_UPDATED && phase==END_REQ,"入口握手异常，禁止重发");
+            ++item.chan->injected;
+            busy=false;
+            last=iommu_md::now_ns();
+            const unsigned c=static_cast<unsigned>(item.chan-&channels[0]);
+            std::cout << "[MD_GRANT] epoch=" << item.record.epoch << " chan=" << c << " did=0 seq=" << item.record.sequence
+                      << " type=" << item.record.type << " dir=" << (is_write?"W":"R") << " grant=" << g
+                      << " accept=" << iommu_md::now_ns() << '\n';
+        }
+    }
+#endif
     void watchdog() {
         while(!stopped) {
             wait(1000,SC_NS);
@@ -419,8 +517,16 @@ class MultiChannelMpsScenario {
     void run_epoch(unsigned e) {
         for(auto& c:channels) {
             require(c.queue.empty(),"切换epoch时队列非空");
-            c.ready=c.done=false; c.injected=c.peak_queue=c.full_waits=0; c.full_wait_ns=0;
+            c.ready=c.done=false; c.injected=c.scheduled=c.peak_queue=c.full_waits=0; c.full_wait_ns=0;
         }
+#if TEST_CFG_SPLIT_RW_PORTS
+        require(rw_queue_r.empty() && rw_queue_w.empty(),"切换epoch时读写发送队列非空");
+        rw_peak_r=rw_peak_w=0;
+        // 每 epoch 重新统计供给侧饥饿与末次发送时刻(测量 epoch 的值才用于结论)
+        starve_cnt_r=starve_cnt_w=0;
+        starve_ns_r=starve_ns_w=0.0;
+        last_send_ns_r=last_send_ns_w=0.0;
+#endif
         total_responded=0; epoch=e; sent=false; top.md_trace.progress();
         phase_event.notify(SC_ZERO_TIME);
         while(true) {
@@ -473,11 +579,19 @@ public:
         setup();
         for(unsigned c=0;c<NCHAN;++c) sc_spawn([this,c](){ producer(c); });
         sc_spawn([this](){ scheduler(); });
+#if TEST_CFG_SPLIT_RW_PORTS
+        sc_spawn([this](){ sender(false); });   // sender_r: 读口发送进程(常驻, 每 epoch 不重复 spawn)
+        sc_spawn([this](){ sender(true); });    // sender_w: 写口发送进程
+#endif
         sc_spawn([this](){ watchdog(); });
         invalidate_all();
         run_epoch(1); // 哨兵: 打通翻译/响应路由(单设备, 全通道同结果)。
         invalidate_all();
         run_epoch(2); // 预热不进入正式统计(MSIPT + SQ/CQ PT Cache)。
+        // [STAT口径对齐] 与 512B 基线多通道项一致: 测量 epoch 前重置 4KB 并发窗口
+        //   (同时打开"注入窗口"并发顶满统计 conc_window_open)与去重 Cache 有效行累加器。
+        top.reset_4kb_concurrency_window();
+        top.cache_sub.reset_dedup_valid_line_stats();
         // [STAT] 打开 IOMMU 侧稳态 IOPS/Theory peak/Efficiency 采样窗口(基线多通道项未设置,
         //   故该三行不打印)。窗口按"已完成数(epoch1+2) + 正式epoch的10%~90%"精确对齐,
         //   theory_iops 经 IO_PACKET_BYTES=MPS_BYTES 参数化 -> 128B 时理论峰值=1000 M/s。
@@ -492,9 +606,23 @@ public:
         }
         const uint64_t ptw_before=top.ptw_total_completed, ddr_before=top.axi_master_1_read_req_total;
         run_epoch(iommu_md::MEASUREMENT_EPOCH);
+#if TEST_CFG_SPLIT_RW_PORTS
+        std::cout << "[MC_RWQ] depth=" << RWQ_DEPTH << " peak_read=" << rw_peak_r
+                  << " peak_write=" << rw_peak_w << '\n';
+        // [供给验证] 注入期内读/写发送进程的饥饿次数与时长:
+        //   starve_ns 越接近 0 => RP 侧请求越充足(端口从不因缺请求而空等)。
+        std::cout << "[MC_SUPPLY] R starve_cnt=" << starve_cnt_r
+                  << " starve_ns=" << starve_ns_r << " last_send=" << last_send_ns_r
+                  << " | W starve_cnt=" << starve_cnt_w
+                  << " starve_ns=" << starve_ns_w << " last_send=" << last_send_ns_w << '\n';
+        // 报告前缀带 mps<N>+rwsplit, 与既有基线 CSV(multichan_mps128_n8_512mb_*)完全隔离。
+        top.md_trace.report("multichan_mps"+std::to_string(MPS_BYTES)+"_rwsplit_n"+std::to_string(NCHAN)
+                            +"_"+std::to_string(RANGE_MB)+"mb");
+#else
         // 报告前缀带 mps<N>, 与 512B 基线 CSV(multichan_n8_512mb_*) 完全隔离, 不覆盖基线。
         top.md_trace.report("multichan_mps"+std::to_string(MPS_BYTES)+"_n"+std::to_string(NCHAN)
                             +"_"+std::to_string(RANGE_MB)+"mb");
+#endif
         std::cout << "[MC_DELTA] PTW=" << top.ptw_total_completed-ptw_before
                   << " DDR_reads=" << top.axi_master_1_read_req_total-ddr_before << '\n';
         // 与单设备基线同口径的IOMMU侧统计，便于横向对比。
@@ -524,21 +652,22 @@ public:
             printf("    Samples:   %lu\n", (unsigned long)dedup_buf->get_hold_count());
             printf("==================================================\n");
         }
-        if (top.md_hold_main_cnt || top.md_hold_susp_cnt) {
+        if (top.md_hold_main_cnt || top.md_hold_susp_cnt || top.md_hold_pf_cnt) {
             printf("\n========== Dedup Buffer Hold Decomposition ==========\n");
-            printf("  W1=alloc->group_complete, W2=group_complete->agg_flush_exec, W3=agg_flush_exec->entry_free\n");
-            printf("  MAIN entries: n=%lu  avg W1=%.1f W2=%.1f W3=%.1f ns  |  max %.1f/%.1f/%.1f\n",
-                   (unsigned long)top.md_hold_main_cnt,
-                   top.md_hold_main_cnt ? top.md_hold_main_sum[0]/top.md_hold_main_cnt : 0.0,
-                   top.md_hold_main_cnt ? top.md_hold_main_sum[1]/top.md_hold_main_cnt : 0.0,
-                   top.md_hold_main_cnt ? top.md_hold_main_sum[2]/top.md_hold_main_cnt : 0.0,
-                   top.md_hold_main_max[0], top.md_hold_main_max[1], top.md_hold_main_max[2]);
-            printf("  SUSP entries: n=%lu  avg W1=%.1f W2=%.1f W3=%.1f ns  |  max %.1f/%.1f/%.1f\n",
-                   (unsigned long)top.md_hold_susp_cnt,
-                   top.md_hold_susp_cnt ? top.md_hold_susp_sum[0]/top.md_hold_susp_cnt : 0.0,
-                   top.md_hold_susp_cnt ? top.md_hold_susp_sum[1]/top.md_hold_susp_cnt : 0.0,
-                   top.md_hold_susp_cnt ? top.md_hold_susp_sum[2]/top.md_hold_susp_cnt : 0.0,
-                   top.md_hold_susp_max[0], top.md_hold_susp_max[1], top.md_hold_susp_max[2]);
+            printf("  总持有延时 = W1 + W2 + W3;  W1=alloc->group_complete,\n");
+            printf("  W2=group_complete->agg_flush_exec, W3=agg_flush_exec->entry_free\n");
+            auto pr_hold = [](const char* label, uint64_t n, const double* sum, const double* mx) {
+                printf("  %-30s n=%-7lu avg total=%8.1f ns (W1=%7.1f W2=%6.1f W3=%5.1f) | maxSeg %.1f/%.1f/%.1f\n",
+                       label, (unsigned long)n,
+                       n ? (sum[0]+sum[1]+sum[2])/(double)n : 0.0,
+                       n ? sum[0]/(double)n : 0.0, n ? sum[1]/(double)n : 0.0, n ? sum[2]/(double)n : 0.0,
+                       mx[0], mx[1], mx[2]);
+            };
+            pr_hold("MAIN head (dedup MISS)", top.md_hold_main_cnt, top.md_hold_main_sum, top.md_hold_main_max);
+            pr_hold("MAIN head (PF placeholder)",  top.md_hold_pf_cnt,  top.md_hold_pf_sum,  top.md_hold_pf_max);
+            pr_hold("SUSPENDED (deduped)",         top.md_hold_susp_cnt, top.md_hold_susp_sum, top.md_hold_susp_max);
+            printf("  PTW prefetch tasks holding buffer entries: 0\n");
+            printf("    (预取任务不申请去重Buffer entry, 只插 dedup Cache 的 is_req=0 占位行并占 PTW 槽位)\n");
             printf("======================================================\n");
         }
         top.print_cache_statistics();

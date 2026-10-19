@@ -73,7 +73,14 @@ int sc_main(int argc, char *argv[]) {
     iommu->axi_master_2_ats_msg_to_pcie_noc_socket.bind(rp->axi_slave_to_pcie_noc_0_socket);
 
     // 绑定RP模块的initiator socket到IOMMU的target socket
+    // [读写端口分离] RP 读口 initiator -> IOMMU axi slave R port
+    //   (注册 axi_slave_r_nb_transport_fw, 只处理读请求)
     rp->axi_master_to_pcie_noc_0_socket.bind(iommu->axi_slave_from_pcie_noc_0_socket);
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] RP 写口 initiator -> IOMMU axi slave W port
+    //   (注册 axi_slave_w_nb_transport_fw, 只处理写请求)
+    rp->axi_master_to_pcie_noc_0w_socket.bind(iommu->axi_slave_from_pcie_noc_0w_socket);
+#endif
     
     // 绑定PCIENOC模块的initiator socket到IOMMU的target socket
     pcienoc->ahb_master_to_pcie_noc_1_socket.bind(iommu->ahb_slave_from_pcie_noc_1_socket);

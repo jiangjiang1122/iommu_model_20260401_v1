@@ -120,14 +120,23 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
             const double t2 = upd.md_agg_flush_ns > t1 ? upd.md_agg_flush_ns : t1;
             const double t3 = iommu_md::now_ns();
             const double w0 = t1 - t0, w1 = t2 - t1, w2 = t3 - t2;
-            const bool is_main = (cur == head_index);
-            if (is_main) md_hold_main_cnt++; else md_hold_susp_cnt++;
-            double* sum = is_main ? md_hold_main_sum : md_hold_susp_sum;
-            double* mx  = is_main ? md_hold_main_max : md_hold_susp_max;
-            sum[0] += w0; sum[1] += w1; sum[2] += w2;
-            if (w0 > mx[0]) mx[0] = w0;
-            if (w1 > mx[1]) mx[1] = w1;
-            if (w2 > mx[2]) mx[2] = w2;
+            // [STAT] 按 entry 来源分三档持有延时:
+            //   src=0 主任务链头(去重MISS新建) / src=1 主任务链头(由预取占位行升级)
+            //   src=2 被去重挂起的任务。PTW预取任务不申请entry, 故不在此列。
+            int src = (int)entry.alloc_src;
+            if (src != 1 && src != 2) src = 0;              // 安全归一
+            if (src == 0 && cur != head_index) src = 2;     // 兼容兜底: 非链头计入挂起档
+            uint64_t* cnt_p = (src == 0) ? &md_hold_main_cnt
+                            : (src == 1) ? &md_hold_pf_cnt : &md_hold_susp_cnt;
+            double* sum_p = (src == 0) ? md_hold_main_sum
+                            : (src == 1) ? md_hold_pf_sum : md_hold_susp_sum;
+            double* mx_p  = (src == 0) ? md_hold_main_max
+                            : (src == 1) ? md_hold_pf_max : md_hold_susp_max;
+            (*cnt_p)++;
+            sum_p[0] += w0; sum_p[1] += w1; sum_p[2] += w2;
+            if (w0 > mx_p[0]) mx_p[0] = w0;
+            if (w1 > mx_p[1]) mx_p[1] = w1;
+            if (w2 > mx_p[2]) mx_p[2] = w2;
         }
         md_trace.operation(pending_task->task_id, "dedup", "flush", pending_task->device_id,
                            entry.alloc_time_ns, true, -1, 0, 0);

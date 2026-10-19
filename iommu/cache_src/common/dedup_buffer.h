@@ -40,6 +40,13 @@ struct DedupBufferEntry {
     // [STAT] entry申请时刻(ns): 统计buffer任务从申请到PTW完成释放的延时
     double alloc_time_ns = 0.0;
 
+    // [STAT] entry 来源分类(用于拆分持有延时):
+    //   0 = 链头, 由去重 MISS 新建(主任务自己触发 PTW)
+    //   1 = 链头, 由【预取占位行 is_req=0】升级而来(预取路径受益的主任务)
+    //   2 = 非链头, 挂到已有主占位链尾(被去重挂起的任务)
+    //   注: PTW 预取任务本身不申请 Buffer entry, 故本字段不区分预取任务。
+    uint8_t alloc_src = 0;
+
     bool is_valid() const { return valid != 0; }
     
     void clear() {
@@ -51,6 +58,7 @@ struct DedupBufferEntry {
         tail_index = 0xFFFF;
         task_ptr = nullptr;
         alloc_time_ns = 0.0;
+        alloc_src = 0;
     }
 };
 

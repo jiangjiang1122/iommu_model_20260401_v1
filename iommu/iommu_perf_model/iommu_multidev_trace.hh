@@ -288,6 +288,47 @@ public:
                 buckets << b << ',' << d << ',' << count << '\n';
             }
         }
+        // ============ [STAT] 任务在 IOMMU 内部的执行延时 ============
+        //   起点 = ADMIT: parser_thread 从 inbound_fifo 弹出并注册进 reorder 之后
+        //          (即端口已接收任务、且并发额度门控已完成; 实测 POP->ADMIT = 0.0 ns)
+        //   终点 = RESPONSE: 翻译完成后响应从 AXI master 输出口发出(含 400ns 出口流水)
+        //   口径 = 仅测量 epoch 的全部任务(不含 warmup/哨兵 epoch), 另给分段与方向/类型拆分
+        {
+            struct ExecAgg { std::vector<double> full, xlate; uint64_t n = 0; };
+            auto push_agg = [](ExecAgg& a, const Request* r) {
+                const double ad = r->at(Point::ADMIT);
+                const double ro = r->at(Point::READY_OUT);
+                const double rp = r->at(Point::RESPONSE);
+                if (ad < 0 || rp < 0) return;
+                ++a.n; a.full.push_back(rp - ad);
+                if (ro >= 0) a.xlate.push_back(ro - ad);
+            };
+            ExecAgg agg_all, agg_data, agg_ctrl, agg_rd, agg_wr;
+            for (auto* r : measured) {
+                push_agg(agg_all, r);
+                if (r->type == 0) push_agg(agg_data, r); else push_agg(agg_ctrl, r);
+                if (r->write) push_agg(agg_wr, r); else push_agg(agg_rd, r);
+            }
+            auto line = [](const char* name, ExecAgg& a) {
+                if (!a.n) { std::cout << "[MD_EXEC_LAT] " << name << " n=0\n"; return; }
+                std::sort(a.full.begin(), a.full.end());
+                std::sort(a.xlate.begin(), a.xlate.end());
+                double sf = 0, sx = 0;
+                for (double v : a.full)  sf += v;
+                for (double v : a.xlate) sx += v;
+                const double avg_f = sf / (double)a.full.size();
+                const double avg_x = a.xlate.empty() ? 0.0 : sx / (double)a.xlate.size();
+                std::cout << "[MD_EXEC_LAT] " << name << " n=" << a.n
+                          << " avg_exec=" << avg_f << " ns"
+                          << " [avg_xlate(ADMIT->READY_OUT)=" << avg_x
+                          << " avg_tail(READY_OUT->RESPONSE)=" << (avg_f - avg_x) << "]"
+                          << " min=" << a.full.front() << " p50=" << percentile(a.full, .5)
+                          << " p90=" << percentile(a.full, .9) << " p99=" << percentile(a.full, .99)
+                          << " max=" << a.full.back() << '\n';
+            };
+            line("ALL_meas_epoch", agg_all); line("DATA", agg_data); line("CTRL", agg_ctrl);
+            line("READ", agg_rd); line("WRITE", agg_wr);
+        }
         auto fairness = [&](const char* name, const auto& counts) {
             double sum=0,squares=0;
             for(unsigned d=0;d<devices;++d) { sum+=counts[d]; squares+=double(counts[d])*counts[d]; }

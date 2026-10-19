@@ -305,6 +305,64 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev)
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
+    # 多设备 × 每设备多通道: N 设备, 每设备内部 C 通道, 共 N*C 条流, 2D 逐包轮询(流号 i=c*N+d)。
+    #   轮询顺序: (d1,c1)..(dN,c1),(d1,c2)..(dN,c2),.. 通道外层、设备内层, 每次访问取1包 -> 各通道
+    #   4KB 的 8x512B 高度交错注入。fixed_total: 每设备 GROUPS 组均分到 C 通道(chan_groups),
+    #   每设备包数=GROUPS*11+1=10000(tail MSI 只给通道0), 总=N*10000(与 multidev/independent 逐包同量)。
+    #   页策略: 全局唯一随机页, N*GROUPS 个 4KB 页两两不重复(跨设备跨通道), 需 N*GROUPS<=RANGE_PAGES-D。
+    #   并发默认对齐上一 independent 基线(512MB: PTW64/Buf320/Global640/Read320/Write320/ADM1/PERDEV_WO1)。
+    MULTIDEV_MC_N ?= 16
+    MULTIDEV_MC_CHAN ?= 8
+    MULTIDEV_IOVA_MB ?= 512
+    MULTIDEV_GROUPS ?= 909
+    MULTIDEV_QUEUE_DEPTH ?= 32
+    MULTIDEV_RR_START ?= 0
+    MULTIDEV_D ?= 3
+    MULTIDEV_PERDEV_WO ?= 1
+    DEDUP_ADM ?= 1
+    ifeq ($(filter $(MULTIDEV_MC_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTIDEV_MC_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTIDEV_MC_CHAN),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTIDEV_MC_CHAN must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTIDEV_IOVA_MB),16 512),)
+        $(error MULTIDEV_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(MULTIDEV_IOVA_MB),512)
+        SCENE13_PTW ?= 64
+        SCENE13_BUFFER ?= 320
+        SCENE13_GLOBAL ?= 640
+        SCENE13_READ ?= 320
+        SCENE13_WRITE ?= 320
+        MULTIDEV_MC_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        SCENE13_PTW ?= 64
+        SCENE13_BUFFER ?= 320
+        MULTIDEV_MC_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=640 \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=320 \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=320
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multidev_mc_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTIDEV_MC_SCENE=1 \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=$(MULTIDEV_MC_N) \
+        -DTEST_CFG_MD_CHAN_PER_DEV=$(MULTIDEV_MC_CHAN) \
+        -DTEST_CFG_NUM_PAGES=$(MULTIDEV_GROUPS) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=$(MULTIDEV_QUEUE_DEPTH) \
+        -DTEST_CFG_MD_RR_START=$(MULTIDEV_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=$(MULTIDEV_PERDEV_WO) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTIDEV_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_MC_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan)
     # 单设备多通道激励注入: 同一设备(device_id=0/GSCID=1)内 n 路并发通道,
     #   每通道各自在 IOVA 范围内随机选 4KB(组内 8x512B 连续) + 共享 SQ/CQ/MSI 控制包,
@@ -318,6 +376,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
     MULTICHAN_QUEUE_DEPTH ?= 32
     MULTICHAN_D ?= 3
     MULTICHAN_RR_START ?= 0
+    # [读写端口分离] 读/写发送队列深度(近乎无界); SPLIT 开关(1=读写双端口双发送进程, 0=旧单端口基线)
+    MULTICHAN_RWQ_DEPTH ?= 65536
+    MULTICHAN_SPLIT_RW ?= 1
     # [DDR页表访问延时] SLINK单趟延时(ns): 一次DDR页表访问 = 前向SLINK + DDR内部100 + 回程SLINK。
     #   默认50(合计200ns); 传100则合计300ns(100+100+100), 观测页表访问延时上升对性能的影响。
     MULTICHAN_SLINK_NS ?= 50
@@ -375,7 +436,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
-        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) $(MULTICHAN_LAYOUT_FLAGS)
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     # [MPS/MRRS=128B 小包场景] 在 rand4k_msi_mix_multichan 基线(单设备/8通道/512MB/DDR页表200ns/
     #   PTW64/Buf320/Global640/Read320/Write320/ADM1/D3, 稳态ALL=250.43 Mreq/s)之上,
@@ -396,6 +459,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     MULTICHAN_QUEUE_DEPTH ?= 32
     MULTICHAN_D ?= 3
     MULTICHAN_RR_START ?= 0
+    # [读写端口分离] 读/写发送队列深度(近乎无界); SPLIT 开关(1=读写双端口双发送进程, 0=旧单端口基线)
+    MULTICHAN_RWQ_DEPTH ?= 65536
+    MULTICHAN_SPLIT_RW ?= 1
     MULTICHAN_SLINK_NS ?= 50
     MULTICHAN_LOAD_MODE ?= fixed_total
     # [MPS/MRRS 粒度(字节)] 默认128; 传512 可退化为基线切割, 用于自检参数化中性。
@@ -452,7 +518,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
-        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) $(MULTICHAN_MPS_LAYOUT_FLAGS)
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_MPS_LAYOUT_FLAGS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)

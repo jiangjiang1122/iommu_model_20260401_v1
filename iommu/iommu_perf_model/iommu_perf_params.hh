@@ -107,6 +107,36 @@ static const uint32_t AXI_SLAVE_0_WIDTH_BIT  = TEST_CFG_AXI_PORT_WIDTH_BIT;
 #endif
 static const uint32_t AXI_SLAVE_0_BANDWIDTH_MBPS = AXI_SLAVE_0_FREQ_MHZ * AXI_SLAVE_0_WIDTH_BIT;  // 512bit=64GB/s, 1024bit=128GB/s
 
+// ===================== [读写端口分离] 每端口带宽参数 =====================
+// SPLIT 场景下入站有两个独立 slave 端口, 各自注册独立回调并独立计时:
+//   axi slave R port -> axi_slave_r_nb_transport_fw (只处理读请求 -> inbound_fifo_r)
+//   axi slave W port -> axi_slave_w_nb_transport_fw (只处理写请求 -> inbound_fifo_w)
+// 每端口各自按 512bit@1000MHz(64GB/s) 逐包计时, 互不影响:
+//   512B 数据包 -> 8ns/端口, 128B 数据包 -> 2ns/端口, 控制包(SQ/CQ/MSI) -> 固定1ns。
+//   读写分流后聚合等效节拍仍为 4ns/512B、1ns/128B。
+// AXI_SLAVE_0_BANDWIDTH_MBPS 保留为聚合口径(仅用于稳态理论峰值 IOPS 换算)。
+#ifndef TEST_CFG_SPLIT_RW_PORTS
+#define TEST_CFG_SPLIT_RW_PORTS 0
+#endif
+#if TEST_CFG_SPLIT_RW_PORTS
+static const uint32_t AXI_SLAVE_PORT_BW_MBPS = AXI_SLAVE_0_FREQ_MHZ * 512;   // 每端口 512bit = 64GB/s
+static const double   AXI_SLAVE_CTRL_DELAY_NS = 1.0;                          // 控制包固定 1ns/端口
+// [读写端口分离] 读/写端口各自的节拍常量: axi_slave_r_nb_transport_fw 只用 R_*,
+//   axi_slave_w_nb_transport_fw 只用 W_*, 两份实现不共享任何入口变量。
+//   512bit@1000MHz 逐包带宽 -> 512B=8ns, 128B=2ns; SQ/CQ/MSI=1ns。
+static const uint32_t AXI_SLAVE_R_PORT_BW_MBPS  = AXI_SLAVE_0_FREQ_MHZ * 512;
+static const uint32_t AXI_SLAVE_W_PORT_BW_MBPS  = AXI_SLAVE_0_FREQ_MHZ * 512;
+static const double   AXI_SLAVE_R_CTRL_DELAY_NS = 1.0;
+static const double   AXI_SLAVE_W_CTRL_DELAY_NS = 1.0;
+#else
+static const uint32_t AXI_SLAVE_PORT_BW_MBPS = AXI_SLAVE_0_BANDWIDTH_MBPS;   // 旧场景: 单端口原带宽
+static const double   AXI_SLAVE_CTRL_DELAY_NS = 2.0;                          // 旧场景: 控制包固定 2ns
+static const uint32_t AXI_SLAVE_R_PORT_BW_MBPS  = AXI_SLAVE_PORT_BW_MBPS;
+static const uint32_t AXI_SLAVE_W_PORT_BW_MBPS  = AXI_SLAVE_PORT_BW_MBPS;
+static const double   AXI_SLAVE_R_CTRL_DELAY_NS = AXI_SLAVE_CTRL_DELAY_NS;
+static const double   AXI_SLAVE_W_CTRL_DELAY_NS = AXI_SLAVE_CTRL_DELAY_NS;
+#endif
+
 static const uint32_t AXI_MASTER_0_FREQ_MHZ = 1000;   // axi_master_0_to_pcie_noc 频率(MHz)
 static const uint32_t AXI_MASTER_0_WIDTH_BIT = AXI_SLAVE_0_WIDTH_BIT;  // 出口位宽与入口一致
 static const uint32_t AXI_MASTER_0_BANDWIDTH_MBPS = AXI_MASTER_0_FREQ_MHZ * AXI_MASTER_0_WIDTH_BIT;

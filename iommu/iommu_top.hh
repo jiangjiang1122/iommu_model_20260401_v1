@@ -51,7 +51,15 @@ public:
     tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_1_to_cmn_rnd_socket;     // DDR access for DDT/PDT/CQ/FQ/PQ/MRIF
     tlm_utils::simple_initiator_socket<iommu_top,BUS_WIDTH> axi_master_2_ats_msg_to_pcie_noc_socket;    // ATS msg back to RP
 
+    // [读写端口分离] 入站两个独立 slave 端口:
+    //   ..._0_socket  = axi slave R port(只收读请求, 注册 axi_slave_r_nb_transport_fw)
+    //   ..._0w_socket = axi slave W port(只收写请求, 注册 axi_slave_w_nb_transport_fw)
+    //   两端口各自独立做本端口节拍计时(512bit@1000MHz: 512B=8ns, 128B=2ns, ctrl=1ns)
+    //   与读/写 320 并发准入门控, 互不影响。
     tlm_utils::simple_target_socket<iommu_top,BUS_WIDTH>  axi_slave_from_pcie_noc_0_socket;
+#if TEST_CFG_SPLIT_RW_PORTS
+    tlm_utils::simple_target_socket<iommu_top,BUS_WIDTH>  axi_slave_from_pcie_noc_0w_socket;
+#endif
     tlm_utils::simple_target_socket<iommu_top,BUS_WIDTH>  ahb_slave_from_pcie_noc_1_socket;
 
     // ===================== IOMMU Instance =====================
@@ -65,9 +73,25 @@ public:
     bool md_quiescent() const;
     void md_update_write_hol();
     // [STAT] 去重Buffer持有延时细分: W1=alloc->组完成, W2=组完成->聚合刷新执行, W3=聚合刷新->entry释放
-    uint64_t md_hold_main_cnt = 0, md_hold_susp_cnt = 0;
+    //   三档按 entry 来源拆分: main=主任务链头(MISS新建), pf=主任务链头(由预取占位行升级),
+    //   susp=被去重挂起的任务。PTW 预取任务不申请 Buffer entry。
+    uint64_t md_hold_main_cnt = 0, md_hold_susp_cnt = 0, md_hold_pf_cnt = 0;
     double md_hold_main_sum[3] = {0, 0, 0}, md_hold_susp_sum[3] = {0, 0, 0};
     double md_hold_main_max[3] = {0, 0, 0}, md_hold_susp_max[3] = {0, 0, 0};
+    double md_hold_pf_sum[3] = {0, 0, 0}, md_hold_pf_max[3] = {0, 0, 0};
+
+    // ============ [STAT] 端口带宽的"稳态窗口 / 注入期"口径 ============
+    //   日志原有 "Port Average Bandwidth" 用【全仿真时长】作分母, 包含了页表构建/warmup
+    //   (本场景 ~14.2us) 与注入结束后的 drain 段, 因此明显低于稳态值(属口径问题)。
+    //   下组快照用于算出两个无稀释的口径:
+    //     稳态窗口 = [steady_start_ns, steady_end_ns](完成数 10%~90%)
+    //     注入期   = 本端口[首次准入, 末次准入]
+    uint64_t bw_snap_win_r_bytes  = 0;   // 注入窗口打开时读口字节快照
+    uint64_t bw_snap_win_w_bytes = 0;   // 注入窗口打开时写口字节快照
+    uint64_t bw_snap_win_m0_bytes = 0;  // 注入窗口打开时出口字节快照
+    uint64_t steady_start_slave_r_bytes = 0, steady_end_slave_r_bytes = 0;
+    uint64_t steady_start_slave_w_bytes = 0, steady_end_slave_w_bytes = 0;
+    uint64_t steady_start_master0_bytes = 0, steady_end_master0_bytes = 0;
 #endif
 
     // 创建 CacheSubsystem
@@ -76,12 +100,51 @@ public:
     // 打印Cache命中率统计信息
     void print_cache_statistics();
 
+    // ===================== [STAT] IOMMU 内部并发 4KB 页统计 =====================
+    // 需求: 在接收请求端口入口处统计 IOMMU 模块平均并发的 4KB 页数目(按 device 分开统计)。
+    //   只统计 512Byte 数据翻译任务(is_ctrl=0 && length=512), SQ/CQ/MSI 等控制包不记录。
+    //   入口: 按 (device_id, iova 的 4KB 页值) 查表 -> 无匹配则插入并置 valid, count=1;
+    //         有匹配则 count++。出口: count--, 减到 0 时清除该表项(valid=0, value=0)。
+    //   并发数 = 当前 valid 表项数; 平均值用时间加权(Σ count×Δt / 窗口)求得。
+    static constexpr unsigned KB4_DATA_LEN = 512;   // 512Byte 数据任务长度门控120120
+
+    struct kb4_page_info_t {                 // 对应需求中的 struct 4kb_info
+        bool     page_is_valid = false;      // 该 4KB 页是否正在被 IOMMU 处理
+        uint64_t page_value    = 0;          // iova 对应的 4KB 页值
+        uint32_t task_count    = 0;          // 属于该 4KB 页的在途 512B 任务数
+    };
+    struct kb4_dev_stat_t {                  // 单个 device 的 4KB 页跟踪表与统计
+        std::map<uint64_t, kb4_page_info_t> pages;  // key = 4KB 页值(iova & ~0xFFF)
+        uint32_t cur_conc  = 0;              // 当前并发(valid)4KB 页数
+        uint32_t peak_conc = 0;              // 峰值并发 4KB 页数
+        double   area_ns   = 0.0;            // Σ(cur_conc × Δt), 单位 page·ns
+        double   last_change_ns = 0.0;       // 上次并发数变化时刻(ns)
+        uint64_t in_tasks  = 0;              // 入口记录的 512B 数据任务数
+        uint64_t out_tasks = 0;              // 出口记录的 512B 数据任务数
+        uint64_t distinct_pages = 0;         // 曾经出现过的不同 4KB 页数
+        uint64_t out_no_match   = 0;         // 出口查不到表项的异常次数
+        uint64_t bad_state_cnt  = 0;         // 状态异常(命中表项但 valid=0)次数
+    };
+    std::map<uint32_t, kb4_dev_stat_t> kb4_dev_stats;  // key = device_id
+    double   kb4_total_area_ns      = 0.0;   // 全设备 Σ(总并发 × Δt)
+    uint32_t kb4_total_peak         = 0;     // 全设备总并发峰值
+    double   kb4_win_first_ns       = -1.0;  // 采样窗口起点(ns), -1=未开始
+    double   kb4_win_last_change_ns = 0.0;   // 全设备总并发上次变化时刻(ns)
+
+    void track_4kb_page_in(iommu_task_t* task);    // 入口: 512B 数据任务到达
+    void track_4kb_page_out(iommu_task_t* task);   // 出口: 512B 数据任务完成
+    void reset_4kb_concurrency_window();           // 测量 epoch 前重置窗口
+    void print_4kb_concurrency_report() const;     // 打印并发 4KB 页统计报告
+
     // ===================== Task ID Counter =====================
     uint32_t next_task_id;
     sc_mutex task_id_mtx;
 
     // ===================== Pipeline Data FIFOs (sc_fifo<iommu_task_t*>) =====================
-    sc_fifo<iommu_task_t*> inbound_fifo;
+    // [读写端口分离] 入口 FIFO 按方向拆为两条, parser 轮询(RR)弹出,
+    //   避免单 FIFO 下"读满堵写"的队头阻塞(旧 inbound_fifo 已移除)。
+    sc_fifo<iommu_task_t*> inbound_fifo_r;
+    sc_fifo<iommu_task_t*> inbound_fifo_w;
     sc_fifo<iommu_task_t*> parser_to_collector_fifo;
     // sc_fifo<iommu_task_t*> parser_to_dc_cache_query_fifo;  // Replaced by cache_sub.dc_request_fifo
     // sc_fifo<iommu_task_t*> parser_to_pc_cache_query_fifo;  // Replaced by cache_sub.pc_request_fifo
@@ -241,12 +304,44 @@ public:
     uint64_t ptw_total_completed;    // PTW 完成任务总数
 
     // ===================== Port Byte Counters =====================
-    uint64_t slave_0_total_bytes;    // axi_slave_0  入口接收总字节数
+    uint64_t slave_0_total_bytes;    // axi_slave_0  入口接收总字节数(SPLIT下=读口)
+    uint64_t slave_0w_total_bytes = 0;   // [读写端口分离] 写口接收总字节数(带宽分开统计)
     uint64_t master_0_total_bytes;   // axi_master_0 出口发送总字节数
     uint64_t master_1_total_bytes;   // axi_master_1 DDR 访问总字节数
     
     // ===================== Outstanding Peak Trackers =====================
     int peak_iommu_global_outstanding;     // IOMMU全局outstanding峰值
+
+    // ============ [STAT需求1-诊断] 入口未决队列(input_delay_queue)积压 ============
+    //   位置: 端口准入(outstanding++)之后、parser 弹出之前。
+    //   [读写端口分离] 门控已前移到端口, 此队列积压 = 已过准入但尚未被 parser
+    //   取走的任务, 按读/写方向分开统计。
+    uint32_t input_q_count    = 0;      // 当前 input_delay_queue 待处理任务数(读+写)
+    uint32_t input_q_peak     = 0;      // 峰值
+    double   input_q_area_ns  = 0.0;    // Σ(count × Δt), 时间加权
+    double   input_q_last_ns  = 0.0;    // 上次变化时刻(ns)
+    double   input_q_first_ns = -1.0;   // 首次采样时刻(ns), -1=未开始
+    // 按方向拆分的积压统计
+    uint32_t input_q_r_count = 0, input_q_w_count = 0;
+    uint32_t input_q_r_peak = 0, input_q_w_peak = 0;
+    double   input_q_r_area_ns = 0.0, input_q_w_area_ns = 0.0;
+    double   input_q_dir_last_ns = 0.0;
+    double   input_q_dir_first_ns = -1.0;
+    // 变化前采样: 把"旧count × 距上次变化的Δt"累加进面积
+    void input_q_sample_before_change() {
+        const double now = sc_time_stamp().to_seconds() * 1e9;
+        if (input_q_first_ns < 0.0) { input_q_first_ns = now; input_q_last_ns = now; }
+        if (now > input_q_last_ns) {
+            input_q_area_ns += (double)input_q_count * (now - input_q_last_ns);
+            input_q_last_ns = now;
+        }
+        if (input_q_dir_first_ns < 0.0) { input_q_dir_first_ns = now; input_q_dir_last_ns = now; }
+        if (now > input_q_dir_last_ns) {
+            input_q_r_area_ns += (double)input_q_r_count * (now - input_q_dir_last_ns);
+            input_q_w_area_ns += (double)input_q_w_count * (now - input_q_dir_last_ns);
+            input_q_dir_last_ns = now;
+        }
+    }
     int peak_ptw_outstanding;              // PTW outstanding峰值
     int peak_xdtw_dc_outstanding;          // xDTW DC walk outstanding峰值
     int peak_xdtw_pc_outstanding;          // xDTW PC walk outstanding峰值
@@ -386,13 +481,21 @@ public:
     std::vector<double> iommu_e2e_values; // 每笔IO端到端延时(ns), 用于分布统计
 
     // ===================== IOMMU Input/Output Port Interval Statistics =====================
-    // 输入端口(inbound_fifo)任务间隔
+    // 输入端口(inbound_fifo_r/w)任务间隔(合计口径)
     double   iommu_in_last_ns;              // 上一次输入任务时刻(ns)
     double   iommu_in_interval_total_ns;    // 输入间隔总和(ns)
     double   iommu_in_interval_max_ns;      // 最大输入间隔(ns)
     double   iommu_in_interval_min_ns;      // 最小输入间隔(ns)
     uint64_t iommu_in_interval_count;       // 输入间隔采样次数
     std::vector<double> iommu_in_interval_values;  // 所有输入间隔值(ns)
+    // [读写端口分离] 读口/写口各自的输入间隔统计
+    double   iommu_in_r_last_ns = 0.0, iommu_in_w_last_ns = 0.0;
+    double   iommu_in_r_interval_total_ns = 0.0, iommu_in_w_interval_total_ns = 0.0;
+    double   iommu_in_r_interval_max_ns = 0.0, iommu_in_w_interval_max_ns = 0.0;
+    double   iommu_in_r_interval_min_ns = 999999999.0, iommu_in_w_interval_min_ns = 999999999.0;
+    uint64_t iommu_in_r_interval_count = 0, iommu_in_w_interval_count = 0;
+    std::vector<double> iommu_in_r_interval_values, iommu_in_w_interval_values;
+    std::vector<double> iommu_in_r_interval_end_ns, iommu_in_w_interval_end_ns;
     // 输出端口(master_0)任务间隔
     double   iommu_out_last_ns;             // 上一次输出任务时刻(ns)
     double   iommu_out_interval_total_ns;   // 输出间隔总和(ns)
@@ -517,16 +620,26 @@ public:
         iommu_task_t* task;
         double        due_ns;   // 到期时刻(ns): 入队时刻 + 流水线延时
     };
-    std::queue<pipeline_delay_item_t> input_delay_queue;   // 入口延时线队列
-    sc_mutex input_delay_mtx;
-    sc_event input_delay_event;
+    // [读写端口分离] 入口延时线按方向拆为两条, 读写互不阻塞;
+    //   出口延时线保持单条(reorder 输出线程本身串行发送, 无方向间HOL)。
+    std::queue<pipeline_delay_item_t> input_delay_queue_r;  // 读方向入口延时线队列
+    sc_mutex input_delay_mtx_r;
+    sc_event input_delay_event_r;
+    std::queue<pipeline_delay_item_t> input_delay_queue_w;  // 写方向入口延时线队列
+    sc_mutex input_delay_mtx_w;
+    sc_event input_delay_event_w;
     std::queue<pipeline_delay_item_t> output_delay_queue;  // 出口延时线队列
     sc_mutex output_delay_mtx;
     sc_event output_delay_event;
-    void input_delay_thread();    // 常驻: 到期后写入 inbound_fifo
+    // 入口延时线通用实现(读/写各一条常驻 SC_THREAD 调用)
+    void input_delay_line(std::queue<pipeline_delay_item_t>& q, sc_mutex& mtx,
+                          sc_event& evt, sc_fifo<iommu_task_t*>& out_fifo,
+                          uint32_t& dir_q_count, uint32_t& dir_q_peak);
+    void input_delay_thread_r();  // 常驻: 读方向到期后写入 inbound_fifo_r
+    void input_delay_thread_w();  // 常驻: 写方向到期后写入 inbound_fifo_w
     void output_delay_thread();   // 常驻: 到期后发送响应并统计/释放 task
 
-    // 全局 outstanding：parser 入侧申请，reorder 出口释放
+    // 全局 outstanding：端口准入申请，reorder 出口释放
     int iommu_global_outstanding;
     sc_event iommu_global_outstanding_freed_event;
 
@@ -537,6 +650,137 @@ public:
     int peak_iommu_write_outstanding;
     sc_event iommu_read_outstanding_freed_event;
     sc_event iommu_write_outstanding_freed_event;
+
+    // ============ [STAT] 端口准入门控阻塞统计(读写端口分离) ============
+    //   门控已从 parser 前移到端口: 读口只因"读满/全局满"阻塞,
+    //   写口只因"写满/全局满"阻塞, 两方向互不影响(无交叉队头阻塞)。
+    uint64_t port_blk_read_cnt = 0;      // 读口因额度满而阻塞的次数
+    uint64_t port_blk_write_cnt = 0;     // 写口因额度满而阻塞的次数
+    double   port_blk_read_ns = 0.0;     // 读口阻塞总时长(ns)
+    double   port_blk_write_ns = 0.0;    // 写口阻塞总时长(ns)
+    double   port_blk_read_max_ns = 0.0; // 读口单次最大阻塞(ns)
+    double   port_blk_write_max_ns = 0.0;// 写口单次最大阻塞(ns)
+    uint64_t port_admit_read_total = 0;  // 读口准入任务总数
+    uint64_t port_admit_write_total = 0; // 写口准入任务总数
+
+    // ============ [STAT] 读写端口独立节拍/供给侧验证(读写端口分离) ============
+    //   port_beat_*_ns : 各端口【带宽节拍】累计占用时长(Σ 逐包 wait), 除以注入窗口
+    //                  即端口线速占用率; ≈100% 表示该口一直在按自身节拍收包。
+    //   port_dir_mismatch_cnt: 端口收到与本方向不符的命令(绑定错误), 必须为 0。
+    double   port_beat_read_ns = 0.0;    // 读口节拍累计时长(ns)
+    double   port_beat_write_ns = 0.0;   // 写口节拍累计时长(ns)
+    uint64_t port_dir_mismatch_cnt = 0;  // R口收到写/W口收到读 的次数
+    double   port_first_admit_r_ns = -1.0;  // 注入窗口内读口首次准入时刻(ns)
+    double   port_first_admit_w_ns = -1.0;  // 注入窗口内写口首次准入时刻(ns)
+
+    // ============ [STAT] 注入窗口内的读写并发顶满程度 ============
+    //   窗口定义: RP 测量 epoch 开始注入(与 reset_4kb_concurrency_window 同点)打开,
+    //   到 RP 把全部请求都送完端口后关闭。窗口内 RP 供给侧必然有请求可发,
+    //   因此该窗口内的时间加权平均并发才是"读写是否顶满 320"的正确口径
+    //   (全运行窗口会把注入结束后的 drain 段计入而大幅拉低平均值)。
+    //   full_*_ns : 窗口内该计数器【等于上限】的时长, 除以窗口长度即顶满时长占比。
+    bool     conc_win_open = false;             // 窗口是否打开
+    double   conc_win_start_ns = 0.0;           // 窗口起点(ns)
+    double   conc_win_last_ns = 0.0;            // 窗口内上次采样时刻(ns)
+    double   conc_win_end_ns = 0.0;             // 窗口终点(关闭时刻, 0=未关闭)
+    double   conc_win_area_read_ns = 0.0;       // Σ read_outstanding × Δt
+    double   conc_win_area_write_ns = 0.0;      // Σ write_outstanding × Δt
+    double   conc_win_area_global_ns = 0.0;     // Σ global_outstanding × Δt
+    double   conc_win_full_read_ns = 0.0;       // read 顶满额度时长(ns)
+    double   conc_win_full_write_ns = 0.0;      // write 顶满额度时长(ns)
+    double   conc_win_full_global_ns = 0.0;     // global 顶满额度时长(ns)
+    uint64_t conc_win_sample_cnt = 0;           // 窗口内采样次数
+    // 窗口内分段历史: 每段记录【起止时刻 + 该段内生效的 read/write/global 计数】。
+    //   用途: 关闭后可任意切片重算子窗口(如"双口同时在注入")的时间加权均值,
+    //   避免把"某一口已注完、只剩另一口"的尾巴计入而低估该方向顶满程度。
+    struct conc_seg_t { double s, e, r, w, g; };
+    std::vector<conc_seg_t> conc_win_hist;
+    // 在 [t0,t1] 内按分段常数积分, 输出面积与顶满时长
+    void conc_window_slice(double t0, double t1, double& avg_r, double& avg_w, double& avg_g,
+                           double& full_r, double& full_w, double& full_g) const;
+
+    void conc_window_open();                    // 开始注入时调用
+    void conc_window_close();                   // RP 全部请求已送达端口后调用
+    //   在 outstanding 变化前采样窗口面积与顶满时长(与 ++/-- 严格配对)
+    void conc_window_sample() {
+        if (!conc_win_open) return;
+        const double now_ns = sc_core::sc_time_stamp().to_seconds() * 1e9;
+        const double delta  = now_ns - conc_win_last_ns;
+        if (delta > 0.0) {
+            const double vr = (double)iommu_read_outstanding;
+            const double vw = (double)iommu_write_outstanding;
+            const double vg = (double)iommu_global_outstanding;
+            conc_win_area_read_ns   += vr * delta;
+            conc_win_area_write_ns  += vw * delta;
+            conc_win_area_global_ns += vg * delta;
+            if (iommu_read_outstanding   >= (int)IOMMU_READ_MAX_OUTSTANDING)   conc_win_full_read_ns   += delta;
+            if (iommu_write_outstanding  >= (int)IOMMU_WRITE_MAX_OUTSTANDING)  conc_win_full_write_ns  += delta;
+            if (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING) conc_win_full_global_ns += delta;
+            // 本段 [上次采样, 本次采样) 内旧计数恒定, 直接存入显式区间
+            conc_win_hist.push_back(conc_seg_t{conc_win_last_ns, now_ns, vr, vw, vg});
+        }
+        conc_win_last_ns = now_ns;
+        conc_win_sample_cnt++;
+    }
+
+    // ============ [STAT] Parser 门控快照监控 ============
+    //   目的: 验证"读满或写满 -> 后续任务(含另一方向)全部进不来"的队头阻塞是否
+    //         在稳态下持续成立。采样点 = parser_thread 每次从 inbound_fifo 弹出
+    //         task 之后、方向门控 wait 之前, 记录当时 read/write/global outstanding。
+    //   判据: SELF_FULL=1 表示该 task 自身方向已满(必然进入 wait);
+    //         EITHER_FULL=1 表示读或写至少一个满(此时另一方向的请求也被堵住)。
+    uint64_t parser_recv_total = 0;         // 弹出的请求总数
+    uint64_t parser_recv_read = 0;          // 其中读请求
+    uint64_t parser_recv_write = 0;         // 其中写请求
+    uint64_t parser_snap_read_full = 0;     // 快照时 read_outstanding 已满
+    uint64_t parser_snap_write_full = 0;    // 快照时 write_outstanding 已满
+    uint64_t parser_snap_either_full = 0;   // 快照时 读满 或 写满
+    uint64_t parser_snap_both_full = 0;     // 快照时 读写同时满
+    uint64_t parser_snap_global_full = 0;   // 快照时 global 已满
+    uint64_t parser_snap_selfdir_full = 0;  // 快照时【自身方向】已满(会真阻塞)
+    uint64_t parser_snap_otherdir_full = 0; // 快照时【另一方向】满而自身未满(纯HOL受害)
+    uint64_t parser_blk_by_read = 0;        // 实际因读满 wait 的次数
+    uint64_t parser_blk_by_write = 0;       // 实际因写满 wait 的次数
+    uint64_t parser_blk_by_global = 0;      // 实际因全局满 wait 的次数
+    double   parser_blk_dir_ns = 0.0;       // 方向门控阻塞总时长(ns)
+    double   parser_blk_dir_max_ns = 0.0;   // 方向门控单次最大阻塞(ns)
+    double   parser_blk_global_ns = 0.0;    // 全局门控阻塞总时长(ns)
+    double   parser_snap_read_sum = 0.0;    // Σ read_outstanding  (算 parser 视角平均并发)
+    double   parser_snap_write_sum = 0.0;   // Σ write_outstanding
+    double   parser_snap_global_sum = 0.0;  // Σ global_outstanding
+
+    // ============ [STAT] IOMMU 内部实际并发的时间加权统计(面积法) ============
+    //   与 PTW 的 ptw_sample_concurrency_before_change() 同法:
+    //   在 read/write/global outstanding 每次变化【之前】采样, 累加
+    //   「旧计数 × 距上次变化的时长」得到面积; 输出时
+    //   时间加权平均并发 = 累计面积 / (末次采样时刻 - 首次采样时刻)。
+    //   采样点必须与 ++/-- 严格配对:
+    //     入口: reorder_register_task()  中 outstanding++ 之前
+    //     出口: reorder_output_thread()  中 outstanding-- 之前
+    double   iommu_conc_area_read_ns = 0.0;      // Σ read_outstanding × Δt   (task·ns)
+    double   iommu_conc_area_write_ns = 0.0;     // Σ write_outstanding × Δt
+    double   iommu_conc_area_global_ns = 0.0;    // Σ global_outstanding × Δt
+    double   iommu_conc_first_sample_ns = -1.0;  // 首次采样时刻(窗口起点), -1=未开始
+    double   iommu_conc_last_change_ns = 0.0;    // 上次计数变化时刻
+    double   iommu_conc_last_sample_ns = 0.0;    // 末次采样时刻(窗口终点)
+
+    // [STAT] IOMMU 内部并发采样: 在 read/write/global outstanding 变化前调用
+    void iommu_sample_concurrency_before_change() {
+        const double now_ns = sc_core::sc_time_stamp().to_seconds() * 1e9;
+        if (iommu_conc_first_sample_ns < 0.0) {
+            iommu_conc_first_sample_ns = now_ns;
+            iommu_conc_last_change_ns  = now_ns;
+        } else {
+            const double delta = now_ns - iommu_conc_last_change_ns;
+            if (delta > 0.0) {
+                iommu_conc_area_read_ns   += (double)iommu_read_outstanding   * delta;
+                iommu_conc_area_write_ns  += (double)iommu_write_outstanding  * delta;
+                iommu_conc_area_global_ns += (double)iommu_global_outstanding * delta;
+            }
+            iommu_conc_last_change_ns = now_ns;
+        }
+        iommu_conc_last_sample_ns = now_ns;
+    }
 
     // 重排序辅助方法
     void reorder_register_task(iommu_task_t* task);    // 入口注册 + outstanding++
@@ -623,7 +867,21 @@ public:
     void ddr_arbiter_thread();
 
     // ===================== AT Transport Callbacks =====================
-    // Inbound AT callback (RP -> IOMMU)
+    // [读写端口分离] 入站 AT 回调按端口拆成两个【独立注册函数】, 且两份实现完全独立:
+    //   axi slave R port -> axi_slave_r_nb_transport_fw
+    //       只处理读请求, 节拍 wait(512B=8ns / 128B=2ns / SQ,CQ,MSI=1ns) 在本函数内部,
+    //       只按 Read(320)+Global(640) 门控, 准入后入 inbound_fifo_r
+    //   axi slave W port -> axi_slave_w_nb_transport_fw
+    //       只处理写请求, 节拍 wait(512B=8ns / 128B=2ns / SQ,CQ,MSI=1ns) 在本函数内部,
+    //       只按 Write(320)+Global(640) 门控, 准入后入 inbound_fifo_w
+    //   两者不共用任何入口/准入函数, 互不影响; 方向由【端口】决定(不依赖命令);
+    //   收到方向不符的命令即 FATAL。非 SPLIT 场景(单端口同时收读写)仍用
+    //   axi_slave_nb_transport_fw, 方向由 trans.get_command() 判定。
+    //   下一级 parser_thread 从 inbound_fifo_r / inbound_fifo_w 轮询(RR)取请求。
+    tlm::tlm_sync_enum axi_slave_r_nb_transport_fw(
+        tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay);
+    tlm::tlm_sync_enum axi_slave_w_nb_transport_fw(
+        tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay);
     tlm::tlm_sync_enum axi_slave_nb_transport_fw(
         tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay);
 
@@ -646,7 +904,8 @@ public:
     SC_HAS_PROCESS(iommu_top);
     iommu_top(sc_core::sc_module_name name) : sc_module(name),
         // Initialize FIFOs with SPEC-defined depths
-        inbound_fifo("inbound_fifo", FIFO_DEPTH_INBOUND),
+        inbound_fifo_r("inbound_fifo_r", FIFO_DEPTH_INBOUND),
+        inbound_fifo_w("inbound_fifo_w", FIFO_DEPTH_INBOUND),
         parser_to_collector_fifo("parser_to_collector_fifo", FIFO_DEPTH_PARSER_TO_COLLECTOR),
         // parser_to_dc_cache_query_fifo("parser_to_dc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_DC_CACHE_QUERY),  // Replaced by cache_sub
         // parser_to_pc_cache_query_fifo("parser_to_pc_cache_query_fifo", FIFO_DEPTH_PARSER_TO_PC_CACHE_QUERY),  // Replaced by cache_sub
@@ -826,8 +1085,18 @@ public:
 #endif
 
         // Register AT nb_transport callbacks for inbound and DDR
+        // [读写端口分离] SPLIT: R port 注册 axi_slave_r_nb_transport_fw,
+        //   W port 注册 axi_slave_w_nb_transport_fw —— 两个【不同】的注册函数,
+        //   各自只处理本方向请求; 非 SPLIT: 单端口保留按命令分发的旧回调。
+#if TEST_CFG_SPLIT_RW_PORTS
+        axi_slave_from_pcie_noc_0_socket.register_nb_transport_fw(
+            this, &iommu_top::axi_slave_r_nb_transport_fw);
+        axi_slave_from_pcie_noc_0w_socket.register_nb_transport_fw(
+            this, &iommu_top::axi_slave_w_nb_transport_fw);
+#else
         axi_slave_from_pcie_noc_0_socket.register_nb_transport_fw(
             this, &iommu_top::axi_slave_nb_transport_fw);
+#endif
         axi_master_1_to_cmn_rnd_socket.register_nb_transport_bw(
             this, &iommu_top::ddr_nb_transport_bw);
 
@@ -865,8 +1134,9 @@ public:
         SC_THREAD(fault_cq_proc_thread);
         SC_THREAD(ddr_arbiter_thread);
         SC_THREAD(reorder_output_thread);   // 出口重排序线程
-        // [静态延时线] 入口/出口流水线延时常驻线程(替代 per-task sc_spawn)
-        SC_THREAD(input_delay_thread);
+        // [静态延时线] 入口(读/写各一条)/出口流水线延时常驻线程(替代 per-task sc_spawn)
+        SC_THREAD(input_delay_thread_r);
+        SC_THREAD(input_delay_thread_w);
         SC_THREAD(output_delay_thread);
 
         // [重构] 绑定去重模块回调: 转发 FIFO + Buffer 刷新回调

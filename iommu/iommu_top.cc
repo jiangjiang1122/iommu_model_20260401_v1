@@ -185,7 +185,9 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
     task->is_b_transport = 1;
 
     // Push to inbound FIFO for pipeline processing
-    inbound_fifo.write(task);
+    // [读写端口分离] inbound_fifo 已拆为读/写两条, 遗留 b_transport 路径按命令方向分流
+    if (task->read_writeAMO == WRITE) inbound_fifo_w.write(task);
+    else                              inbound_fifo_r.write(task);
 
     // For b_transport compatibility, we need to wait for completion
     // The forwarder/fault thread will signal completion through the response event
@@ -199,7 +201,232 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
 }
 
 /**********************************************/
-// Inbound AT nb_transport_fw callback (RP -> IOMMU)
+// [STAT] IOMMU 内部并发 4KB 页统计 (需求1)
+//   只在 512Byte 数据翻译任务(is_ctrl=0 && length=512)的入口/出口打点;
+//   SQ/CQ/MSI 等控制包(is_ctrl=1)完全不记录。
+//   按 device_id 分开维护 4KB 页跟踪表(需求中的 4kb_info 数组), 并发页数 =
+//   当前 valid 表项数; 平均值用时间加权 Σ(并发数 × Δt) / 窗口长度 求得,
+//   每次并发数变化前先按旧值累加面积。
+/**********************************************/
+namespace {
+// 时间加权面积累加: 用旧并发值 × 距上次变化的时长; last_ns<=0 表示窗口尚未开始
+inline void kb4_accum_area(double& area, uint32_t old_conc, double& last_ns, double now_ns) {
+    if (last_ns > 0.0 && now_ns > last_ns) area += (double)old_conc * (now_ns - last_ns);
+    last_ns = now_ns;
+}
+// 全设备当前总并发 4KB 页数
+inline uint32_t kb4_total_conc(const std::map<uint32_t, iommu_top::kb4_dev_stat_t>& m) {
+    uint32_t total = 0;
+    for (const auto& kv : m) total += kv.second.cur_conc;
+    return total;
+}
+}  // namespace
+
+// ------------------------------------------------------------------
+// track_4kb_page_in - 入口打点(parser 准入点 reorder_register_task, 与 outstanding++ 同点)
+//   根据 512B 数据任务的 device_id 与 iova 算出 4KB 页值, 到该设备的跟踪表查询:
+//     无匹配 -> 插入表项, page_is_valid=1, page_value=页值, task_count=1, 并发数+1
+//     有匹配 -> page_is_valid 应为1, 仅 task_count++(并发数不变)
+// ------------------------------------------------------------------
+void iommu_top::track_4kb_page_in(iommu_task_t* task) {
+    if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 只统计512B数据任务
+
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    if (kb4_win_first_ns < 0.0) kb4_win_first_ns = now_ns;  // 首次采样开启窗口
+
+    const uint64_t page = task->iova & ~0xFFFULL;   // iova -> 4KB 页值
+    kb4_dev_stat_t& ds = kb4_dev_stats[task->device_id];
+    ds.in_tasks++;
+
+    auto it = ds.pages.find(page);
+    if (it != ds.pages.end() && it->second.page_is_valid && it->second.page_value == page) {
+        it->second.task_count++;   // 已在处理该4KB页: 仅计数, 并发页数不变
+        return;
+    }
+
+    // 无匹配(或表项已被清零) -> 插入新表项
+    if (it == ds.pages.end()) {
+        ds.distinct_pages++;
+        it = ds.pages.emplace(page, kb4_page_info_t()).first;
+    }
+    it->second.page_is_valid = true;
+    it->second.page_value    = page;
+    it->second.task_count    = 1;
+
+    // 并发页数 +1: 先按旧值累加面积(本设备 + 全设备), 再自增并更新峰值
+    kb4_accum_area(ds.area_ns, ds.cur_conc, ds.last_change_ns, now_ns);
+    const uint32_t old_total = kb4_total_conc(kb4_dev_stats);
+    kb4_accum_area(kb4_total_area_ns, old_total, kb4_win_last_change_ns, now_ns);
+    ds.cur_conc++;
+    if (ds.cur_conc > ds.peak_conc) ds.peak_conc = ds.cur_conc;
+    if (old_total + 1 > kb4_total_peak) kb4_total_peak = old_total + 1;
+}
+
+// ------------------------------------------------------------------
+// track_4kb_page_out - 出口打点(reorder 释放点, 与 outstanding-- 同点)
+//   用该512B任务的 iova 算出4KB页值, 到当前设备跟踪表查询:
+//     无匹配 -> 异常情况, 计数并打印告警(不中断仿真)
+//     有匹配 -> task_count--; 非0则结束; 为0则清零表项(valid=0, value=0), 并发数-1
+// ------------------------------------------------------------------
+void iommu_top::track_4kb_page_out(iommu_task_t* task) {
+    if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 控制包不额外做操作
+
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    const uint64_t page = task->iova & ~0xFFFULL;
+    kb4_dev_stat_t& ds = kb4_dev_stats[task->device_id];
+    ds.out_tasks++;
+
+    auto it = ds.pages.find(page);
+    if (it == ds.pages.end() || !it->second.page_is_valid || it->second.page_value != page) {
+        // 异常情况: 出口任务对应的4KB页在表中不存在/已无效
+        ds.out_no_match++;
+        printf("[KB4_ANOMALY] out-no-match: did=%u task_id=%u iova=0x%lx page=0x%lx\n",
+               task->device_id, task->task_id, (unsigned long)task->iova, (unsigned long)page);
+        fflush(stdout);
+        return;
+    }
+
+    if (it->second.task_count > 0) it->second.task_count--;
+    if (it->second.task_count != 0) return;  // 该4KB页仍有在途512B任务, 不做操作
+
+    // 该4KB页的所有512B任务均已完成 -> 清零表项
+    it->second.page_is_valid = false;
+    it->second.page_value    = 0;
+
+    // 并发页数 -1: 先按旧值累加面积, 再自减
+    kb4_accum_area(ds.area_ns, ds.cur_conc, ds.last_change_ns, now_ns);
+    const uint32_t old_total = kb4_total_conc(kb4_dev_stats);
+    kb4_accum_area(kb4_total_area_ns, old_total, kb4_win_last_change_ns, now_ns);
+    if (ds.cur_conc > 0) ds.cur_conc--;
+}
+
+// ------------------------------------------------------------------
+// reset_4kb_concurrency_window - 测量 epoch 开始前重置统计窗口
+//   调用时已保证 IOMMU 内部无在途任务(quiescent), 故可安全清空跟踪表。
+// ------------------------------------------------------------------
+void iommu_top::reset_4kb_concurrency_window() {
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    kb4_total_area_ns      = 0.0;
+    kb4_total_peak         = 0;
+    kb4_win_first_ns       = now_ns;
+    kb4_win_last_change_ns = now_ns;
+    // [STAT] 同时打开"注入窗口"并发统计(RP 全部请求送完后由 conc_window_close 关闭)
+    conc_window_open();
+    for (auto& kv : kb4_dev_stats) {
+        kv.second.pages.clear();
+        kv.second.cur_conc        = 0;
+        kv.second.peak_conc       = 0;
+        kv.second.area_ns         = 0.0;
+        kv.second.last_change_ns  = now_ns;
+        kv.second.in_tasks        = 0;
+        kv.second.out_tasks       = 0;
+        kv.second.distinct_pages  = 0;
+        kv.second.out_no_match    = 0;
+        kv.second.bad_state_cnt   = 0;
+    }
+}
+
+// ------------------------------------------------------------------
+// print_4kb_concurrency_report - 打印每设备与全设备的平均/峰值并发 4KB 页数
+// ------------------------------------------------------------------
+void iommu_top::print_4kb_concurrency_report() const {
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    const double window_ns = (kb4_win_first_ns >= 0.0) ? (now_ns - kb4_win_first_ns) : 0.0;
+
+    printf("\n========== IOMMU 4KB Page Concurrency Statistics (512B data tasks; parser-admit->reorder-release span, bounded by outstanding cap) ==========\n");
+    printf("  Sampling window:      %.1f ns (%.3f us)\n", window_ns, window_ns / 1000.0);
+    printf("  Tracked devices:      %lu\n", (unsigned long)kb4_dev_stats.size());
+    printf("    %-5s %-14s %-10s %-10s %-10s %-10s %-9s %-9s\n",
+           "DID", "AvgConc(pages)", "PeakConc", "InTasks", "OutTasks", "DistinctPg", "Residual", "NoMatch");
+
+    double     sum_avg       = 0.0;
+    uint64_t   sum_in        = 0, sum_out = 0, sum_distinct = 0, sum_nomatch = 0, sum_residual = 0;
+    uint32_t   max_dev_peak  = 0;
+    for (const auto& kv : kb4_dev_stats) {
+        const kb4_dev_stat_t& ds = kv.second;
+        // 收尾: 加上从上次变化到当前仿真时刻的面积
+        double area = ds.area_ns;
+        if (ds.last_change_ns > 0.0 && now_ns > ds.last_change_ns)
+            area += (double)ds.cur_conc * (now_ns - ds.last_change_ns);
+        const double avg = (window_ns > 0.0) ? (area / window_ns) : 0.0;
+        // 残留未清零表项数(仿真结束时应为0)
+        uint64_t residual = 0;
+        for (const auto& p : ds.pages) if (p.second.page_is_valid) residual++;
+
+        printf("    %-5u %-14.3f %-10u %-10lu %-10lu %-10lu %-9lu %-9lu\n",
+               kv.first, avg, ds.peak_conc,
+               (unsigned long)ds.in_tasks, (unsigned long)ds.out_tasks,
+               (unsigned long)ds.distinct_pages, (unsigned long)residual,
+               (unsigned long)ds.out_no_match);
+
+        sum_avg       += avg;
+        sum_in        += ds.in_tasks;
+        sum_out       += ds.out_tasks;
+        sum_distinct  += ds.distinct_pages;
+        sum_nomatch   += ds.out_no_match;
+        sum_residual  += residual;
+        if (ds.peak_conc > max_dev_peak) max_dev_peak = ds.peak_conc;
+    }
+
+    // 全设备总并发(时间加权): 面积收尾后除以同一窗口
+    double total_area = kb4_total_area_ns;
+    if (kb4_win_last_change_ns > 0.0 && now_ns > kb4_win_last_change_ns)
+        total_area += (double)kb4_total_conc(kb4_dev_stats) * (now_ns - kb4_win_last_change_ns);
+    const double total_avg = (window_ns > 0.0) ? (total_area / window_ns) : 0.0;
+
+    const uint32_t dedup_lines = cache_sub.get_dedup_total_lines();
+    printf("    ---------------------------------------------------------------------------\n");
+    printf("    %-5s %-14.3f %-10u %-10lu %-10lu %-10lu %-9lu %-9lu\n",
+           "TOTAL", total_avg, kb4_total_peak,
+           (unsigned long)sum_in, (unsigned long)sum_out,
+           (unsigned long)sum_distinct, (unsigned long)sum_residual,
+           (unsigned long)sum_nomatch);
+    printf("  Cross-check (Σ per-device avg): %.3f pages\n", sum_avg);
+    printf("  Max single-device peak:         %u pages\n", max_dev_peak);
+    if (dedup_lines > 0) {
+        printf("  Dedup Cache capacity:           %u cachelines (sets=%u x ways=%u)\n",
+               dedup_lines, cache_sub.get_dedup_num_sets(), cache_sub.get_dedup_num_ways());
+        printf("  AvgConc / Dedup capacity:       %.2f%%  (并发4KB页数 vs 去重Cache总行数)\n",
+               100.0 * total_avg / (double)dedup_lines);
+        printf("  PeakConc / Dedup capacity:      %.2f%%\n",
+               100.0 * (double)kb4_total_peak / (double)dedup_lines);
+    }
+    // [STAT需求1-诊断] 入口未决队列积压: 门控已前移到端口, 此积压 = 已准入但尚未被 parser 弹出
+    {
+        const double inq_window = (input_q_first_ns >= 0.0) ? (now_ns - input_q_first_ns) : 0.0;
+        double inq_area = input_q_area_ns;
+        if (input_q_last_ns > 0.0 && now_ns > input_q_last_ns)
+            inq_area += (double)input_q_count * (now_ns - input_q_last_ns);
+        const double inq_avg = (inq_window > 0.0) ? (inq_area / inq_window) : 0.0;
+        // [读写端口分离] 按方向拆分的时间加权平均
+        const double inq_dir_window = (input_q_dir_first_ns >= 0.0) ? (now_ns - input_q_dir_first_ns) : 0.0;
+        double inq_r_area = input_q_r_area_ns, inq_w_area = input_q_w_area_ns;
+        if (input_q_dir_last_ns > 0.0 && now_ns > input_q_dir_last_ns) {
+            inq_r_area += (double)input_q_r_count * (now_ns - input_q_dir_last_ns);
+            inq_w_area += (double)input_q_w_count * (now_ns - input_q_dir_last_ns);
+        }
+        const double inq_r_avg = (inq_dir_window > 0.0) ? (inq_r_area / inq_dir_window) : 0.0;
+        const double inq_w_avg = (inq_dir_window > 0.0) ? (inq_w_area / inq_dir_window) : 0.0;
+        printf("  ----------------------------------------------------------------------\n");
+        printf("  Input-queue backlog (input_delay_queue_r/w, 位于端口准入之后、parser弹出之前):\n");
+        printf("    peak tasks queued:              %u  (read %u / write %u)\n",
+               input_q_peak, input_q_r_peak, input_q_w_peak);
+        printf("    time-weighted avg tasks queued: %.1f  (read %.1f / write %.1f)\n",
+               inq_avg, inq_r_avg, inq_w_avg);
+        printf("    端口准入并发上限: Global=%d (peak used %d), Read=%d, Write=%d\n",
+               (int)IOMMU_GLOBAL_MAX_OUTSTANDING, peak_iommu_global_outstanding,
+               (int)IOMMU_READ_MAX_OUTSTANDING, (int)IOMMU_WRITE_MAX_OUTSTANDING);
+        printf("    注: [读写端口分离] 并发门控已在端口准入处完成(计数同点++),\n");
+        printf("        此队列仅反映准入后等待 parser 轮询弹出的短暂停留。\n");
+    }
+    printf("====================================================================================\n\n");
+}
+
+/**********************************************/
+// [非 SPLIT 场景专用] 单入站端口同时接收读+写的入口回调 axi_slave_nb_transport_fw
+//   仅在 TEST_CFG_SPLIT_RW_PORTS=0 的旧场景被注册(基线 A/B 对比用);
+//   读写端口分离场景不使用本函数, 而是使用下面两个完全独立的注册函数。
+//   方向由 trans.get_command() 判定; 节拍保持旧场景公式(单端口全带宽, 控制包2ns)。
 /**********************************************/
 tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
     tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
@@ -209,19 +436,88 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         PayloadExtention* ext = nullptr;
         trans.get_extension(ext);
 
+        const bool is_write_req = (trans.get_command() == tlm::TLM_WRITE_COMMAND);
+        const char* port_name   = is_write_req ? "W-PORT" : "R-PORT";
+
         // ===== Bandwidth control: slave port accept delay =====
-        // [v5] 数据包按长度计时: 128GB/s 下 512B -> 4ns, 128B(PCIe MPS/MRRS=128) -> 1ns;
-        //      ctrl(SQ/CQ/MSI) -> 2ns fixed (与包长无关)
+        // 单端口同时收读写: 字节全部计入 slave_0_total_bytes(与基线口径一致)。
         unsigned int data_len = trans.get_data_length();
         slave_0_total_bytes += data_len;  // [STAT] 入口字节计数
         double slave_bw_delay_ns;
         bool is_ctrl_packet = (ext && ext->is_ctrl);
         if (is_ctrl_packet) {
-            slave_bw_delay_ns = 2.0;  // 控制包固定2ns
+            slave_bw_delay_ns = AXI_SLAVE_CTRL_DELAY_NS;  // 旧场景: 2ns
         } else {
-            slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_0_BANDWIDTH_MBPS;
+            slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_PORT_BW_MBPS;
         }
+        // [STAT] 端口节拍占用累计(判定该口是否一直按自身节拍收包)
+        if (is_write_req) port_beat_write_ns += slave_bw_delay_ns;
+        else              port_beat_read_ns  += slave_bw_delay_ns;
         wait(slave_bw_delay_ns, SC_NS);
+
+        // ===== [读写端口分离] 端口准入门控 + outstanding 计数(从 parser 前移到此) =====
+        //   读口: while(read >= READ_MAX || global >= GLOBAL_MAX) wait(对应freed事件)
+        //   写口: while(write >= WRITE_MAX || global >= GLOBAL_MAX) wait(对应freed事件)
+        //   门控与计数均持 reorder_mtx, 与出口释放(reorder_output_thread)互斥;
+        //   计数在准入点++, 故 parser 弹出前任务已计入并发, 不会超限。
+        {
+            const double gate_t0 = sc_time_stamp().to_seconds() * 1e9;
+            bool gated = false;
+            reorder_mtx.lock();
+            while (true) {
+                const bool g_full = (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+                const bool d_full = is_write_req
+                    ? (iommu_write_outstanding >= (int)IOMMU_WRITE_MAX_OUTSTANDING)
+                    : (iommu_read_outstanding  >= (int)IOMMU_READ_MAX_OUTSTANDING);
+                if (!g_full && !d_full) break;
+                gated = true;
+                reorder_mtx.unlock();
+                if (d_full) {
+                    wait(is_write_req ? iommu_write_outstanding_freed_event
+                                      : iommu_read_outstanding_freed_event);
+                } else {
+                    wait(iommu_global_outstanding_freed_event);
+                }
+                reorder_mtx.lock();
+            }
+            // [STAT] 并发面积采样: 在 outstanding++ 之前(与出口 -- 之前采样配对)
+            iommu_sample_concurrency_before_change();
+            conc_window_sample();   // [STAT] 注入窗口内并发面积/顶满时长
+            if (is_write_req) {
+                iommu_write_outstanding++;
+                if (iommu_write_outstanding > peak_iommu_write_outstanding)
+                    peak_iommu_write_outstanding = iommu_write_outstanding;
+                port_admit_write_total++;
+            } else {
+                iommu_read_outstanding++;
+                if (iommu_read_outstanding > peak_iommu_read_outstanding)
+                    peak_iommu_read_outstanding = iommu_read_outstanding;
+                port_admit_read_total++;
+            }
+            iommu_global_outstanding++;
+            if (iommu_global_outstanding > peak_iommu_global_outstanding)
+                peak_iommu_global_outstanding = iommu_global_outstanding;
+            reorder_mtx.unlock();
+            // [STAT] 记录注入窗口内本端口首次准入时刻(用于拆出端口自身注入跨度)
+            if (conc_win_open) {
+                const double admit_ns = sc_time_stamp().to_seconds() * 1e9;
+                if (is_write_req) { if (port_first_admit_w_ns < 0.0) port_first_admit_w_ns = admit_ns; }
+                else              { if (port_first_admit_r_ns < 0.0) port_first_admit_r_ns = admit_ns; }
+            }
+            // [STAT] 端口门控阻塞时长(读/写各自记录, 预期无交叉阻塞)
+            if (gated) {
+                const double dur = sc_time_stamp().to_seconds() * 1e9 - gate_t0;
+                if (is_write_req) {
+                    port_blk_write_cnt++;
+                    port_blk_write_ns += dur;
+                    if (dur > port_blk_write_max_ns) port_blk_write_max_ns = dur;
+                } else {
+                    port_blk_read_cnt++;
+                    port_blk_read_ns += dur;
+                    if (dur > port_blk_read_max_ns) port_blk_read_max_ns = dur;
+                }
+            }
+        }
 
         // 2. Create task and fill fields
         iommu_task_t* task = new iommu_task_t();
@@ -233,7 +529,8 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         task->tlm_trans_ptr = &trans;
         task->iova = trans.get_address();
         task->length = trans.get_data_length();
-        task->read_writeAMO = (trans.get_command() == tlm::TLM_READ_COMMAND) ? READ : WRITE;
+        // [读写端口分离] 读写方向由【端口】决定(R口=READ, W口=WRITE)
+        task->read_writeAMO = is_write_req ? WRITE : READ;
 
         if (ext) {
             task->device_id = ext->requester_id;
@@ -279,12 +576,17 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
 #endif
         }
 
+        // [STAT需求1] 4KB页并发跟踪: 随 outstanding 计数前移到端口准入点打点
+        //   (与端口 iommu_*_outstanding++ 同点), 统计口径 = 端口准入->reorder释放,
+        //   仍严格受 640 outstanding 约束。入口队列积压另由 input_q_* 统计。
+        track_4kb_page_in(task);
+
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
-        printf("[IOMMU_TOP] axi_slave_nb_transport_fw: task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> input_pipeline_peq [t=%.1f ns]\n",
-               task->task_id, task->device_id, task->iova, task->at, ts_ns);
+        printf("[IOMMU_TOP] axi_slave_nb_transport_fw(%s): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> input_pipeline_peq [t=%.1f ns]\n",
+               port_name, task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
 
-        // [STAT] IOMMU输入端口任务间隔采样
+        // [STAT] IOMMU输入端口任务间隔采样(合计 + 读口/写口分开)
         if (iommu_in_last_ns > 0.0) {
             double in_interval = ts_ns - iommu_in_last_ns;
             iommu_in_interval_total_ns += in_interval;
@@ -295,21 +597,62 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
             iommu_in_interval_end_ns.push_back(ts_ns);  // [STAT需求1] 记录该间隔结束时刻(稳态窗口筛选)
         }
         iommu_in_last_ns = ts_ns;
+        if (is_write_req) {
+            if (iommu_in_w_last_ns > 0.0) {
+                double d = ts_ns - iommu_in_w_last_ns;
+                iommu_in_w_interval_total_ns += d;
+                if (d > iommu_in_w_interval_max_ns) iommu_in_w_interval_max_ns = d;
+                if (d < iommu_in_w_interval_min_ns) iommu_in_w_interval_min_ns = d;
+                iommu_in_w_interval_count++;
+                iommu_in_w_interval_values.push_back(d);
+                iommu_in_w_interval_end_ns.push_back(ts_ns);
+            }
+            iommu_in_w_last_ns = ts_ns;
+        } else {
+            if (iommu_in_r_last_ns > 0.0) {
+                double d = ts_ns - iommu_in_r_last_ns;
+                iommu_in_r_interval_total_ns += d;
+                if (d > iommu_in_r_interval_max_ns) iommu_in_r_interval_max_ns = d;
+                if (d < iommu_in_r_interval_min_ns) iommu_in_r_interval_min_ns = d;
+                iommu_in_r_interval_count++;
+                iommu_in_r_interval_values.push_back(d);
+                iommu_in_r_interval_end_ns.push_back(ts_ns);
+            }
+            iommu_in_r_last_ns = ts_ns;
+        }
 
-        // [流水线延时] 静态延时线: 仅入队(task + 到期时刻), 由常驻 input_delay_thread
-        //   在到期后写入 inbound_fifo。替代 per-task sc_spawn, 避免多设备大事务量下协程池溢出。
-        //   入队不阻塞, 且延时固定 -> 到期顺序即到达顺序, 时序语义与原并行协程等价。
+        // [流水线延时] 静态延时线: 仅入队(task + 到期时刻), 由常驻 input_delay_thread_r/w
+        //   在到期后写入 inbound_fifo_r/w。[读写端口分离] 延时线按方向拆为两条,
+        //   读写互不阻塞。入队不阻塞, 且延时固定 -> 到期顺序即到达顺序。
 #if TEST_CFG_MULTI_DEVICE_SCENE
         ++md_trace.input_pending;
 #endif
+        // [STAT需求1-诊断] 入口未决队列积压 +1 (端口已准入, 尚未被 parser 弹出)
+        input_q_sample_before_change();
+        input_q_count++;
+        if (input_q_count > input_q_peak) input_q_peak = input_q_count;
+        if (is_write_req) {
+            input_q_w_count++;
+            if (input_q_w_count > input_q_w_peak) input_q_w_peak = input_q_w_count;
+        } else {
+            input_q_r_count++;
+            if (input_q_r_count > input_q_r_peak) input_q_r_peak = input_q_r_count;
+        }
         {
             pipeline_delay_item_t item;
             item.task = task;
             item.due_ns = ts_ns + (double)IOMMU_INPUT_PIPELINE_DELAY_NS;
-            input_delay_mtx.lock();
-            input_delay_queue.push(item);
-            input_delay_mtx.unlock();
-            input_delay_event.notify(SC_ZERO_TIME);
+            if (is_write_req) {
+                input_delay_mtx_w.lock();
+                input_delay_queue_w.push(item);
+                input_delay_mtx_w.unlock();
+                input_delay_event_w.notify(SC_ZERO_TIME);
+            } else {
+                input_delay_mtx_r.lock();
+                input_delay_queue_r.push(item);
+                input_delay_mtx_r.unlock();
+                input_delay_event_r.notify(SC_ZERO_TIME);
+            }
         }
 
         // 4. Return END_REQ (request accepted)
@@ -324,37 +667,514 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
 }
 
 /**********************************************/
-// input_delay_thread - 入口流水线延时线(常驻静态线程)
-//   替代原 per-task sc_spawn: 从 input_delay_queue 按 FIFO 取出 task,
-//   等待到其到期时刻(入队时刻 + IOMMU_INPUT_PIPELINE_DELAY_NS)后写入 inbound_fifo。
-//   因延时固定, 队首即最早到期, 单线程串行下发的时序与原并行协程等价,
-//   且进程数恒定(不随事务量增长), 规避 SystemC 协程栈溢出。
+// [读写端口分离] axi slave R port 专用注册函数 (绑定 axi_slave_from_pcie_noc_0_socket)
+//   完全独立实现: 不引用任何共享入口函数, 端口节拍 wait 就在本函数内部。
+//   只处理读请求:
+//     512B 数据包 -> 间隔 8ns, 128B 数据包 -> 间隔 2ns (读口 512bit@1000MHz),
+//     SQ/CQ/MSI 控制包 -> 间隔 1ns;
+//   只按【读额度】门控: iommu_read_outstanding < 320 且 global < 640,
+//     通过后在端口准入点立即 outstanding++, 保证"端口->响应释放"内并发不超限;
+//   准入后的读任务投入读方向入口延时线 -> inbound_fifo_r, 由 parser 轮询取出。
+//   收到写命令 = RP 读/写 socket 绑定错误, 直接 FATAL(不静默改方向)。
 /**********************************************/
-void iommu_top::input_delay_thread() {
+tlm::tlm_sync_enum iommu_top::axi_slave_r_nb_transport_fw(
+    tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+{
+    if (phase == tlm::BEGIN_REQ) {
+        PayloadExtention* ext = nullptr;
+        trans.get_extension(ext);
+
+        if (trans.get_command() == tlm::TLM_WRITE_COMMAND) {
+            port_dir_mismatch_cnt++;
+            fprintf(stderr,
+                "[FATAL][R-PORT] axi_slave_r_nb_transport_fw 只应收到读请求, 实际收到写请求: "
+                "iova=0x%lx len=%u (RP 读/写 socket 绑定错误)\n",
+                (unsigned long)trans.get_address(), trans.get_data_length());
+            fflush(stderr);
+            SC_REPORT_FATAL("IOMMU_PORT_DIR", "axi slave R port 收到写请求");
+        }
+
+        // ===== 读端口独立节拍(本函数内部计时, 与写端口无关) =====
+        unsigned int data_len = trans.get_data_length();
+        slave_0_total_bytes += data_len;   // [STAT] 读口入口字节计数
+        double slave_bw_delay_ns;
+        bool is_ctrl_packet = (ext && ext->is_ctrl);
+        if (is_ctrl_packet) {
+            slave_bw_delay_ns = AXI_SLAVE_R_CTRL_DELAY_NS;            // 1ns
+        } else {
+            slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_R_PORT_BW_MBPS;  // 512B->8ns, 128B->2ns
+        }
+        port_beat_read_ns += slave_bw_delay_ns;   // [STAT] 读口节拍占用累计
+        wait(slave_bw_delay_ns, SC_NS);
+
+        // ===== 读端口独立准入: 只等 Read(320)/Global(640) =====
+        {
+            const double gate_t0 = sc_time_stamp().to_seconds() * 1e9;
+            bool gated = false;
+            reorder_mtx.lock();
+            while (true) {
+                const bool g_full = (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+                const bool d_full = (iommu_read_outstanding  >= (int)IOMMU_READ_MAX_OUTSTANDING);
+                if (!g_full && !d_full) break;
+                gated = true;
+                reorder_mtx.unlock();
+                wait(d_full ? iommu_read_outstanding_freed_event
+                            : iommu_global_outstanding_freed_event);
+                reorder_mtx.lock();
+            }
+            // [STAT] 并发面积采样: 在 outstanding++ 之前(与出口 -- 之前采样配对)
+            iommu_sample_concurrency_before_change();
+            conc_window_sample();       // [STAT] 注入窗口内并发面积/顶满时长
+            iommu_read_outstanding++;
+            if (iommu_read_outstanding > peak_iommu_read_outstanding)
+                peak_iommu_read_outstanding = iommu_read_outstanding;
+            port_admit_read_total++;
+            iommu_global_outstanding++;
+            if (iommu_global_outstanding > peak_iommu_global_outstanding)
+                peak_iommu_global_outstanding = iommu_global_outstanding;
+            reorder_mtx.unlock();
+            // [STAT] 记录读口在本注入窗口内的首次准入时刻
+            if (conc_win_open && port_first_admit_r_ns < 0.0)
+                port_first_admit_r_ns = sc_time_stamp().to_seconds() * 1e9;
+            // [STAT] 读口因(读满/全局满)阻塞时长
+            if (gated) {
+                const double dur = sc_time_stamp().to_seconds() * 1e9 - gate_t0;
+                port_blk_read_cnt++;
+                port_blk_read_ns += dur;
+                if (dur > port_blk_read_max_ns) port_blk_read_max_ns = dur;
+            }
+        }
+
+        // ===== 创建读任务 =====
+        iommu_task_t* task = new iommu_task_t();
+
+        task_id_mtx.lock();
+        task->task_id = next_task_id++;
+        task_id_mtx.unlock();
+
+        task->tlm_trans_ptr = &trans;
+        task->iova = trans.get_address();
+        task->length = trans.get_data_length();
+        task->read_writeAMO = READ;      // [读写端口分离] R 端口固定为读方向
+
+        if (ext) {
+            task->device_id = ext->requester_id;
+            task->pid_valid = ext->pid_valid;
+            task->process_id = ext->process_id;
+            task->exec_req = ext->exec_req;
+            task->priv_req = ext->priv_req;
+            task->no_write = ext->no_write;
+            task->is_cxl_dev = 0;
+            task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+
+            if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
+            else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
+            else if (ext->at == 2) task->at = ADDR_TYPE_TRANSLATED;
+        }
+
+        task->timestamp = sc_time_stamp();
+        task->state = TASK_INIT;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
+#endif
+
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数
+        if (task->is_ctrl) {
+            ctrl_total_count++;
+#ifdef TEST_CFG_S13_IOVA_512MB
+            if (task->iova == 0x22000000)      ctrl_sq_count++;
+            else if (task->iova == 0x22001000) ctrl_cq_count++;
+            else                               ctrl_msi_count++;
+#else
+            if (task->iova == 0x5000000)       ctrl_sq_count++;
+            else if (task->iova == 0x5001000)  ctrl_cq_count++;
+            else                               ctrl_msi_count++;
+#endif
+        }
+
+        // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
+        track_4kb_page_in(task);
+
+        double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+        printf("[IOMMU_TOP] axi_slave_r_nb_transport_fw(R-PORT): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo_r [t=%.1f ns]\n",
+               task->task_id, task->device_id, task->iova, task->at, ts_ns);
+        fflush(stdout);
+
+        // [STAT] 入口任务间隔采样(合计 + 读口)
+        if (iommu_in_last_ns > 0.0) {
+            double in_interval = ts_ns - iommu_in_last_ns;
+            iommu_in_interval_total_ns += in_interval;
+            if (in_interval > iommu_in_interval_max_ns) iommu_in_interval_max_ns = in_interval;
+            if (in_interval < iommu_in_interval_min_ns) iommu_in_interval_min_ns = in_interval;
+            iommu_in_interval_count++;
+            iommu_in_interval_values.push_back(in_interval);
+            iommu_in_interval_end_ns.push_back(ts_ns);
+        }
+        iommu_in_last_ns = ts_ns;
+        if (iommu_in_r_last_ns > 0.0) {
+            double d = ts_ns - iommu_in_r_last_ns;
+            iommu_in_r_interval_total_ns += d;
+            if (d > iommu_in_r_interval_max_ns) iommu_in_r_interval_max_ns = d;
+            if (d < iommu_in_r_interval_min_ns) iommu_in_r_interval_min_ns = d;
+            iommu_in_r_interval_count++;
+            iommu_in_r_interval_values.push_back(d);
+            iommu_in_r_interval_end_ns.push_back(ts_ns);
+        }
+        iommu_in_r_last_ns = ts_ns;
+
+        // [流水线延时] 读方向静态延时线: 入队不阻塞, 到期后由
+        //   input_delay_thread_r 写入 inbound_fifo_r, 再由 parser 轮询取出。
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        ++md_trace.input_pending;
+#endif
+        input_q_sample_before_change();
+        input_q_count++;
+        if (input_q_count > input_q_peak) input_q_peak = input_q_count;
+        input_q_r_count++;
+        if (input_q_r_count > input_q_r_peak) input_q_r_peak = input_q_r_count;
+        {
+            pipeline_delay_item_t item;
+            item.task = task;
+            item.due_ns = ts_ns + (double)IOMMU_INPUT_PIPELINE_DELAY_NS;
+            input_delay_mtx_r.lock();
+            input_delay_queue_r.push(item);
+            input_delay_mtx_r.unlock();
+            input_delay_event_r.notify(SC_ZERO_TIME);
+        }
+
+        phase = tlm::END_REQ;          // 读请求已接收
+        return tlm::TLM_UPDATED;
+    }
+    else if (phase == tlm::END_RESP) {
+        // Initiator confirmed receiving response
+        return tlm::TLM_COMPLETED;
+    }
+    return tlm::TLM_ACCEPTED;
+}
+
+/**********************************************/
+// [读写端口分离] axi slave W port 专用注册函数 (绑定 axi_slave_from_pcie_noc_0w_socket)
+//   完全独立实现: 不引用任何共享入口函数, 也不调读端口任何代码,
+//   端口节拍 wait 就在本函数内部。
+//   只处理写请求:
+//     512B 数据包 -> 间隔 8ns, 128B 数据包 -> 间隔 2ns (写口 512bit@1000MHz),
+//     SQ/CQ/MSI 控制包 -> 间隔 1ns;
+//   只按【写额度】门控: iommu_write_outstanding < 320 且 global < 640,
+//     通过后在端口准入点立即 outstanding++;
+//   准入后的写任务投入写方向入口延时线 -> inbound_fifo_w, 由 parser 轮询取出。
+//   收到读命令 = RP 读/写 socket 绑定错误, 直接 FATAL。
+/**********************************************/
+tlm::tlm_sync_enum iommu_top::axi_slave_w_nb_transport_fw(
+    tlm::tlm_generic_payload& trans, tlm::tlm_phase& phase, sc_time& delay)
+{
+    if (phase == tlm::BEGIN_REQ) {
+        PayloadExtention* ext = nullptr;
+        trans.get_extension(ext);
+
+        if (trans.get_command() == tlm::TLM_READ_COMMAND) {
+            port_dir_mismatch_cnt++;
+            fprintf(stderr,
+                "[FATAL][W-PORT] axi_slave_w_nb_transport_fw 只应收到写请求, 实际收到读请求: "
+                "iova=0x%lx len=%u (RP 读/写 socket 绑定错误)\n",
+                (unsigned long)trans.get_address(), trans.get_data_length());
+            fflush(stderr);
+            SC_REPORT_FATAL("IOMMU_PORT_DIR", "axi slave W port 收到读请求");
+        }
+
+        // ===== 写端口独立节拍(本函数内部计时, 与读端口无关) =====
+        unsigned int data_len = trans.get_data_length();
+        slave_0w_total_bytes += data_len;   // [STAT] 写口入口字节计数
+        double slave_bw_delay_ns;
+        bool is_ctrl_packet = (ext && ext->is_ctrl);
+        if (is_ctrl_packet) {
+            slave_bw_delay_ns = AXI_SLAVE_W_CTRL_DELAY_NS;            // 1ns
+        } else {
+            slave_bw_delay_ns = 1000.0 * data_len * 8 / AXI_SLAVE_W_PORT_BW_MBPS;  // 512B->8ns, 128B->2ns
+        }
+        port_beat_write_ns += slave_bw_delay_ns;   // [STAT] 写口节拍占用累计
+        wait(slave_bw_delay_ns, SC_NS);
+
+        // ===== 写端口独立准入: 只等 Write(320)/Global(640) =====
+        {
+            const double gate_t0 = sc_time_stamp().to_seconds() * 1e9;
+            bool gated = false;
+            reorder_mtx.lock();
+            while (true) {
+                const bool g_full = (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+                const bool d_full = (iommu_write_outstanding >= (int)IOMMU_WRITE_MAX_OUTSTANDING);
+                if (!g_full && !d_full) break;
+                gated = true;
+                reorder_mtx.unlock();
+                wait(d_full ? iommu_write_outstanding_freed_event
+                            : iommu_global_outstanding_freed_event);
+                reorder_mtx.lock();
+            }
+            // [STAT] 并发面积采样: 在 outstanding++ 之前(与出口 -- 之前采样配对)
+            iommu_sample_concurrency_before_change();
+            conc_window_sample();       // [STAT] 注入窗口内并发面积/顶满时长
+            iommu_write_outstanding++;
+            if (iommu_write_outstanding > peak_iommu_write_outstanding)
+                peak_iommu_write_outstanding = iommu_write_outstanding;
+            port_admit_write_total++;
+            iommu_global_outstanding++;
+            if (iommu_global_outstanding > peak_iommu_global_outstanding)
+                peak_iommu_global_outstanding = iommu_global_outstanding;
+            reorder_mtx.unlock();
+            // [STAT] 记录写口在本注入窗口内的首次准入时刻
+            if (conc_win_open && port_first_admit_w_ns < 0.0)
+                port_first_admit_w_ns = sc_time_stamp().to_seconds() * 1e9;
+            // [STAT] 写口因(写满/全局满)阻塞时长
+            if (gated) {
+                const double dur = sc_time_stamp().to_seconds() * 1e9 - gate_t0;
+                port_blk_write_cnt++;
+                port_blk_write_ns += dur;
+                if (dur > port_blk_write_max_ns) port_blk_write_max_ns = dur;
+            }
+        }
+
+        // ===== 创建写任务 =====
+        iommu_task_t* task = new iommu_task_t();
+
+        task_id_mtx.lock();
+        task->task_id = next_task_id++;
+        task_id_mtx.unlock();
+
+        task->tlm_trans_ptr = &trans;
+        task->iova = trans.get_address();
+        task->length = trans.get_data_length();
+        task->read_writeAMO = WRITE;     // [读写端口分离] W 端口固定为写方向
+
+        if (ext) {
+            task->device_id = ext->requester_id;
+            task->pid_valid = ext->pid_valid;
+            task->process_id = ext->process_id;
+            task->exec_req = ext->exec_req;
+            task->priv_req = ext->priv_req;
+            task->no_write = ext->no_write;
+            task->is_cxl_dev = 0;
+            task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+
+            if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
+            else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
+            else if (ext->at == 2) task->at = ADDR_TYPE_TRANSLATED;
+        }
+
+        task->timestamp = sc_time_stamp();
+        task->state = TASK_INIT;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
+#endif
+
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数
+        if (task->is_ctrl) {
+            ctrl_total_count++;
+#ifdef TEST_CFG_S13_IOVA_512MB
+            if (task->iova == 0x22000000)      ctrl_sq_count++;
+            else if (task->iova == 0x22001000) ctrl_cq_count++;
+            else                               ctrl_msi_count++;
+#else
+            if (task->iova == 0x5000000)       ctrl_sq_count++;
+            else if (task->iova == 0x5001000)  ctrl_cq_count++;
+            else                               ctrl_msi_count++;
+#endif
+        }
+
+        // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
+        track_4kb_page_in(task);
+
+        double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+        printf("[IOMMU_TOP] axi_slave_w_nb_transport_fw(W-PORT): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo_w [t=%.1f ns]\n",
+               task->task_id, task->device_id, task->iova, task->at, ts_ns);
+        fflush(stdout);
+
+        // [STAT] 入口任务间隔采样(合计 + 写口)
+        if (iommu_in_last_ns > 0.0) {
+            double in_interval = ts_ns - iommu_in_last_ns;
+            iommu_in_interval_total_ns += in_interval;
+            if (in_interval > iommu_in_interval_max_ns) iommu_in_interval_max_ns = in_interval;
+            if (in_interval < iommu_in_interval_min_ns) iommu_in_interval_min_ns = in_interval;
+            iommu_in_interval_count++;
+            iommu_in_interval_values.push_back(in_interval);
+            iommu_in_interval_end_ns.push_back(ts_ns);
+        }
+        iommu_in_last_ns = ts_ns;
+        if (iommu_in_w_last_ns > 0.0) {
+            double d = ts_ns - iommu_in_w_last_ns;
+            iommu_in_w_interval_total_ns += d;
+            if (d > iommu_in_w_interval_max_ns) iommu_in_w_interval_max_ns = d;
+            if (d < iommu_in_w_interval_min_ns) iommu_in_w_interval_min_ns = d;
+            iommu_in_w_interval_count++;
+            iommu_in_w_interval_values.push_back(d);
+            iommu_in_w_interval_end_ns.push_back(ts_ns);
+        }
+        iommu_in_w_last_ns = ts_ns;
+
+        // [流水线延时] 写方向静态延时线: 入队不阻塞, 到期后由
+        //   input_delay_thread_w 写入 inbound_fifo_w, 再由 parser 轮询取出。
+#if TEST_CFG_MULTI_DEVICE_SCENE
+        ++md_trace.input_pending;
+#endif
+        input_q_sample_before_change();
+        input_q_count++;
+        if (input_q_count > input_q_peak) input_q_peak = input_q_count;
+        input_q_w_count++;
+        if (input_q_w_count > input_q_w_peak) input_q_w_peak = input_q_w_count;
+        {
+            pipeline_delay_item_t item;
+            item.task = task;
+            item.due_ns = ts_ns + (double)IOMMU_INPUT_PIPELINE_DELAY_NS;
+            input_delay_mtx_w.lock();
+            input_delay_queue_w.push(item);
+            input_delay_mtx_w.unlock();
+            input_delay_event_w.notify(SC_ZERO_TIME);
+        }
+
+        phase = tlm::END_REQ;          // 写请求已接收
+        return tlm::TLM_UPDATED;
+    }
+    else if (phase == tlm::END_RESP) {
+        // Initiator confirmed receiving response
+        return tlm::TLM_COMPLETED;
+    }
+    return tlm::TLM_ACCEPTED;
+}
+
+/**********************************************/
+// [STAT] 注入窗口开关
+//   open  : 测量 epoch 开始前(RP 调用 reset_4kb_concurrency_window 同点),
+//           同时重置面积/顶满时长累加器;
+//   close : RP 把全部请求送达端口后立即调用,
+//           并把“末次采样->关闭时刻”按当时 outstanding 补齐。
+//   窗口内 RP 侧始终有请求可注入, 故窗口平均并发与顶满时长占比才能真实反映
+//   "读写是否各自顶满 320"; 全运行窗口会被注入结束后的 drain 段拉低。
+/**********************************************/
+void iommu_top::conc_window_open() {
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    conc_win_open       = true;
+    conc_win_start_ns   = now_ns;
+    conc_win_last_ns    = now_ns;
+    conc_win_end_ns     = 0.0;
+    conc_win_area_read_ns = conc_win_area_write_ns = conc_win_area_global_ns = 0.0;
+    conc_win_full_read_ns = conc_win_full_write_ns = conc_win_full_global_ns = 0.0;
+    conc_win_sample_cnt   = 0;
+    // [STAT] 字节快照: 用于算"注入期"无稀释带宽(上方 Port Average Bandwidth 用全仿真时长作分母)
+    bw_snap_win_r_bytes   = slave_0_total_bytes;
+    bw_snap_win_w_bytes   = slave_0w_total_bytes;
+    bw_snap_win_m0_bytes  = master_0_total_bytes;
+    conc_win_hist.clear();
+    conc_win_hist.reserve(200000);   // 避免大事务量下反复重分配(mps128 约 6.4 万样本)
+    port_first_admit_r_ns = -1.0;   // 端口首次准入时刻重新记录(仅统计本窗口)
+    port_first_admit_w_ns = -1.0;
+    printf("[CONC_WIN] 注入并发窗口打开 t=%.1f ns (Read<=%d, Write<=%d, Global<=%d)\n",
+           now_ns, (int)IOMMU_READ_MAX_OUTSTANDING,
+           (int)IOMMU_WRITE_MAX_OUTSTANDING, (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+    fflush(stdout);
+}
+
+void iommu_top::conc_window_close() {
+    if (!conc_win_open) return;
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    const double delta  = now_ns - conc_win_last_ns;
+    if (delta > 0.0) {   // 补齐最后一段(采样点 -> 注入结束)
+        const double vr = (double)iommu_read_outstanding;
+        const double vw = (double)iommu_write_outstanding;
+        const double vg = (double)iommu_global_outstanding;
+        conc_win_area_read_ns   += vr * delta;
+        conc_win_area_write_ns  += vw * delta;
+        conc_win_area_global_ns += vg * delta;
+        if (iommu_read_outstanding   >= (int)IOMMU_READ_MAX_OUTSTANDING)   conc_win_full_read_ns   += delta;
+        if (iommu_write_outstanding  >= (int)IOMMU_WRITE_MAX_OUTSTANDING)  conc_win_full_write_ns  += delta;
+        if (iommu_global_outstanding >= (int)IOMMU_GLOBAL_MAX_OUTSTANDING) conc_win_full_global_ns += delta;
+        conc_win_hist.push_back(conc_seg_t{conc_win_last_ns, now_ns, vr, vw, vg});
+        conc_win_last_ns = now_ns;
+    }
+    conc_win_end_ns = now_ns;
+    conc_win_open   = false;
+    printf("[CONC_WIN] 注入并发窗口关闭 t=%.1f ns (窗口 %.1f ns, 采样 %lu 次)\n",
+           now_ns, conc_win_end_ns - conc_win_start_ns,
+           (unsigned long)conc_win_sample_cnt);
+    fflush(stdout);
+}
+
+/**********************************************/
+// conc_window_slice - 在任意子窗口 [t0,t1] 内按分段常数重算时间加权并发与顶满时长
+//   数据源 = conc_win_hist(每次 outstanding 变化前记录的旧计数与其生效起点)。
+/**********************************************/
+void iommu_top::conc_window_slice(double t0, double t1,
+                                  double& avg_r, double& avg_w, double& avg_g,
+                                  double& full_r, double& full_w, double& full_g) const {
+    avg_r = avg_w = avg_g = full_r = full_w = full_g = 0.0;
+    if (t1 <= t0 || conc_win_hist.empty()) return;
+    double ar = 0.0, aw = 0.0, ag = 0.0, fr = 0.0, fw = 0.0, fg = 0.0;
+    // 段已按时间递增存入: [s,e) 内计数恒为 (r,w,g)
+    for (const auto& seg : conc_win_hist) {
+        if (seg.e <= t0) continue;
+        if (seg.s >= t1) break;
+        const double lo = (seg.s > t0) ? seg.s : t0;
+        const double hi = (seg.e < t1) ? seg.e : t1;
+        if (hi <= lo) continue;
+        const double dt = hi - lo;
+        ar += seg.r * dt;
+        aw += seg.w * dt;
+        ag += seg.g * dt;
+        if (seg.r >= (double)IOMMU_READ_MAX_OUTSTANDING)   fr += dt;
+        if (seg.w >= (double)IOMMU_WRITE_MAX_OUTSTANDING)  fw += dt;
+        if (seg.g >= (double)IOMMU_GLOBAL_MAX_OUTSTANDING) fg += dt;
+    }
+    const double span = t1 - t0;
+    avg_r = ar / span; avg_w = aw / span; avg_g = ag / span;
+    full_r = fr / span * 100.0; full_w = fw / span * 100.0; full_g = fg / span * 100.0;
+}
+
+/**********************************************/
+// input_delay_line - 入口流水线延时线通用实现(常驻静态线程)
+//   [读写端口分离] 读/写各一条: 从对应延时线队列按 FIFO 取出 task,
+//   等待到其到期时刻(入队时刻 + IOMMU_INPUT_PIPELINE_DELAY_NS)后写入
+//   对应方向的 inbound_fifo。因延时固定, 队首即最早到期, 单线程串行下发
+//   的时序与原并行协程等价, 且进程数恒定(不随事务量增长)。
+/**********************************************/
+void iommu_top::input_delay_line(std::queue<pipeline_delay_item_t>& q, sc_mutex& mtx,
+                                 sc_event& evt, sc_fifo<iommu_task_t*>& out_fifo,
+                                 uint32_t& dir_q_count, uint32_t& dir_q_peak) {
+    (void)dir_q_peak;
     while (true) {
         iommu_task_t* task = nullptr;
         double due_ns = 0.0;
 
-        input_delay_mtx.lock();
-        while (input_delay_queue.empty()) {
-            input_delay_mtx.unlock();
-            wait(input_delay_event);
-            input_delay_mtx.lock();
+        mtx.lock();
+        while (q.empty()) {
+            mtx.unlock();
+            wait(evt);
+            mtx.lock();
         }
-        task = input_delay_queue.front().task;
-        due_ns = input_delay_queue.front().due_ns;
-        input_delay_queue.pop();
-        input_delay_mtx.unlock();
+        task = q.front().task;
+        due_ns = q.front().due_ns;
+        q.pop();
+        mtx.unlock();
+        // [STAT需求1-诊断] 入口未决队列积压 -1 (离开延时线, 即将写入 inbound_fifo_r/w)
+        input_q_sample_before_change();
+        if (input_q_count > 0) input_q_count--;
+        if (dir_q_count > 0) dir_q_count--;
 
         double now_ns = sc_time_stamp().to_seconds() * 1e9;
         if (due_ns > now_ns) wait(due_ns - now_ns, SC_NS);
 
-        inbound_fifo.write(task);
+        out_fifo.write(task);
 #if TEST_CFG_MULTI_DEVICE_SCENE
         --md_trace.input_pending;
         md_trace.progress();
 #endif
     }
+}
+
+void iommu_top::input_delay_thread_r() {
+    input_delay_line(input_delay_queue_r, input_delay_mtx_r, input_delay_event_r,
+                     inbound_fifo_r, input_q_r_count, input_q_r_peak);
+}
+
+void iommu_top::input_delay_thread_w() {
+    input_delay_line(input_delay_queue_w, input_delay_mtx_w, input_delay_event_w,
+                     inbound_fifo_w, input_q_w_count, input_q_w_peak);
 }
 
 /**********************************************/
@@ -628,9 +1448,18 @@ void iommu_top::send_response_to_initiator(iommu_task_t* task) {
     md_trace.stamp(task->task_id, iommu_md::Point::RESPONSE);
 #endif
     // Send nb_transport_bw to notify initiator
+    // [读写端口分离] 响应按任务方向从对应端口返回: 写->写口, 读->读口。
     tlm::tlm_phase phase = tlm::BEGIN_RESP;
     sc_time delay = SC_ZERO_TIME;
+#if TEST_CFG_SPLIT_RW_PORTS
+    if (task->read_writeAMO == WRITE) {
+        axi_slave_from_pcie_noc_0w_socket->nb_transport_bw(*trans, phase, delay);
+    } else {
+        axi_slave_from_pcie_noc_0_socket->nb_transport_bw(*trans, phase, delay);
+    }
+#else
     axi_slave_from_pcie_noc_0_socket->nb_transport_bw(*trans, phase, delay);
+#endif
 }
 
 /**********************************************/
@@ -874,7 +1703,7 @@ bool iommu_top::md_quiescent() const {
         if (!reorder_write_order_dev[d].empty()) return false;
 #endif
     const sc_fifo<iommu_task_t*>* task_fifos[] = {
-        &inbound_fifo, &parser_to_collector_fifo, &collector_to_xdtw_dc_fifo, &collector_to_xdtw_pc_fifo,
+        &inbound_fifo_r, &inbound_fifo_w, &parser_to_collector_fifo, &collector_to_xdtw_dc_fifo, &collector_to_xdtw_pc_fifo,
         &collector_to_msipt_cache_query_fifo, &collector_to_fault_fifo, &xdtw_to_collector_fifo,
         &pt_cache_to_ptw_fifo, &ptw_to_pt_cache_fifo, &pt_cache_to_fwd_fifo,
         &msipt_cache_to_msiptw_fifo, &msiptw_to_msipt_cache_fifo, &msipt_cache_to_fwd_fifo, &ptw_response_fifo};
@@ -947,6 +1776,9 @@ void iommu_top::print_cache_statistics() {
 
     // [多RAM] PT Cache 多 RAM 统计报告
     cache_sub.print_pt_multi_ram_report();
+
+    // [STAT需求1] IOMMU 内部并发 4KB 页统计(每设备 + 全设备)
+    print_4kb_concurrency_report();
 
     // [dedup多RAM] 去重Cache 多 RAM 统计报告
     cache_sub.print_dedup_multi_ram_report();
@@ -1499,9 +2331,26 @@ void iommu_top::print_cache_statistics() {
         double slave0_bw_GBs  = (double)slave_0_total_bytes  / sim_time_sec / 1e9;
         double master0_bw_GBs = (double)master_0_total_bytes / sim_time_sec / 1e9;
         double master1_bw_GBs = (double)master_1_total_bytes / sim_time_sec / 1e9;
+#if TEST_CFG_SPLIT_RW_PORTS
+        // [读写端口分离] 读口/写口入口带宽分开统计(每端口峰值 64GB/s)
+        const double peak_port_GBs = AXI_SLAVE_PORT_BW_MBPS / 8000.0;
+        double slaver_bw_GBs = (double)slave_0_total_bytes  / sim_time_sec / 1e9;
+        double slavew_bw_GBs = (double)slave_0w_total_bytes / sim_time_sec / 1e9;
+        printf("  slave_0r (读口入口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)slave_0_total_bytes, slaver_bw_GBs, peak_port_GBs,
+               slaver_bw_GBs / peak_port_GBs * 100.0);
+        printf("  slave_0w (写口入口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)slave_0w_total_bytes, slavew_bw_GBs, peak_port_GBs,
+               slavew_bw_GBs / peak_port_GBs * 100.0);
+        printf("  slave_0  (入口合计): %10lu B  avg %.3f GB/s  (聚合peak %.0f GB/s, util %.2f%%)\n",
+               (unsigned long)(slave_0_total_bytes + slave_0w_total_bytes),
+               slaver_bw_GBs + slavew_bw_GBs, peak_slave0_GBs,
+               (slaver_bw_GBs + slavew_bw_GBs) / peak_slave0_GBs * 100.0);
+#else
         printf("  slave_0  (入口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
                (unsigned long)slave_0_total_bytes,  slave0_bw_GBs,  peak_slave0_GBs,
                slave0_bw_GBs  / peak_slave0_GBs  * 100.0);
+#endif
         printf("  master_0 (出口): %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
                (unsigned long)master_0_total_bytes, master0_bw_GBs, peak_master0_GBs,
                master0_bw_GBs / peak_master0_GBs * 100.0);
@@ -1511,14 +2360,97 @@ void iommu_top::print_cache_statistics() {
     }
     printf("============================================\n\n");
 
+    // ============================================================
+    // [STAT] 端口带宽的无稀释口径(稳态窗口 / 注入期)
+    //   上方 "Port Average Bandwidth" 分母 = 全仿真时长(含页表构建/warmup 与 drain),
+    //   故其值明显低于稳态真实带宽。本段用字节快照/窗口长度重算:
+    //     稳态窗口 = 完成数 10%~90% 区间; 注入期 = 本端口首次准入~末次准入。
+    //   校验恒等式: 稳态带宽 = 稳态 IOPS × 窗口内平均包长(含控制包)。
+    // ============================================================
+    printf("========== Port Bandwidth (稳态窗口 / 注入期口径) ==========\n");
+#if TEST_CFG_SPLIT_RW_PORTS
+    {
+        const double peak_port_GBs = AXI_SLAVE_PORT_BW_MBPS / 8000.0;
+        // (1) 稳态窗口(完成数 10%~90%)
+        const double sw_ns = steady_end_ns - steady_start_ns;
+        if (sw_ns > 0.0 && steady_end_slave_r_bytes >= steady_start_slave_r_bytes) {
+            const double rb = (double)(steady_end_slave_r_bytes - steady_start_slave_r_bytes) / sw_ns;
+            const double wb = (double)(steady_end_slave_w_bytes - steady_start_slave_w_bytes) / sw_ns;
+            const double m0 = (double)(steady_end_master0_bytes - steady_start_master0_bytes) / sw_ns;
+            printf("  [稳态窗口 %.1f ns: %.1f~%.1f]\n", sw_ns, steady_start_ns, steady_end_ns);
+            printf("    读口 slave_0r: %10lu B  %.3f GB/s (util %.2f%% of %.0f)\n",
+                   (unsigned long)(steady_end_slave_r_bytes - steady_start_slave_r_bytes),
+                   rb, rb / peak_port_GBs * 100.0, peak_port_GBs);
+            printf("    写口 slave_0w: %10lu B  %.3f GB/s (util %.2f%% of %.0f)\n",
+                   (unsigned long)(steady_end_slave_w_bytes - steady_start_slave_w_bytes),
+                   wb, wb / peak_port_GBs * 100.0, peak_port_GBs);
+            printf("    入口合计:      %.3f GB/s (聚合peak %.0f GB/s, util %.2f%%)\n",
+                   rb + wb, peak_port_GBs * 2.0, (rb + wb) / (peak_port_GBs * 2.0) * 100.0);
+            printf("    出口 master_0: %.3f GB/s\n", m0);
+        } else {
+            printf("  [稳态窗口] 未开启或窗口无效(需 RP 设置 steady_start_count/steady_end_count)\n");
+        }
+        // (2) 注入期(每端口自身的首次~末次准入)
+        const double r_span = iommu_in_r_last_ns - port_first_admit_r_ns;
+        const double w_span = iommu_in_w_last_ns - port_first_admit_w_ns;
+        if (port_first_admit_r_ns > 0.0 && r_span > 0.0) {
+            const double rb = (double)(slave_0_total_bytes - bw_snap_win_r_bytes) / r_span;
+            printf("  [读口注入期 %.1f ns] %lu B -> %.3f GB/s (util %.2f%% of %.0f)\n",
+                   r_span, (unsigned long)(slave_0_total_bytes - bw_snap_win_r_bytes),
+                   rb, rb / peak_port_GBs * 100.0, peak_port_GBs);
+        }
+        if (port_first_admit_w_ns > 0.0 && w_span > 0.0) {
+            const double wb = (double)(slave_0w_total_bytes - bw_snap_win_w_bytes) / w_span;
+            printf("  [写口注入期 %.1f ns] %lu B -> %.3f GB/s (util %.2f%% of %.0f)\n",
+                   w_span, (unsigned long)(slave_0w_total_bytes - bw_snap_win_w_bytes),
+                   wb, wb / peak_port_GBs * 100.0, peak_port_GBs);
+        }
+        const double inj_end = (iommu_in_w_last_ns > iommu_in_r_last_ns)
+                                   ? iommu_in_w_last_ns : iommu_in_r_last_ns;
+        const double inj_span = inj_end - conc_win_start_ns;
+        if (inj_span > 0.0) {
+            const double ib = (double)((slave_0_total_bytes + slave_0w_total_bytes) -
+                                       (bw_snap_win_r_bytes + bw_snap_win_w_bytes)) / inj_span;
+            printf("  [入口合计注入期 %.1f ns] -> %.3f GB/s (聚合peak %.0f GB/s, util %.2f%%)\n",
+                   inj_span, ib, peak_port_GBs * 2.0, ib / (peak_port_GBs * 2.0) * 100.0);
+        }
+        printf("  注: 全程平均口径的分母含 %.0f ns warmup(页表构建+哨兵/预热epoch)与末尾 drain\n",
+               conc_win_start_ns > 0.0 ? conc_win_start_ns : 0.0);
+    }
+#else
+    printf("  (非读写端口分离场景: 入口单口, 全程平均口径见上段)\n");
+#endif
+    printf("==========================================================\n\n");
+
     // IOMMU Input/Output Port Interval Statistics
     printf("========== IOMMU Port Task Interval Statistics ==========\n");
-    printf("  Input Port (slave_0, inbound_fifo):\n");
+    printf("  Input Port (slave_0 合计, inbound_fifo_r/w):\n");
     if (iommu_in_interval_count > 0) {
         printf("    Avg input interval:  %.2f ns\n", iommu_in_interval_total_ns / iommu_in_interval_count);
         printf("    Max input interval:  %.2f ns\n", iommu_in_interval_max_ns);
         printf("    Min input interval:  %.2f ns\n", iommu_in_interval_min_ns);
         printf("    Sample count:        %lu\n", (unsigned long)iommu_in_interval_count);
+    } else {
+        printf("    (no samples)\n");
+    }
+    // [读写端口分离] 读口/写口各自的输入间隔
+    printf("  Input Read Port (slave_0r):\n");
+    if (iommu_in_r_interval_count > 0) {
+        printf("    Avg input interval:  %.2f ns\n", iommu_in_r_interval_total_ns / iommu_in_r_interval_count);
+        printf("    Max input interval:  %.2f ns\n", iommu_in_r_interval_max_ns);
+        printf("    Min input interval:  %.2f ns\n",
+               iommu_in_r_interval_min_ns == 999999999.0 ? 0 : iommu_in_r_interval_min_ns);
+        printf("    Sample count:        %lu\n", (unsigned long)iommu_in_r_interval_count);
+    } else {
+        printf("    (no samples)\n");
+    }
+    printf("  Input Write Port (slave_0w):\n");
+    if (iommu_in_w_interval_count > 0) {
+        printf("    Avg input interval:  %.2f ns\n", iommu_in_w_interval_total_ns / iommu_in_w_interval_count);
+        printf("    Max input interval:  %.2f ns\n", iommu_in_w_interval_max_ns);
+        printf("    Min input interval:  %.2f ns\n",
+               iommu_in_w_interval_min_ns == 999999999.0 ? 0 : iommu_in_w_interval_min_ns);
+        printf("    Sample count:        %lu\n", (unsigned long)iommu_in_w_interval_count);
     } else {
         printf("    (no samples)\n");
     }
@@ -1722,6 +2654,302 @@ void iommu_top::print_cache_statistics() {
     printf("  %-30s peak=%4d / max=%4d\n", "Output (master_0):",
            peak_axi_master_0_outstanding,   (int)AXI_MASTER_0_TO_PCIE_NOC_MAX_OUTSTANDING);
     printf("=================================================\n\n");
+
+    // ============================================================
+    // [STAT] 端口准入门控统计 (读写端口分离)
+    //   门控已从 parser 前移到端口: 读口只在 read/global 满时阻塞, 写口只在
+    //   write/global 满时阻塞, 两方向互不交叉。此处输出各口因自身方向满/全局满
+    //   而阻塞的次数与时长, 以及各口准入任务总数; 预期无"另一方向满导致自身阻塞"。
+    // ============================================================
+    printf("========== 端口准入门控统计 (读写端口分离) ==========\n");
+    printf("  门控上限: Global=%d  Read=%d  Write=%d\n",
+           (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+           (int)IOMMU_READ_MAX_OUTSTANDING,
+           (int)IOMMU_WRITE_MAX_OUTSTANDING);
+    printf("  读口(R-PORT) 准入任务总数:  %lu\n", (unsigned long)port_admit_read_total);
+    printf("  写口(W-PORT) 准入任务总数:  %lu\n", (unsigned long)port_admit_write_total);
+    printf("  ---\n");
+    printf("  读口因(读满/全局满)阻塞: %10lu 次, 总时长 %.1f ns (%.3f us), 单次最大 %.1f ns\n",
+           (unsigned long)port_blk_read_cnt, port_blk_read_ns,
+           port_blk_read_ns / 1000.0, port_blk_read_max_ns);
+    printf("  写口因(写满/全局满)阻塞: %10lu 次, 总时长 %.1f ns (%.3f us), 单次最大 %.1f ns\n",
+           (unsigned long)port_blk_write_cnt, port_blk_write_ns,
+           port_blk_write_ns / 1000.0, port_blk_write_max_ns);
+    printf("  读口阻塞占准入比: %.2f%%   写口阻塞占准入比: %.2f%%\n",
+           port_admit_read_total  ? 100.0 * (double)port_blk_read_cnt  / (double)port_admit_read_total  : 0.0,
+           port_admit_write_total ? 100.0 * (double)port_blk_write_cnt / (double)port_admit_write_total : 0.0);
+    printf("  峰值并发(端口准入点): Read=%d/%d  Write=%d/%d  Global=%d/%d\n",
+           peak_iommu_read_outstanding,   (int)IOMMU_READ_MAX_OUTSTANDING,
+           peak_iommu_write_outstanding,  (int)IOMMU_WRITE_MAX_OUTSTANDING,
+           peak_iommu_global_outstanding, (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+    printf("=========================================================\n\n");
+
+    // ============================================================
+    // [STAT] 注入窗口内的读写并发顶满程度 (读写端口分离)
+    //   窗口 = RP 开始注入 -> RP 把全部请求送达端口。
+    //   窗口内 RP 侧始终有请求可发(供给充足), 因此这里的 avg 与
+    //   "顶满时长占比"才是判断"读写是否各自顶满 320"的正确口径。
+    //   配套输出端口节拍占用率与方向失配次数, 用于归因:
+    //     顶满占比高 + 节拍占用低  -> 该方向被 320 额度门控(已达设计上限)
+    //     顶满占比低 + 节拍占用高 -> 该方向受端口逐包节拍(线速)限制
+    // ============================================================
+    printf("========== 注入窗口内读写并发顶满程度 (RP 供给充足口径) ==========\n");
+    {
+        const double win = (conc_win_end_ns > conc_win_start_ns)
+                               ? (conc_win_end_ns - conc_win_start_ns) : 0.0;
+        if (win > 0.0) {
+            const double avg_r = conc_win_area_read_ns   / win;
+            const double avg_w = conc_win_area_write_ns  / win;
+            const double avg_g = conc_win_area_global_ns / win;
+            printf("  注入窗口: %.1f ns (%.3f us)  [%.1f ~ %.1f ns], 采样 %lu 次\n",
+                   win, win / 1000.0, conc_win_start_ns, conc_win_end_ns,
+                   (unsigned long)conc_win_sample_cnt);
+            printf("  %-22s %10s %8s %9s %8s %12s\n",
+                   "项目", "avg(时间加权)", "上限", "avg占比", "peak", "顶满时长占比");
+            printf("  %-22s %10.2f %8d %8.2f%% %8d %11.2f%%\n", "Read  并发",
+                   avg_r, (int)IOMMU_READ_MAX_OUTSTANDING,
+                   avg_r / (double)IOMMU_READ_MAX_OUTSTANDING * 100.0,
+                   peak_iommu_read_outstanding,
+                   conc_win_full_read_ns / win * 100.0);
+            printf("  %-22s %10.2f %8d %8.2f%% %8d %11.2f%%\n", "Write 并发",
+                   avg_w, (int)IOMMU_WRITE_MAX_OUTSTANDING,
+                   avg_w / (double)IOMMU_WRITE_MAX_OUTSTANDING * 100.0,
+                   peak_iommu_write_outstanding,
+                   conc_win_full_write_ns / win * 100.0);
+            printf("  %-22s %10.2f %8d %8.2f%% %8d %11.2f%%\n", "Global 并发",
+                   avg_g, (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+                   avg_g / (double)IOMMU_GLOBAL_MAX_OUTSTANDING * 100.0,
+                   peak_iommu_global_outstanding,
+                   conc_win_full_global_ns / win * 100.0);
+            printf("  ---\n");
+            // 端口占用三分法(节拍/额度门控/空闲), 折算到"该端口自身注入跨度":
+            //   节拍+门控≈100% => 该端口已跑满(约束落在逐包节拍或 320 额度上)
+            //   存在明显空闲   => RP 供给侧未跟上(请求不足)
+            const double r_span = (iommu_in_r_last_ns > port_first_admit_r_ns && port_first_admit_r_ns > 0.0)
+                                      ? (iommu_in_r_last_ns - port_first_admit_r_ns) : 0.0;
+            const double w_span = (iommu_in_w_last_ns > port_first_admit_w_ns && port_first_admit_w_ns > 0.0)
+                                      ? (iommu_in_w_last_ns - port_first_admit_w_ns) : 0.0;
+            const double r_beat = r_span > 0.0 ? port_beat_read_ns  / r_span * 100.0 : 0.0;
+            const double r_blk  = r_span > 0.0 ? port_blk_read_ns   / r_span * 100.0 : 0.0;
+            const double r_idle = r_span > 0.0 ? (r_span - port_beat_read_ns - port_blk_read_ns) / r_span * 100.0 : 0.0;
+            const double w_beat = w_span > 0.0 ? port_beat_write_ns / w_span * 100.0 : 0.0;
+            const double w_blk  = w_span > 0.0 ? port_blk_write_ns  / w_span * 100.0 : 0.0;
+            const double w_idle = w_span > 0.0 ? (w_span - port_beat_write_ns - port_blk_write_ns) / w_span * 100.0 : 0.0;
+            printf("  [端口占用三分法: 节拍(逐包带宽)/门控(等额度)/空闲, 占各自注入跨度]\n");
+            printf("    R口 跨度 %.1f ns [%.1f~%.1f]: 节拍 %.2f%% + 门控 %.2f%% + 空闲 %.2f%%\n",
+                   r_span, port_first_admit_r_ns, iommu_in_r_last_ns, r_beat, r_blk, r_idle);
+            printf("    W口 跨度 %.1f ns [%.1f~%.1f]: 节拍 %.2f%% + 门控 %.2f%% + 空闲 %.2f%%\n",
+                   w_span, port_first_admit_w_ns, iommu_in_w_last_ns, w_beat, w_blk, w_idle);
+            printf("    注: 空闲≈0 即 RP 供给充足; 门控占比高 => 320 额度为主约束; 节拍占比高 => 端口线速为主约束\n");
+            // 顶满程度分级判定(以"顶满时长占比"与主约束类型联合判定)
+            {
+                auto verdict = [](double full_pct, double blk_pct, double beat_pct,
+                                  double idle_pct) -> std::string {
+                    std::string s;
+                    if      (full_pct >= 90.0) s = "顶满320(额度全程门控)";
+                    else if (full_pct >= 50.0) s = "基本顶满320";
+                    else if (full_pct >= 10.0) s = "间歇顶满320";
+                    else                       s = "未顶满320";
+                    if      (idle_pct > 5.0)      s += ", 主约束=RP供给不足(端口有空闲)";
+                    else if (beat_pct >= blk_pct) s += ", 主约束=端口逐包节拍(线速)";
+                    else                          s += ", 主约束=320额度门控";
+                    return s;
+                };
+                const double full_r = conc_win_full_read_ns  / win * 100.0;
+                const double full_w = conc_win_full_write_ns / win * 100.0;
+                printf("  判定 Read  : %s   (顶满时长 %.2f%%)\n",
+                       verdict(full_r, r_blk, r_beat, r_idle).c_str(), full_r);
+                printf("  判定 Write : %s   (顶满时长 %.2f%%)\n",
+                       verdict(full_w, w_blk, w_beat, w_idle).c_str(), full_w);
+                printf("  判定 Global: 顶满时长 %.2f%% (Global<=%d)\n",
+                       conc_win_full_global_ns / win * 100.0, (int)IOMMU_GLOBAL_MAX_OUTSTANDING);
+            }
+            // 双口同时在注入的子窗口 = [两口都已开始, 较早结束的那一口最后一次准入]
+            //   全注入窗口含"某一口已注完、只剩另一口"的尾巴, 会拖低先结束方的平均值,
+            //   故该子窗口才是"读写是否各自顶满 320"的最公平口径。
+            {
+                const double s0 = (port_first_admit_r_ns > port_first_admit_w_ns)
+                                      ? port_first_admit_r_ns : port_first_admit_w_ns;
+                const double s1 = (iommu_in_r_last_ns < iommu_in_w_last_ns)
+                                      ? iommu_in_r_last_ns : iommu_in_w_last_ns;
+                if (s1 > s0 && !conc_win_hist.empty()) {
+                    double ar, aw, ag, fr, fw, fg;
+                    conc_window_slice(s0, s1, ar, aw, ag, fr, fw, fg);
+                    printf("  [双口同时在注入子窗口 %.1f ns: %.1f~%.1f]\n",
+                           s1 - s0, s0, s1);
+                    printf("    %-22s %10.2f %8d %9.2f%% %12.2f%%\n",
+                           "Read  并发", ar, (int)IOMMU_READ_MAX_OUTSTANDING,
+                           ar / (double)IOMMU_READ_MAX_OUTSTANDING * 100.0, fr);
+                    printf("    %-22s %10.2f %8d %9.2f%% %12.2f%%\n",
+                           "Write 并发", aw, (int)IOMMU_WRITE_MAX_OUTSTANDING,
+                           aw / (double)IOMMU_WRITE_MAX_OUTSTANDING * 100.0, fw);
+                    printf("    %-22s %10.2f %8d %9.2f%% %12.2f%%\n",
+                           "Global 并发", ag, (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+                           ag / (double)IOMMU_GLOBAL_MAX_OUTSTANDING * 100.0, fg);
+                    printf("    (列依次: 时间加权avg / 上限 / avg占比 / 顶满时长占比)\n");
+                }
+            }
+            printf("  读口准入 %lu 个任务, 写口准入 %lu 个任务\n",
+                   (unsigned long)port_admit_read_total, (unsigned long)port_admit_write_total);
+            printf("  端口方向校验失配次数(必须=0): %lu\n",
+                   (unsigned long)port_dir_mismatch_cnt);
+        } else {
+            printf("  (窗口未闭合或未打开: 只有使用新 RP 注入流程的场景才有此统计)\n");
+            printf("  读口节拍累计占用 %.1f ns, 写口节拍累计占用 %.1f ns\n",
+                   port_beat_read_ns, port_beat_write_ns);
+            printf("  端口方向校验失配次数(必须=0): %lu\n",
+                   (unsigned long)port_dir_mismatch_cnt);
+        }
+    }
+    printf("====================================================================\n\n");
+
+    // ============================================================
+    // [STAT] Parser 门控快照统计
+    //   验证目标: "读满或写满 -> 后续任务(含另一方向)全部进不来" 是否在稳态持续成立。
+    //   采样口径: parser_thread 每弹出一个 task、方向门控 wait 之前的瞬时并发。
+    // ============================================================
+    printf("========== Parser 门控快照统计 (验证读满/写满队头阻塞) ==========\n");
+    if (parser_recv_total > 0) {
+        const double N = (double)parser_recv_total;
+        printf("  门控上限: Global=%d  Read=%d  Write=%d\n",
+               (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+               (int)IOMMU_READ_MAX_OUTSTANDING,
+               (int)IOMMU_WRITE_MAX_OUTSTANDING);
+        printf("  ---\n");
+        printf("  收到请求总数(弹出):       %lu  (Read=%lu, Write=%lu)\n",
+               (unsigned long)parser_recv_total,
+               (unsigned long)parser_recv_read,
+               (unsigned long)parser_recv_write);
+        printf("  ---\n");
+        printf("  [快照时额度已满的次数与占比]\n");
+        printf("    Read  满(%d):        %10lu  (%6.2f%%)\n",
+               (int)IOMMU_READ_MAX_OUTSTANDING,
+               (unsigned long)parser_snap_read_full,
+               parser_snap_read_full / N * 100.0);
+        printf("    Write 满(%d):        %10lu  (%6.2f%%)\n",
+               (int)IOMMU_WRITE_MAX_OUTSTANDING,
+               (unsigned long)parser_snap_write_full,
+               parser_snap_write_full / N * 100.0);
+        printf("    读满 或 写满:           %10lu  (%6.2f%%)   <-- 用户假设的判据\n",
+               (unsigned long)parser_snap_either_full,
+               parser_snap_either_full / N * 100.0);
+        printf("    读写 同时 满:           %10lu  (%6.2f%%)\n",
+               (unsigned long)parser_snap_both_full,
+               parser_snap_both_full / N * 100.0);
+        printf("    Global满(%d):        %10lu  (%6.2f%%)\n",
+               (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+               (unsigned long)parser_snap_global_full,
+               parser_snap_global_full / N * 100.0);
+        printf("  ---\n");
+        printf("    自身方向已满(必阻塞):   %10lu  (%6.2f%%)\n",
+               (unsigned long)parser_snap_selfdir_full,
+               parser_snap_selfdir_full / N * 100.0);
+        printf("    另一方向满而自身未满:   %10lu  (%6.2f%%)   <-- 额度不对称浪费\n",
+               (unsigned long)parser_snap_otherdir_full,
+               parser_snap_otherdir_full / N * 100.0);
+        printf("  ---\n");
+        printf("  [实际发生阻塞的次数与时长]\n");
+        printf("    因 Read  满而 wait:     %10lu 次\n",
+               (unsigned long)parser_blk_by_read);
+        printf("    因 Write 满而 wait:     %10lu 次\n",
+               (unsigned long)parser_blk_by_write);
+        printf("    因 Global满而 wait:     %10lu 次\n",
+               (unsigned long)parser_blk_by_global);
+        printf("    方向门控阻塞总时长:     %.1f ns (%.3f us)\n",
+               parser_blk_dir_ns, parser_blk_dir_ns / 1000.0);
+        printf("    方向门控单次最大阻塞:   %.1f ns\n", parser_blk_dir_max_ns);
+        printf("    全局门控阻塞总时长:     %.1f ns (%.3f us)\n",
+               parser_blk_global_ns, parser_blk_global_ns / 1000.0);
+        const uint64_t blk_cnt = parser_blk_by_read + parser_blk_by_write;
+        printf("    方向阻塞平均时长:       %.3f ns  (总时长/阻塞次数)\n",
+               blk_cnt > 0 ? parser_blk_dir_ns / (double)blk_cnt : 0.0);
+        printf("    方向阻塞占收到请求比:   %.2f%%  (阻塞次数/请求总数)\n",
+               (double)blk_cnt / N * 100.0);
+        printf("  ---\n");
+        printf("  [Parser 视角的快照平均并发] (按请求数加权, 非时间加权)\n");
+        printf("    Read  avg = %.2f / %d  (%.2f%%)\n",
+               parser_snap_read_sum / N, (int)IOMMU_READ_MAX_OUTSTANDING,
+               parser_snap_read_sum / N / (double)IOMMU_READ_MAX_OUTSTANDING * 100.0);
+        printf("    Write avg = %.2f / %d  (%.2f%%)\n",
+               parser_snap_write_sum / N, (int)IOMMU_WRITE_MAX_OUTSTANDING,
+               parser_snap_write_sum / N / (double)IOMMU_WRITE_MAX_OUTSTANDING * 100.0);
+        printf("    Global avg= %.2f / %d  (%.2f%%)\n",
+               parser_snap_global_sum / N, (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+               parser_snap_global_sum / N / (double)IOMMU_GLOBAL_MAX_OUTSTANDING * 100.0);
+        printf("    Read+Write avg 相加  = %.2f\n",
+               (parser_snap_read_sum + parser_snap_write_sum) / N);
+    } else {
+        printf("  (无采样: parser_recv_total=0)\n");
+    }
+    printf("=========================================================\n\n");
+
+    // ============================================================
+    // [STAT] IOMMU 内部实际并发 - 时间加权面积法
+    //   采样点与 outstanding ++/-- 严格配对:
+    //     ++ 入口: reorder_register_task()
+    //     -- 出口: reorder_output_thread()
+    //   平均并发 = 累计面积 / 采样窗口; 此值即"IOMMU 内部实际在处理的任务并发数"。
+    // ============================================================
+    printf("========== IOMMU 内部实际并发 (时间加权面积法) ==========\n");
+    {
+        double area_r = iommu_conc_area_read_ns;
+        double area_w = iommu_conc_area_write_ns;
+        double area_g = iommu_conc_area_global_ns;
+        double window_ns = 0.0;
+        if (iommu_conc_first_sample_ns >= 0.0) {
+            // 收尾: 加上从上次变化到当前仿真时刻的面积
+            const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+            const double tail = now_ns - iommu_conc_last_change_ns;
+            if (tail > 0.0) {
+                area_r += (double)iommu_read_outstanding   * tail;
+                area_w += (double)iommu_write_outstanding  * tail;
+                area_g += (double)iommu_global_outstanding * tail;
+            }
+            window_ns = now_ns - iommu_conc_first_sample_ns;
+        }
+        if (window_ns > 0.0) {
+            const double avg_r = area_r / window_ns;
+            const double avg_w = area_w / window_ns;
+            const double avg_g = area_g / window_ns;
+            printf("  采样窗口: %.1f ns (%.3f us)   [%.1f ~ %.1f ns]\n",
+                   window_ns, window_ns / 1000.0,
+                   iommu_conc_first_sample_ns, iommu_conc_last_sample_ns);
+            printf("  %-26s %10s %10s %8s %10s\n",
+                   "项目", "时间加权avg", "peak", "上限", "avg利用率");
+            printf("  %-26s %10.2f %10d %8d %9.2f%%\n", "Read  并发(实际在处理)",
+                   avg_r, peak_iommu_read_outstanding,
+                   (int)IOMMU_READ_MAX_OUTSTANDING,
+                   avg_r / (double)IOMMU_READ_MAX_OUTSTANDING * 100.0);
+            printf("  %-26s %10.2f %10d %8d %9.2f%%\n", "Write 并发(实际在处理)",
+                   avg_w, peak_iommu_write_outstanding,
+                   (int)IOMMU_WRITE_MAX_OUTSTANDING,
+                   avg_w / (double)IOMMU_WRITE_MAX_OUTSTANDING * 100.0);
+            printf("  %-26s %10.2f %10d %8d %9.2f%%\n", "Global并发(实际在处理)",
+                   avg_g, peak_iommu_global_outstanding,
+                   (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+                   avg_g / (double)IOMMU_GLOBAL_MAX_OUTSTANDING * 100.0);
+            printf("  ---\n");
+            printf("  Read+Write 相加校验   = %.2f  (Global avg = %.2f, 差 %.4f)\n",
+                   avg_r + avg_w, avg_g, (avg_r + avg_w) - avg_g);
+            printf("  累计面积: read=%.1f  write=%.1f  global=%.1f  (task·ns)\n",
+                   area_r, area_w, area_g);
+            // Little's Law 交叉验证: L = λ × W
+            if (iommu_total_completed > 0 && iommu_e2e_values.size() > 0) {
+                double e2e_sum = 0.0;
+                for (double v : iommu_e2e_values) e2e_sum += v;
+                const double e2e_avg = e2e_sum / (double)iommu_e2e_values.size();
+                const double lambda = (double)iommu_total_completed / window_ns * 1000.0; // M/s
+                printf("  ---\n");
+                printf("  [Little's Law 交叉验证] λ=%.2f M/s, IO_avg_e2e=%.2f ns -> λ×W=%.2f\n",
+                       lambda, e2e_avg, lambda * e2e_avg);
+                printf("    注: IO_e2e 口径为 pop->response(含出口流水线), 比 outstanding\n");
+                printf("        持有区间(admit->release)长, 故 λ×W 会高于实测 Global avg。\n");
+            }
+        } else {
+            printf("  (无采样: window_ns<=0)\n");
+        }
+    }
+    printf("=========================================================\n\n");
 
     // [MONITOR] 阻塞点监控统计报告
     printf("========== [MONITOR] 阻塞点监控统计 ==========\n");

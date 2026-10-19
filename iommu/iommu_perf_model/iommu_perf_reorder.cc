@@ -17,17 +17,21 @@
 
 // ------------------------------------------------------------------
 // reorder_register_task
-//   入口（parser_thread）从 inbound_fifo 读出 task 后调用：
+//   parser_thread 从 inbound_fifo_r/w 轮询弹出 task 后调用：
 //   1) 在 reorder_buf 注册条目（ready=false）
 //   2) 写请求按到达顺序入 reorder_write_order
-//   3) iommu_global_outstanding++
-// 注意：不做反压等待，反压由 parser_thread 在调用本函数前完成。
+//   [读写端口分离] outstanding 计数/时间加权采样/4KB 页入口打点已前移到端口
+//   准入(axi_slave_r/w_nb_transport_fw)，本函数不再 ++；反压门控亦在端口完成。
 // ------------------------------------------------------------------
 void iommu_top::reorder_register_task(iommu_task_t* task) {
     if (!task) return;
 
     bool is_write = (task->read_writeAMO == WRITE);
 
+    // [读写端口分离] outstanding 计数(读/写/全局 ++、峰值更新、时间加权采样
+    //   iommu_sample_concurrency_before_change、以及 4KB 页入口打点 track_4kb_page_in)
+    //   已全部前移到端口准入 axi_slave_r/w_nb_transport_fw(与出口 -- 严格配对)。
+    //   本函数仅负责: reorder_buf 注册条目 + 写请求入保序队列, 不再重复 ++/采样。
     reorder_mtx.lock();
     reorder_entry_t entry;
     entry.task = task;
@@ -41,17 +45,7 @@ void iommu_top::reorder_register_task(iommu_task_t* task) {
 #else
         reorder_write_order.push(task->task_id);
 #endif
-        iommu_write_outstanding++;
-        if (iommu_write_outstanding > peak_iommu_write_outstanding)
-            peak_iommu_write_outstanding = iommu_write_outstanding;
-    } else {
-        iommu_read_outstanding++;
-        if (iommu_read_outstanding > peak_iommu_read_outstanding)
-            peak_iommu_read_outstanding = iommu_read_outstanding;
     }
-    iommu_global_outstanding++;
-    if (iommu_global_outstanding > peak_iommu_global_outstanding)
-        peak_iommu_global_outstanding = iommu_global_outstanding;
     reorder_mtx.unlock();
 
     printf("[REORDER] register task_id=%u, %s, global_outstanding=%d (read=%d, write=%d)\n",
@@ -291,6 +285,10 @@ void iommu_top::reorder_output_thread() {
 #endif
             // 释放 IOMMU 全局 outstanding + 读写分离 outstanding
             reorder_mtx.lock();
+            // [STAT] 出口采样: 在 read/write/global outstanding-- 之前记录旧计数×时长,
+            //   与入口 reorder_register_task() 中 ++ 之前的采样配对。
+            iommu_sample_concurrency_before_change();
+            conc_window_sample();   // [STAT] 注入窗口内并发面积/顶满时长(与入口配对)
             if (iommu_global_outstanding > 0) iommu_global_outstanding--;
             bool task_is_write = (task->read_writeAMO == WRITE);
             if (task_is_write) {
@@ -299,6 +297,9 @@ void iommu_top::reorder_output_thread() {
                 if (iommu_read_outstanding > 0) iommu_read_outstanding--;
             }
             reorder_mtx.unlock();
+            // [STAT需求1] 4KB页并发跟踪-出口: 与 iommu_global_outstanding-- 同点(reorder 释放),
+            //   与入口打点配对, 保证并发页数严格≤outstanding上限。
+            track_4kb_page_out(task);
             iommu_global_outstanding_freed_event.notify(SC_ZERO_TIME);
             if (task_is_write) {
                 iommu_write_outstanding_freed_event.notify(SC_ZERO_TIME);
@@ -347,6 +348,10 @@ void iommu_top::output_delay_thread() {
         // [STAT] IOMMU 完成翻译计数
         iommu_total_completed++;
 
+        // [STAT需求1] 4KB页并发跟踪的出口已移至 reorder 释放点(iommu_global_outstanding-- 处),
+        //   与 outstanding 同口径; output_delay_thread 此处不再重复打点(否则口径为端口->响应,
+        //   会包含无界入口队列而失真)。
+
         // [STAT] 累加端到端延时
         double e2e_ns = (sc_time_stamp() - task->timestamp).to_seconds() * 1e9;
         iommu_total_e2e_latency_ns += e2e_ns;
@@ -374,11 +379,22 @@ void iommu_top::output_delay_thread() {
             iommu_total_completed >= steady_start_count) {
             steady_start_ns = sc_time_stamp().to_seconds() * 1e9;
             ptw_steady_start_completed = ptw_total_completed;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            // [STAT] 同时快照入口/出口字节, 用于算稳态窗口无稀释带宽
+            steady_start_slave_r_bytes  = slave_0_total_bytes;
+            steady_start_slave_w_bytes  = slave_0w_total_bytes;
+            steady_start_master0_bytes  = master_0_total_bytes;
+#endif
         }
         if (steady_end_ns == 0.0 && steady_end_count > 0 &&
             iommu_total_completed >= steady_end_count) {
             steady_end_ns = sc_time_stamp().to_seconds() * 1e9;
             ptw_steady_end_completed = ptw_total_completed;
+#if TEST_CFG_MULTI_DEVICE_SCENE
+            steady_end_slave_r_bytes  = slave_0_total_bytes;
+            steady_end_slave_w_bytes  = slave_0w_total_bytes;
+            steady_end_master0_bytes  = master_0_total_bytes;
+#endif
         }
 
 #if TEST_CFG_MULTI_DEVICE_SCENE

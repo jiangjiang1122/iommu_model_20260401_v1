@@ -1464,6 +1464,24 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
            (unsigned long)dedup_req_lookup_miss_,
            dedup_req_lookup_total_ > 0 ? 100.0 * dedup_req_lookup_hit_ / dedup_req_lookup_total_ : 0.0);
 
+    // [STAT需求2] 去重Cache 有效 cacheline 占用采样(每次 dedup lookup 采样一次)
+    {
+        uint32_t tot_lines = get_dedup_total_lines();
+        uint64_t samples   = get_dedup_valid_sample_count();
+        double   avg_valid = get_dedup_avg_valid_lines();
+        double   avg_req   = get_dedup_avg_req_lines();
+        printf("  [Valid Cacheline Occupancy] (每次 dedup lookup 采样)\n");
+        printf("    Total lines:        %u (sets=%u x ways=%u x rams=%u)\n",
+               tot_lines, get_dedup_num_sets(), get_dedup_num_ways(), dedup_num_rams_);
+        printf("    Lookup samples:     %lu\n", (unsigned long)samples);
+        printf("    Avg valid lines:    %.2f  (%.1f%% of %u)\n",
+               avg_valid, tot_lines > 0 ? 100.0 * avg_valid / tot_lines : 0.0, tot_lines);
+        printf("    Max / Min valid:    %u / %u\n",
+               get_dedup_max_valid_lines(), get_dedup_min_valid_lines());
+        printf("    Avg main-req lines: %.2f  (is_req=1, 其余为预取占位)\n", avg_req);
+        printf("    Final valid lines:  %u\n", get_dedup_valid_line_count());
+    }
+
     // 并发吞吐
     if (window_ns > 0) {
         printf("  [Throughput]\n");
@@ -2196,6 +2214,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 new_entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
                 new_entry.next_index = DEDUP_BUFFER_INVALID_IDX;
                 new_entry.tail_index = DEDUP_BUFFER_INVALID_IDX;  // 非链头
+                new_entry.alloc_src = 2;  // [STAT] 被去重挂起的任务
 
                 dedup_buffer_->entries[tail_idx].next_index = new_idx;
                 dedup_buffer_->entries[head_idx].tail_index = new_idx;  // 仅写 Buffer
@@ -2257,6 +2276,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
                 entry.next_index = DEDUP_BUFFER_INVALID_IDX;
                 entry.tail_index = new_idx;  // 链头自引用
+                entry.alloc_src = 1;  // [STAT] 链头, 由预取占位行(is_req=0)升级而来
 
                 // 升级 dedup_cache 该 line 为主占位
                 line->head_index = new_idx;
@@ -2342,6 +2362,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             entry.task_ptr = static_cast<iommu_task_t*>(req.task_ptr);
             entry.next_index = DEDUP_BUFFER_INVALID_IDX;
             entry.tail_index = head_idx;  // 单 entry, tail=head
+            entry.alloc_src = 0;  // [STAT] 链头, 由去重 MISS 新建
 
             bool insert_success = dedup_cache_->insert(
                 req.gscid, req.pscid, page_iova, head_idx, true /*is_req*/);

@@ -89,6 +89,36 @@ public:
     uint32_t num_sets() const { return num_sets_; }
     uint32_t num_ways() const { return num_ways_; }
 
+    // ============================================================
+    // [STAT需求2] 有效 cacheline 占用数目统计
+    //   目标: 每次查询去重cache时采样当前有效cacheline占用数,
+    //         观察总共 num_sets*num_ways 条 cacheline 是否被占满。
+    //   valid_line_count_ / req_line_count_ 由 insert()/clear_line() 增量维护,
+    //   避免每次查询全扫描阵列; 采样在 lookup() 入口完成。
+    // ============================================================
+    uint32_t total_lines() const { return num_sets_ * num_ways_; }
+    uint32_t valid_line_count() const { return valid_line_count_; }  // 当前有效(V=1)cacheline数
+    uint32_t req_line_count() const { return req_line_count_; }      // 其中主占位(is_req=1)数
+    uint64_t sample_count() const { return sample_count_; }          // lookup 采样次数
+    double   avg_valid_lines() const {
+        return sample_count_ > 0 ? (double)sample_valid_sum_ / (double)sample_count_ : 0.0;
+    }
+    double   avg_req_lines() const {
+        return sample_count_ > 0 ? (double)sample_req_sum_ / (double)sample_count_ : 0.0;
+    }
+    uint32_t max_valid_lines() const { return sample_valid_max_; }
+    uint32_t min_valid_lines() const {
+        return sample_valid_min_ == UINT32_MAX ? 0 : sample_valid_min_;
+    }
+    // 仅清采样累加器(不清 cache 内容): 用于只对测量 epoch 统计
+    void reset_valid_line_stats() {
+        sample_count_     = 0;
+        sample_valid_sum_ = 0;
+        sample_req_sum_   = 0;
+        sample_valid_max_ = 0;
+        sample_valid_min_ = UINT32_MAX;
+    }
+
 private:
     static iova_t align_iova_4k(iova_t iova) {
         return iova & ~static_cast<iova_t>(0xFFF);
@@ -101,6 +131,15 @@ private:
     uint32_t log2_num_rams_ = 0;
     uint32_t sets_per_ram_ = 0;
     std::vector<std::vector<DedupCacheLine>> cache_array_;  // [set][way]
+
+    // [STAT需求2] 有效 cacheline 占用增量计数与查询时采样累加器
+    uint32_t valid_line_count_ = 0;             // 当前 V=1 的 cacheline 数
+    uint32_t req_line_count_   = 0;             // 当前 V=1 & is_req=1 的 cacheline 数
+    uint64_t sample_count_     = 0;             // lookup 采样次数
+    uint64_t sample_valid_sum_ = 0;             // Σ 有效 cacheline 数
+    uint64_t sample_req_sum_   = 0;             // Σ 主占位 cacheline 数
+    uint32_t sample_valid_max_ = 0;             // 有效 cacheline 数峰值
+    uint32_t sample_valid_min_ = UINT32_MAX;    // 有效 cacheline 数谷值
 };
 
 } // namespace iommu

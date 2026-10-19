@@ -60,6 +60,12 @@ class RP_Module : public sc_module {
 public:
     // Initiator socket (master) - to IOMMU target socket
     simple_initiator_socket<RP_Module, 64> axi_master_to_pcie_noc_0_socket;
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] 独立写口 initiator socket, 绑定到 IOMMU 的 axi_slave_from_pcie_noc_0w_socket。
+    //   读口(..._0_socket)专收读请求; 响应处理完全复用 nb_transport_bw(md_response_handler
+    //   按 payload 身份分发, 与端口无关)。
+    simple_initiator_socket<RP_Module, 64> axi_master_to_pcie_noc_0w_socket;
+#endif
 
     // Target socket for ATS responses from IOMMU
     simple_target_socket<RP_Module, 64> axi_slave_to_pcie_noc_0_socket;
@@ -90,6 +96,11 @@ public:
         // Register nb_transport_bw for receiving AT responses from IOMMU
         axi_master_to_pcie_noc_0_socket.register_nb_transport_bw(
             this, &RP_Module::nb_transport_bw);
+#if TEST_CFG_SPLIT_RW_PORTS
+        // [读写端口分离] 写口复用同一 bw 回调(响应按 payload 身份分发, 与端口无关)
+        axi_master_to_pcie_noc_0w_socket.register_nb_transport_bw(
+            this, &RP_Module::nb_transport_bw);
+#endif
 
         // Register b_transport for ATS target socket (receives ATS messages)
         axi_slave_to_pcie_noc_0_socket.register_b_transport(

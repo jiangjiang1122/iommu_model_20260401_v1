@@ -60,6 +60,14 @@ uint32_t DedupCache::hash_function(gscid_t gscid, pscid_t pscid, iova_t iova) co
 }
 
 DedupCacheLine* DedupCache::lookup(gscid_t gscid, pscid_t pscid, iova_t iova) {
+    // [STAT需求2] 每次查询去重cache时, 采样当前有效cacheline的占用数目
+    //   (覆盖主任务查询/预取占位查询/dedup_update 三处调用点)
+    sample_count_++;
+    sample_valid_sum_ += valid_line_count_;
+    sample_req_sum_   += req_line_count_;
+    if (valid_line_count_ > sample_valid_max_) sample_valid_max_ = valid_line_count_;
+    if (valid_line_count_ < sample_valid_min_) sample_valid_min_ = valid_line_count_;
+
     iova_t iova_aligned = align_iova_4k(iova);
     uint32_t set = hash_function(gscid, pscid, iova_aligned);
     for (uint32_t w = 0; w < num_ways_; w++) {
@@ -81,6 +89,12 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
 
     auto write_way = [&](uint32_t w) {
         DedupCacheLine& line = cache_array_[set][w];
+        // [STAT需求2] 有效 cacheline 计数增量维护:
+        //   写入空 way(V=0)      -> valid+1
+        //   覆盖预取占位(V=1&is_req=0) -> valid 不变
+        //   新写入为主占位(is_req=1) -> req+1 (被覆盖者 is_req 必为0, 无需先减)
+        if (!line.valid) valid_line_count_++;
+        if (is_req)      req_line_count_++;
         line.valid = true;
         line.gscid = gscid;
         line.pscid = pscid;
@@ -137,6 +151,11 @@ bool DedupCache::set_has_writable_way(gscid_t gscid, pscid_t pscid, iova_t iova)
 
 void DedupCache::clear_line(DedupCacheLine* line) {
     if (line != nullptr) {
+        // [STAT需求2] 清除前先读旧状态, 同步递减有效/主占位 cacheline 计数
+        if (line->valid) {
+            if (valid_line_count_ > 0) valid_line_count_--;
+            if (line->is_req && req_line_count_ > 0) req_line_count_--;
+        }
         line->clear();
     }
 }
