@@ -321,6 +321,12 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
     MULTIDEV_D ?= 3
     MULTIDEV_PERDEV_WO ?= 1
     DEDUP_ADM ?= 1
+    # [读写端口分离] SPLIT 开关(1=读写双端口双发送进程, 0=旧单端口基线); 读/写发送队列深度(近乎无界)
+    MULTIDEV_MC_SPLIT_RW ?= 1
+    MULTIDEV_MC_RWQ_DEPTH ?= 65536
+    # [DDR页表访问延时] SLINK单趟延时(ns): 一次DDR页表访问 = 前向SLINK + DDR内部100 + 回程SLINK。
+    #   默认50(合计200ns), 与单设备读写分离基线一致。
+    MULTIDEV_MC_SLINK_NS ?= 50
     ifeq ($(filter $(MULTIDEV_MC_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
         $(error MULTIDEV_MC_N must be an integer in 1..16)
     endif
@@ -362,7 +368,10 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
         -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
-        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_MC_LAYOUT_FLAGS)
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTIDEV_MC_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MULTIDEV_MC_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTIDEV_MC_RWQ_DEPTH) $(MULTIDEV_MC_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan)
     # 单设备多通道激励注入: 同一设备(device_id=0/GSCID=1)内 n 路并发通道,
     #   每通道各自在 IOVA 范围内随机选 4KB(组内 8x512B 连续) + 共享 SQ/CQ/MSI 控制包,

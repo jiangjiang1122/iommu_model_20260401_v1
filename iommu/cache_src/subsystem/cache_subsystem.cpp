@@ -454,6 +454,9 @@ void CacheSubsystem::dc_scheduler_thread() {
             trace_task_event("end", "dc_cache", "lookup", req, start, &resp);
             push_fifo(dc_response_fifo, resp);
             
+            // [STAT] DC 单线程串行忙时(含 arbiter+hash+read_set+compare)
+            dc_busy_ns_ += (sc_time_stamp() - start).to_seconds() * 1e9;
+
             // [STAT] DC Cache 查询完成时间间隔统计
             dc_query_total_count_++;
             const double end_ns = sc_time_stamp().to_seconds() * 1e9;
@@ -517,6 +520,28 @@ void CacheSubsystem::pc_scheduler_thread() {
             record_task_completion("pc_cache", start, sc_time_stamp());
             trace_task_event("end", "pc_cache", "lookup", req, start, &resp);
             push_fifo(pc_response_fifo, resp);
+
+            // [STAT] PC 单线程串行忙时/查询间隔
+            //   PC 与 DC 均为单线程单 RAM, 但 PC 每次查询
+            //   = arbiter(1) + hash(1) + read_set(1) + compare(1) = 4ns;
+            //   小包场景每包无条件查一次, 是"每包固定4ns"的直接取证点。
+            {
+                const double pc_end_ns = sc_time_stamp().to_seconds() * 1e9;
+                const double pc_start_ns = start.to_seconds() * 1e9;
+                pc_busy_ns_ += (pc_end_ns - pc_start_ns);
+                pc_query_total_count_++;
+                if (pc_query_last_end_ns_ >= 0.0) {
+                    const double interval = pc_end_ns - pc_query_last_end_ns_;
+                    pc_query_interval_total_ns_ += interval;
+                    if (interval > pc_query_interval_max_ns_)
+                        pc_query_interval_max_ns_ = interval;
+                    if (interval < pc_query_interval_min_ns_)
+                        pc_query_interval_min_ns_ = interval;
+                    pc_query_interval_count_++;
+                }
+                pc_query_last_end_ns_ = pc_end_ns;
+            }
+
             continue;
         }
         wait(pc_invalidate_fifo.data_written_event() |
@@ -591,6 +616,35 @@ void CacheSubsystem::pt_hash_thread() {
 
         // 写目标 RAM FIFO: 满则阻塞(Hash保持忙, 反压 pt_request/pt_update)
         const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+
+        // [STAT] 多 RAM 分配均匀性 / 同 RAM 背靠背冲突监控
+        //   same_ram_streak: 本次目标 RAM 与上一任务相同(潜在被该 RAM 原子段串行限制)
+        //   b2b           : 本 RAM 相邻两次到达间隔 < 本 RAM 原子段延时(真实背靠背排队)
+        {
+            const double ram_atomic_ns =
+                (pt_cache_->config().read_set_latency_cycles +
+                 pt_cache_->config().compare_latency_cycles) *
+                clock_period_.to_seconds() * 1e9;
+            if (pt_last_hash_ram_id_ == static_cast<int>(ram_id))
+                pt_same_ram_streak_cnt_++;
+            pt_last_hash_ram_id_ = static_cast<int>(ram_id);
+
+            if (ram_id < PT_MAX_RAMS) {
+                if (pt_ram_hash_seen_[ram_id]) {
+                    const double gap = wr_start_ns - pt_ram_last_hash_ns_[ram_id];
+                    pt_ram_gap_total_ns_[ram_id] += gap;
+                    pt_ram_gap_count_[ram_id]++;
+                    if (gap < pt_ram_gap_min_ns_[ram_id]) pt_ram_gap_min_ns_[ram_id] = gap;
+                    if (gap > pt_ram_gap_max_ns_[ram_id]) pt_ram_gap_max_ns_[ram_id] = gap;
+                    if (gap < ram_atomic_ns) pt_ram_b2b_cnt_[ram_id]++;
+                } else {
+                    pt_ram_hash_seen_[ram_id] = 1;
+                    pt_ram_gap_min_ns_[ram_id] = 1e18;
+                }
+                pt_ram_last_hash_ns_[ram_id] = wr_start_ns;
+            }
+        }
+
         if (pt_ram_fifo_[ram_id]->num_free() == 0) {
             pt_hash_backpressure_cnt_++;
             printf("[PT_HASH_BP] task_id=%u -> RAM%u FIFO full, hash unit blocked\n",
@@ -1383,6 +1437,102 @@ void CacheSubsystem::print_pt_multi_ram_report() const {
                total_busy / window_ns);
     }
     printf("===============================================\n\n");
+}
+
+// ============================================================
+// [STAT] 串行环节预算表
+//   汇总所有"per-task 串行"环节的 busy/窗口比与单线程理论上限, 并给出
+//   PT Cache 多 RAM 的分布均匀性与同 RAM 背靠背冲突比例, 用于回答:
+//   "128B 小包场景每包固定 4ns 到底卡在哪一级、是否是多 RAM 不均造成"。
+// ============================================================
+void CacheSubsystem::print_serial_stage_budget_report() const {
+    const double window_ns = pt_ram_last_end_ns_ - pt_ram_first_start_ns_;
+    if (window_ns <= 0.0) {
+        printf("\n========== Serial Stage Budget ==========\n");
+        printf("  No window available.\n");
+        printf("========================================\n\n");
+        return;
+    }
+
+    // 各环节窗口可能不同: 统一用 PT 全窗口做分母, 并同时给出各自实际窗口
+    const double dedup_window_ns = dedup_ram_last_end_ns_ - dedup_ram_first_start_ns_;
+    const double walker_window_ns = walker_ram_last_end_ns_ - walker_ram_first_start_ns_;
+
+    // PT / Dedup per-RAM 最大忙时(即最拥堆的那组 RAM 对聚合吞吐的约束)
+    double pt_ram_max_busy = 0.0, dedup_ram_max_busy = 0.0, walker_max_busy = 0.0;
+    uint32_t pt_busiest = 0, dedup_busiest = 0;
+    for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+        if (pt_ram_busy_ns_[i] > pt_ram_max_busy) { pt_ram_max_busy = pt_ram_busy_ns_[i]; pt_busiest = i; }
+    }
+    for (uint32_t i = 0; i < dedup_num_rams_ && i < DEDUP_MAX_RAMS; ++i) {
+        if (dedup_ram_busy_ns_[i] > dedup_ram_max_busy) { dedup_ram_max_busy = dedup_ram_busy_ns_[i]; dedup_busiest = i; }
+    }
+    for (int i = 0; i < WALKER_MAX_WORKERS; ++i) {
+        if (walker_ram_busy_ns_[i] > walker_max_busy) walker_max_busy = walker_ram_busy_ns_[i];
+    }
+
+    printf("\n========== Serial Stage Budget (per-task fixed cost) ==========\n");
+    printf("  Window used:          %.1f ns (PT Cache first-start~last-end)\n", window_ns);
+    printf("  %-36s %10s %12s %10s %10s %12s\n",
+           "Stage", "Tasks", "Busy(ns)", "Busy/Win", "ns/task", "Peak(Mt/s)");
+    printf("  %s\n", std::string(98, '-').c_str());
+
+    struct Row {
+        const char* name;
+        uint64_t tasks;
+        double busy;
+        double win;
+    };
+    const Row rows[] = {
+        {"DC  cache lookup (1 thread)",     dc_query_total_count_, dc_busy_ns_,       window_ns},
+        {"PC  cache lookup (1 thread)",     pc_query_total_count_, pc_busy_ns_,       window_ns},
+        {"PT  cache hash   (1 thread)",     pt_hash_task_count_,   pt_hash_busy_ns_,  window_ns},
+        {"PT  cache RAM    (busiest RAM)",  pt_ram_task_count_[pt_busiest], pt_ram_max_busy, window_ns},
+        {"Dedup hash       (1 thread)",     dedup_hash_task_count_, dedup_hash_busy_ns_, dedup_window_ns},
+        {"Dedup RAM        (busiest RAM)",  dedup_ram_task_count_[dedup_busiest], dedup_ram_max_busy, dedup_window_ns},
+        {"Walker RAM       (busiest worker)", 0, walker_max_busy, walker_window_ns},
+    };
+
+    const char* bottleneck = "none";
+    double bottleneck_ratio = 0.0;
+    for (const auto& r : rows) {
+        const double ratio = (r.win > 0) ? r.busy / r.win : 0.0;
+        const double ns_per_task = (r.tasks > 0) ? r.busy / (double)r.tasks : 0.0;
+        const double peak = (ns_per_task > 0) ? 1000.0 / ns_per_task : 0.0;
+        printf("  %-36s %10lu %12.1f %9.1f%% %10.2f %12.1f\n",
+               r.name, (unsigned long)r.tasks, r.busy, ratio * 100.0, ns_per_task, peak);
+        if (ratio > bottleneck_ratio) { bottleneck_ratio = ratio; bottleneck = r.name; }
+    }
+    printf("  %s\n", std::string(98, '-').c_str());
+    printf("  [Verdict] highest-utilization serial stage: %s (%.1f%% of window)\n",
+           bottleneck, bottleneck_ratio * 100.0);
+    printf("  NOTE: ns/task = Busy/Tasks; Peak = 1000/nspertask = single-thread\n");
+    printf("        capability; Busy/Win approaching 100%% means this stage sets\n");
+    printf("        the per-packet steady-state cadence.\n");
+
+    // ---- PT Cache 多 RAM 分布与同 RAM 背靠背 ----
+    printf("  [PT RAM Distribution & Same-RAM Back-to-Back]\n");
+    printf("    %-4s %10s %8s %12s %12s %14s %8s\n",
+           "RAM", "Tasks", "Share%", "ArrGap_avg", "ArrGap_min", "B2B(<3ns)", "B2B%");
+    uint64_t total_pt = 0;
+    for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) total_pt += pt_ram_task_count_[i];
+    for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+        const uint64_t n = pt_ram_task_count_[i];
+        const double share = (total_pt > 0) ? 100.0 * n / total_pt : 0.0;
+        const double gap_avg = (pt_ram_gap_count_[i] > 0)
+                                   ? pt_ram_gap_total_ns_[i] / pt_ram_gap_count_[i] : 0.0;
+        const double gap_min = (pt_ram_gap_count_[i] > 0) ? pt_ram_gap_min_ns_[i] : 0.0;
+        const double b2b_pct = (pt_ram_gap_count_[i] > 0)
+                                   ? 100.0 * pt_ram_b2b_cnt_[i] / pt_ram_gap_count_[i] : 0.0;
+        printf("    %-4u %10lu %7.2f%% %12.2f %12.2f %14lu %7.2f%%\n",
+               i, (unsigned long)n, share, gap_avg, gap_min,
+               (unsigned long)pt_ram_b2b_cnt_[i], b2b_pct);
+    }
+    const double same_ratio = (pt_hash_task_count_ > 0)
+                                  ? 100.0 * pt_same_ram_streak_cnt_ / pt_hash_task_count_ : 0.0;
+    printf("    Same-RAM-as-previous-task: %lu / %lu (%.2f%%), uniform ideal=25.00%%\n",
+           (unsigned long)pt_same_ram_streak_cnt_, (unsigned long)pt_hash_task_count_, same_ratio);
+    printf("==============================================================\n\n");
 }
 
 // [dedup多RAM] 去重Cache多RAM统计报告: Hash单元/每组RAM利用率/FIFO峰值/预取丢弃

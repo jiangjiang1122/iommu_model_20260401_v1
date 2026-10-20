@@ -31,7 +31,11 @@
     "num_sets": 64,
     "num_ways": 4,
     "replacement": "plru",
-    "read_set_latency_cycles": 1
+    "_comment": "PC query = 2ns, aligned with DC: arbiter0 + hash0 + read_set1 + compare1",
+    "arbiter_latency_cycles": 0,
+    "hash_latency_cycles": 0,
+    "read_set_latency_cycles": 1,
+    "compare_latency_cycles": 1
   },
 
   "msipt_cache": {

@@ -1768,6 +1768,19 @@ void iommu_top::print_cache_statistics() {
         printf("==========================================================\n\n");
     }
 
+    // [STAT] PC Cache 查询完成时间间隔统计(与DC同口径)
+    {
+        printf("========== PC Cache Query Interval Statistics ==========\n");
+        printf("  Total PC queries:      %lu\n", (unsigned long)cache_sub.get_pc_query_total_count());
+        printf("  Interval samples:      %lu\n", (unsigned long)cache_sub.get_pc_query_interval_count());
+        if (cache_sub.get_pc_query_interval_count() > 0) {
+            printf("  Avg query interval:    %.2f ns\n", cache_sub.get_pc_query_interval_avg_ns());
+            printf("  Max query interval:    %.2f ns\n", cache_sub.get_pc_query_interval_max_ns());
+            printf("  Min query interval:    %.2f ns\n", cache_sub.get_pc_query_interval_min_ns());
+        }
+        printf("==========================================================\n\n");
+    }
+
     // [STAT] 32任务组REQUEST排队/执行延时统计
     cache_sub.print_pt_group_report();
 
@@ -1776,6 +1789,9 @@ void iommu_top::print_cache_statistics() {
 
     // [多RAM] PT Cache 多 RAM 统计报告
     cache_sub.print_pt_multi_ram_report();
+
+    // [STAT] 串行环节预算表(每包固定延时归属/多RAM分布与同RAM背靠背)
+    cache_sub.print_serial_stage_budget_report();
 
     // [STAT需求1] IOMMU 内部并发 4KB 页统计(每设备 + 全设备)
     print_4kb_concurrency_report();

@@ -64,9 +64,12 @@ def main():
             ddr_pending = None
             continue
 
-        g = re.search(r'\[MD_RP\] epoch=3 did=(\d+) injected=(\d+) completed=(\d+)', ln)
+        # 兼容 [MD_RP](multidev, 带 completed=) 与 [MDMC_RP](multidev_mc, 仅 injected, 逐设备 completed==injected)
+        g = re.search(r'\[MD(?:MC)?_RP\] epoch=3 did=(\d+) injected=(\d+)(?:\s+completed=(\d+))?', ln)
         if g:
-            perdev.append((int(g.group(1)), int(g.group(2)), int(g.group(3))))
+            inj = int(g.group(2))
+            comp = int(g.group(3)) if g.group(3) else inj
+            perdev.append((int(g.group(1)), inj, comp))
             continue
         g = re.search(r'\[MD_FAIRNESS\] (ALL|DATA) Mreq/s=([\d.]+) Jain=([\d.]+)', ln)
         if g:

@@ -186,6 +186,17 @@ public:
     uint64_t get_dc_query_interval_count() const { return dc_query_interval_count_; }
     uint64_t get_dc_query_total_count() const { return dc_query_total_count_; }
 
+    // [STAT] PC Cache 查询间隔统计访问器(与DC同口径; 用于小包每包4ns串行节拍取证)
+    double   get_pc_query_interval_avg_ns() const { return pc_query_interval_count_ > 0 ? pc_query_interval_total_ns_ / pc_query_interval_count_ : 0.0; }
+    double   get_pc_query_interval_max_ns() const { return pc_query_interval_max_ns_; }
+    double   get_pc_query_interval_min_ns() const { return pc_query_interval_min_ns_ == 999999999.0 ? 0.0 : pc_query_interval_min_ns_; }
+    uint64_t get_pc_query_interval_count() const { return pc_query_interval_count_; }
+    uint64_t get_pc_query_total_count() const { return pc_query_total_count_; }
+
+    // [STAT] 串行环节预算表: 各单线程/per-RAM串行环节的 busy/窗口/ns-per-task/理论上限
+    //   用于回答"每包固定延时瓶颈落在哪一级"，避免只看占比不看绝对能力。
+    void print_serial_stage_budget_report() const;
+
 private:
 #if TEST_CFG_MULTI_DEVICE_SCENE
     iommu_md::Trace* md_trace_ = nullptr;
@@ -428,11 +439,42 @@ private:
     double   dc_query_interval_min_ns_ = 999999999.0; // 最小间隔(ns)
     uint64_t dc_query_interval_count_ = 0;      // 间隔采样次数
     uint64_t dc_query_total_count_ = 0;         // DC查询总次数
+    double   dc_busy_ns_ = 0.0;                 // DC单线程串行执行总时长(含arbiter+hash+read_set+compare)
+
+    // ============================================================
+    // [STAT] PC Cache 查询完成时间间隔/忙时统计
+    //   PC Cache 与 DC 同为单 RAM 单调度线程, 但每查询含
+    //   arbiter(1)+hash(1)+read_set(1)+compare(1)=4ns; 小包场景每包无条件
+    //   查询一次, 是"每包固定4ns"的主要嫌疑环节。
+    // ============================================================
+    double   pc_query_last_end_ns_ = -1.0;
+    double   pc_query_interval_total_ns_ = 0.0;
+    double   pc_query_interval_max_ns_ = 0.0;
+    double   pc_query_interval_min_ns_ = 999999999.0;
+    uint64_t pc_query_interval_count_ = 0;
+    uint64_t pc_query_total_count_ = 0;
+    double   pc_busy_ns_ = 0.0;
+
+    // ============================================================
+    // [STAT] PT Cache 多 RAM 到达模式统计
+    //   回答"连续两个包是否落在同一 RAM 而被原子段串行卡住":
+    //   - same_ram_streak: 本次 hash 目标 RAM == 上一任务目标 RAM 的次数
+    //   - b2b: 本 RAM 相邻两次到达间隔 < 本 RAM 原子段延时(即真的背靠背排队)
+    // ============================================================
+    static constexpr uint32_t PT_MAX_RAMS = 16;
+    int      pt_last_hash_ram_id_ = -1;
+    uint64_t pt_same_ram_streak_cnt_ = 0;
+    uint64_t pt_ram_hash_seen_[PT_MAX_RAMS] = {};
+    double   pt_ram_last_hash_ns_[PT_MAX_RAMS] = {};
+    uint64_t pt_ram_gap_count_[PT_MAX_RAMS] = {};
+    double   pt_ram_gap_total_ns_[PT_MAX_RAMS] = {};
+    double   pt_ram_gap_min_ns_[PT_MAX_RAMS] = {};
+    double   pt_ram_gap_max_ns_[PT_MAX_RAMS] = {};
+    uint64_t pt_ram_b2b_cnt_[PT_MAX_RAMS] = {};
 
     // ============================================================
     // [多RAM] PT Cache 多 RAM 方案状态与统计
     // ============================================================
-    static constexpr uint32_t PT_MAX_RAMS = 16;
     uint32_t pt_num_rams_ = 1;
     // 每组 RAM 前置 FIFO (深度 ram_fifo_depth, 满则反压 Hash 单元)
     std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> pt_ram_fifo_;
