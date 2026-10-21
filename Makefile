@@ -391,6 +391,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
     # [DDR页表访问延时] SLINK单趟延时(ns): 一次DDR页表访问 = 前向SLINK + DDR内部100 + 回程SLINK。
     #   默认50(合计200ns); 传100则合计300ns(100+100+100), 观测页表访问延时上升对性能的影响。
     MULTICHAN_SLINK_NS ?= 50
+    # [DDR内部访问延时] DDR内部固定延时(ns): 与SLINK独立叠加, 一次DDR页表访问 = SLINK + DDR内部 + SLINK。
+    #   默认100(合计200ns); 传200则合计300ns(50+200+50), 观测DDR颗粒延时上升对性能的影响。
+    MULTICHAN_DDR_NS ?= 100
     # [负载口径] fixed_total(默认)=全部通道合计 MULTICHAN_GROUPS(909) 组 + 1 tail MSI = 10000 包
     #            (与单流基线逐包同量), 用于对比"多通道交织"对性能的影响; 工作集小(建表~3.5k页),
     #            可规避 per_channel 大工作集触发的 IOMMU 既有"两阶段预取+S2 Walker Cache大页"缺陷;
@@ -447,7 +450,8 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
         -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
-        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_LAYOUT_FLAGS)
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MULTICHAN_DDR_NS) $(MULTICHAN_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     # [MPS/MRRS=128B 小包场景] 在 rand4k_msi_mix_multichan 基线(单设备/8通道/512MB/DDR页表200ns/
     #   PTW64/Buf320/Global640/Read320/Write320/ADM1/D3, 稳态ALL=250.43 Mreq/s)之上,

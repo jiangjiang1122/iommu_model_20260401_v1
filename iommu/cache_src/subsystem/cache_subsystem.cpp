@@ -2431,6 +2431,10 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 // 升级 dedup_cache 该 line 为主占位
                 line->head_index = new_idx;
                 line->is_req = true;
+                // [FIX-UAF] 升级路径的owner挂buffer等待(不发PTW), 可被任意组的
+                //   该页翻译结果flush("预取路径受益")
+                line->owner_task_id = req.task_id;
+                line->owner_suspended = true;
 
                 resp.dedup_head_index = new_idx;
                 resp.dedup_new_index = new_idx;
@@ -2515,7 +2519,8 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             entry.alloc_src = 0;  // [STAT] 链头, 由去重 MISS 新建
 
             bool insert_success = dedup_cache_->insert(
-                req.gscid, req.pscid, page_iova, head_idx, true /*is_req*/);
+                req.gscid, req.pscid, page_iova, head_idx, true /*is_req*/,
+                req.task_id, false /*owner行走中, 仅自己的组可flush*/);
 
             if (insert_success) {
                 resp.hit = false;
@@ -2602,6 +2607,22 @@ void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
         // 预取占位, Buffer 未记录实际任务 -> 直接清除
         dedup_cache_->clear_line(line);
         printf("[DEDUP_UPDATE] iova=0x%lx -> prefetch placeholder cleared (no waiting task)\n", (unsigned long)page_iova);
+        fflush(stdout);
+        return;
+    }
+
+    // [FIX-UAF] 主占位owner竞态防护: fresh MISS的owner正在PTW行走(可能已建预取组),
+    //   其Buffer链只能由owner自己的组(update.task_id==owner_task_id)flush;
+    //   外国组的预取结果update(同页, 如他组预取页恰好等于本页)若提前flush,
+    //   会转发/释放仍在PTW使用的task对象, 导致其预取组main_task悬垂(use-after-free,
+    //   曾引发agg_flush"两阶段聚合结果PTE无效"确定性崩溃)。
+    //   挂起等待的owner(owner_suspended=true, 升级路径)不受此限, 由任意组的
+    //   该页翻译结果释放("预取路径受益")。
+    //   跳过时不flush也不clear: 占位须保留给owner自己的组, 否则链上任务永不被释放。
+    if (!line->owner_suspended && line->owner_task_id != 0 &&
+        line->owner_task_id != static_cast<uint32_t>(upd.task_id)) {
+        printf("[DEDUP_UPDATE] iova=0x%lx -> SKIP foreign update (owner task_id=%u walking in PTW, upd from task_id=%llu)\n",
+               (unsigned long)page_iova, line->owner_task_id, (unsigned long long)upd.task_id);
         fflush(stdout);
         return;
     }

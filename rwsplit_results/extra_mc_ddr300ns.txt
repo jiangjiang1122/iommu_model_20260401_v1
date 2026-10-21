@@ -1,0 +1,148 @@
+########## mc_ddr300ns : /tmp/sim_mc_ddr300ns.log ##########
+===== Steady IOPS =====
+  Steady IOPS:          218.55 M trans/s  (window: #1144 ~ #9144, 36604.2 ns)
+  Theory peak:          250.00 M trans/s  (128 GB/s / 512B)
+  Efficiency:           87.4%
+  ---
+  [需求1] 稳态窗口内端口注入平均间隔 (window [27403.5, 64007.7] ns):
+    输入端口平均间隔(稳态): 4.781 ns  (samples=7658)
+    输出端口平均间隔(稳态): 4.575 ns  (samples=8001)
+  ---
+  PTW Steady IOPS:      80.56 M tasks/s  (window: #1144 ~ #9144, 2949 tasks)
+  PTW Theory peak:      5.39 M tasks/s  (4 concurrent / 742ns avg)
+====================================================
+
+========== Port Average Bandwidth ==========
+  slave_0r (读口入口):    1906080 B  avg 26.961 GB/s  (peak 64 GB/s, util 42.13%)
+  slave_0w (写口入口):    1874440 B  avg 26.513 GB/s  (peak 64 GB/s, util 41.43%)
+  slave_0  (入口合计):    3780520 B  avg 53.474 GB/s  (聚合peak 128 GB/s, util 41.78%)
+  master_0 (出口):    3780520 B  avg 53.474 GB/s  (peak 128 GB/s, util 41.78%)
+  master_1 (DDR):       91216 B  avg 1.290 GB/s  (peak 16 GB/s, util 8.06%)
+============================================
+
+===== Port Average Bandwidth =====
+========== Port Average Bandwidth ==========
+  slave_0r (读口入口):    1906080 B  avg 26.961 GB/s  (peak 64 GB/s, util 42.13%)
+  slave_0w (写口入口):    1874440 B  avg 26.513 GB/s  (peak 64 GB/s, util 41.43%)
+  slave_0  (入口合计):    3780520 B  avg 53.474 GB/s  (聚合peak 128 GB/s, util 41.78%)
+  master_0 (出口):    3780520 B  avg 53.474 GB/s  (peak 128 GB/s, util 41.78%)
+  master_1 (DDR):       91216 B  avg 1.290 GB/s  (peak 16 GB/s, util 8.06%)
+============================================
+
+========== Port Bandwidth (稳态窗口 / 注入期口径) ==========
+  [稳态窗口 36604.2 ns: 27403.5~64007.7]
+    读口 slave_0r:    1507232 B  41.176 GB/s (util 64.34% of 64)
+    写口 slave_0w:    1385600 B  37.854 GB/s (util 59.15% of 64)
+    入口合计:      79.030 GB/s (聚合peak 128 GB/s, util 61.74%)
+    出口 master_0: 83.086 GB/s
+  [读口注入期 34026.5 ns] 1896864 B -> 55.747 GB/s (util 87.10% of 64)
+  [写口注入期 49285.7 ns] 1873672 B -> 38.017 GB/s (util 59.40% of 64)
+  [入口合计注入期 49286.7 ns] -> 76.502 GB/s (聚合peak 128 GB/s, util 59.77%)
+===== Port Bandwidth (稳态窗口 =====
+========== Port Bandwidth (稳态窗口 / 注入期口径) ==========
+  [稳态窗口 36604.2 ns: 27403.5~64007.7]
+    读口 slave_0r:    1507232 B  41.176 GB/s (util 64.34% of 64)
+    写口 slave_0w:    1385600 B  37.854 GB/s (util 59.15% of 64)
+    入口合计:      79.030 GB/s (聚合peak 128 GB/s, util 61.74%)
+    出口 master_0: 83.086 GB/s
+  [读口注入期 34026.5 ns] 1896864 B -> 55.747 GB/s (util 87.10% of 64)
+  [写口注入期 49285.7 ns] 1873672 B -> 38.017 GB/s (util 59.40% of 64)
+  [入口合计注入期 49286.7 ns] -> 76.502 GB/s (聚合peak 128 GB/s, util 59.77%)
+  注: 全程平均口径的分母含 19478 ns warmup(页表构建+哨兵/预热epoch)与末尾 drain
+==========================================================
+
+========== IOMMU Port Task Interval Statistics ==========
+  Input Port (slave_0 合计, inbound_fifo_r/w):
+    Avg input interval:  6.70 ns
+    Max input interval:  9473.00 ns
+    Min input interval:  0.00 ns
+===== IOMMU Port Task Interval Statistics =====
+========== IOMMU Port Task Interval Statistics ==========
+  Input Port (slave_0 合计, inbound_fifo_r/w):
+    Avg input interval:  6.70 ns
+    Max input interval:  9473.00 ns
+    Min input interval:  0.00 ns
+    Sample count:        10143
+  Input Read Port (slave_0r):
+    Avg input interval:  11.44 ns
+    Max input interval:  9473.00 ns
+    Min input interval:  1.00 ns
+    Sample count:        4604
+  Input Write Port (slave_0w):
+    Avg input interval:  10.53 ns
+    Max input interval:  8939.00 ns
+    Min input interval:  1.00 ns
+    Sample count:        5538
+  Output Port (master_0, response):
+===== IOMMU 4KB Page Concurrency Statistics =====
+========== IOMMU 4KB Page Concurrency Statistics (512B data tasks; parser-admit->reorder-release span, bounded by outstanding cap) ==========
+  Sampling window:      51220.0 ns (51.220 us)
+  Tracked devices:      1
+    DID   AvgConc(pages) PeakConc   InTasks    OutTasks   DistinctPg Residual  NoMatch  
+    0     53.679         79         7272       7272       907        0         0        
+    ---------------------------------------------------------------------------
+    TOTAL 53.679         79         7272       7272       907        0         0        
+  Cross-check (Σ per-device avg): 53.679 pages
+  Max single-device peak:         79 pages
+  Dedup Cache capacity:           256 cachelines (sets=64 x ways=4)
+  AvgConc / Dedup capacity:       20.97%  (并发4KB页数 vs 去重Cache总行数)
+  PeakConc / Dedup capacity:      30.86%
+  ----------------------------------------------------------------------
+  Input-queue backlog (input_delay_queue_r/w, 位于端口准入之后、parser弹出之前):
+    peak tasks queued:              126  (read 39 / write 95)
+    time-weighted avg tasks queued: 28.3  (read 12.7 / write 15.5)
+    端口准入并发上限: Global=640 (peak used 640), Read=320, Write=320
+===== Valid Cacheline Occupancy =====
+  [Valid Cacheline Occupancy] (每次 dedup lookup 采样)
+    Total lines:        256 (sets=64 x ways=4 x rams=4)
+    Lookup samples:     13360
+    Avg valid lines:    132.75  (51.9% of 256)
+    Max / Min valid:    185 / 0
+    Avg main-req lines: 37.65  (is_req=1, 其余为预取占位)
+    Final valid lines:  0
+  [Throughput]
+    Results/cycle:       0.197  (total_tasks / window, clock=1ns)
+    Aggregate busy/win:  0.98  (>1 means cross-RAM concurrency)
+==================================================
+
+
+========== Walker Cache Multi-RAM Report ==========
+  Config:               num_rams=4/subtable, workers=12 (三级子表独立分RAM), ram_fifo_depth=8
+  Front lookups:        0 (前置查询总数)
+  [Hash Unit]
+===== PTW Steady IOPS =====
+  PTW Steady IOPS:      80.56 M tasks/s  (window: #1144 ~ #9144, 2949 tasks)
+  PTW Theory peak:      5.39 M tasks/s  (4 concurrent / 742ns avg)
+====================================================
+
+========== Port Average Bandwidth ==========
+  slave_0r (读口入口):    1906080 B  avg 26.961 GB/s  (peak 64 GB/s, util 42.13%)
+  slave_0w (写口入口):    1874440 B  avg 26.513 GB/s  (peak 64 GB/s, util 41.43%)
+  slave_0  (入口合计):    3780520 B  avg 53.474 GB/s  (聚合peak 128 GB/s, util 41.78%)
+  master_0 (出口):    3780520 B  avg 53.474 GB/s  (peak 128 GB/s, util 41.78%)
+  master_1 (DDR):       91216 B  avg 1.290 GB/s  (peak 16 GB/s, util 8.06%)
+============================================
+
+========== Port Bandwidth (稳态窗口 / 注入期口径) ==========
+  [稳态窗口 36604.2 ns: 27403.5~64007.7]
+    读口 slave_0r:    1507232 B  41.176 GB/s (util 64.34% of 64)
+    写口 slave_0w:    1385600 B  37.854 GB/s (util 59.15% of 64)
+    入口合计:      79.030 GB/s (聚合peak 128 GB/s, util 61.74%)
+===== IOMMU / PTW Throughput (IOPS) =====
+========== IOMMU / PTW Throughput (IOPS) ==========
+  Sim Time:             70.698 us
+  IOMMU Completed:      10144 trans
+  IOMMU IOPS:           143.48 M trans/s
+  PTW  Completed:       3608 tasks
+    Main tasks:         908
+    Prefetch tasks:     2700
+    Hugepage main:      0  (page_sz>4KB, prefetch spawn skipped)
+    Hugepage PF skip:   0  (prefetch spawns suppressed)
+    Invalid result slots: 0  (D per hugepage group, placeholder-clear only)
+    Front LEAF hits:    0  (short-circuit complete, 0 DDR)
+  PTW  IOPS:            51.03 M tasks/s
+  PTW  avg DDR reads:   2.40 reads/task
+  PTW  avg exec lat:    436.8 ns  (0.437 us)
+  ---
+  PTW DDR access detail:
+    Max DDR reads/task:  24

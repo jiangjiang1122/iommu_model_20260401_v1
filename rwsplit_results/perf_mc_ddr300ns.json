@@ -1,0 +1,136 @@
+{
+  "metrics": {
+    "fairness_ALL": [
+      218.554,
+      1.0
+    ],
+    "fairness_DATA": [
+      161.375,
+      1.0
+    ],
+    "buf_size": 320.0,
+    "buf_peak": 320.0,
+    "buf_avg_occ": 184.45,
+    "buf_avg_pct": 57.64,
+    "hold_avg_ns": 1759.6,
+    "hold_max_ns": 8109.0,
+    "hold_min_ns": 5.0,
+    "cache_dc_cache": [
+      10144,
+      10046,
+      98,
+      0.9903
+    ],
+    "cache_msipt_cache": [
+      974,
+      935,
+      39,
+      0.96
+    ],
+    "cache_pc_cache": [
+      10144,
+      0,
+      10144,
+      0.0
+    ],
+    "cache_pt_cache": [
+      10144,
+      2933,
+      7211,
+      0.2891
+    ],
+    "cache_walker_ptw_c2": [
+      283,
+      280,
+      3,
+      0.9894
+    ],
+    "cache_walker_ptw_c3": [
+      908,
+      625,
+      283,
+      0.6883
+    ],
+    "dedup_buffull_bypass": 0,
+    "dedup_conflict": 0,
+    "dedup_bypass": 0,
+    "dedup_lookups": 7211,
+    "dedup_hit": 87.41,
+    "vs_hit": 99.7,
+    "vs_c3": [
+      625,
+      908,
+      68.8
+    ],
+    "vs_c2": [
+      280,
+      908,
+      30.8
+    ],
+    "s2_hit": 99.9,
+    "s2_c3": [
+      1,
+      3607,
+      0.0
+    ],
+    "s2_c2": [
+      3604,
+      3607,
+      99.9
+    ],
+    "sim_time_us": 70.698,
+    "iommu_completed": 10144.0,
+    "iommu_iops": 143.48,
+    "ptw_completed": 3608.0,
+    "ptw_main": 908.0,
+    "ptw_prefetch": 2700.0,
+    "ptw_iops": 51.03,
+    "ptw_avg_ddr_all": 2.4,
+    "ptw_inject_interval_ns": 74.23,
+    "ptw_output_interval_ns": 67.24,
+    "ptw_main_ddr": 3.61,
+    "ptw_pf_ddr": 2.0,
+    "ptw_groups": 904.0,
+    "ptw_group_exec_avg_ns": 1734.4,
+    "e2e_avg_ns": 2668.8,
+    "e2e_max_ns": 8821.0,
+    "in_interval_ns": 10.53,
+    "out_interval_ns": 6.03,
+    "ctrl_total": 2856,
+    "ctrl_pt_hits": 2854,
+    "pt_ctrl_hit": 99.93,
+    "iommu_input_total": 10784,
+    "ptw_ratio_all": 35.57,
+    "ptw_conc_avg": 22.729,
+    "ptw_conc_peak": 55,
+    "ptw_conc_limit": 64,
+    "ptw_conc_util": 35.51,
+    "ptw_exec_all_avg_ns": 436.79,
+    "ptw_exec_main_avg_ns": 1735.6,
+    "conc_global": [
+      640,
+      640
+    ],
+    "conc_read": [
+      320,
+      320
+    ],
+    "conc_write": [
+      320,
+      320
+    ],
+    "conc_ptw": [
+      55,
+      64
+    ],
+    "total_data_tasks": 7288,
+    "dedup_conflict_ratio_pct": 0.0,
+    "dedup_bypass_ratio_pct": 0.0,
+    "ptw_to_data_ratio_pct": 49.50603732162459,
+    "pt_data_hits": 79,
+    "pt_data_hit_pct": 1.08397365532382,
+    "ptw_main_bypass": 0,
+    "ptw_main_normal": 908.0
+  },
+  "per_device": []
+}

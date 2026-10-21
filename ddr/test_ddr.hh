@@ -18,7 +18,11 @@ class DDR_Module : public sc_module {
 public:
     // ========== Configuration ==========
     static const int DDR_READ_MAX_OUTSTANDING  = 64;
-    static const int DDR_INTERNAL_LATENCY_NS   = 100;  // ns, 内部固定访问延时
+#ifndef TEST_CFG_DDR_INTERNAL_LATENCY_NS
+#define TEST_CFG_DDR_INTERNAL_LATENCY_NS 100
+#endif
+    // ns, 内部固定访问延时(可经Makefile -DTEST_CFG_DDR_INTERNAL_LATENCY_NS覆盖, 如200->单次访问合计300ns)
+    static const int DDR_INTERNAL_LATENCY_NS   = TEST_CFG_DDR_INTERNAL_LATENCY_NS;
     static const int DDR_WRITE_MAX_OUTSTANDING = 64;
 
     // Simulated DDR memory - 32MB storage space

@@ -83,7 +83,8 @@ DedupCacheLine* DedupCache::lookup(gscid_t gscid, pscid_t pscid, iova_t iova) {
 }
 
 bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
-                        uint16_t head_index, bool is_req) {
+                        uint16_t head_index, bool is_req,
+                        uint32_t owner_task_id, bool owner_suspended) {
     iova_t iova_aligned = align_iova_4k(iova);
     uint32_t set = hash_function(gscid, pscid, iova_aligned);
 
@@ -101,6 +102,9 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
         line.iova = iova_aligned;
         line.head_index = head_index;
         line.is_req = is_req;
+        // [FIX-UAF] 登记主占位owner身份(预取占位is_req=0保持默认值, 不参与判定)
+        line.owner_task_id = owner_task_id;
+        line.owner_suspended = owner_suspended;
     };
 
     // 步骤1: 有 V=0 的 way -> 直接写入

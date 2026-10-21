@@ -1,0 +1,979 @@
+[MDMC_RP] epoch=3 did=0 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=1 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=2 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=3 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=4 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=5 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=6 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=7 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=8 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=9 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=10 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=11 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=12 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=13 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=14 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RP] epoch=3 did=15 injected=10000 chan_peak_queue=32 full_waits=309 full_wait_ns=0
+[MDMC_RWQ] depth=65536 peak_read=72911 peak_write=87087
+[MDMC_SUPPLY] R starve_cnt=1 starve_ns=6919 last_send=637453 | W starve_cnt=1 starve_ns=6791 last_send=824538
+[MD_WINDOW] mode=steady begin=91640 end=708933 ns
+[MD_INFLIGHT] did=0 port_peak=60 port_avg=30.9728 slot_peak=46 slot_avg=16.9853
+[MD_INFLIGHT] did=1 port_peak=61 port_avg=31.2448 slot_peak=47 slot_avg=17.2662
+[MD_INFLIGHT] did=2 port_peak=65 port_avg=31.508 slot_peak=54 slot_avg=17.5317
+[MD_INFLIGHT] did=3 port_peak=60 port_avg=31.6437 slot_peak=44 slot_avg=17.6683
+[MD_INFLIGHT] did=4 port_peak=60 port_avg=31.8498 slot_peak=44 slot_avg=17.8682
+[MD_INFLIGHT] did=5 port_peak=71 port_avg=32.2083 slot_peak=59 slot_avg=18.2166
+[MD_INFLIGHT] did=6 port_peak=68 port_avg=32.0402 slot_peak=54 slot_avg=18.0392
+[MD_INFLIGHT] did=7 port_peak=72 port_avg=32.4398 slot_peak=58 slot_avg=18.4295
+[MD_INFLIGHT] did=8 port_peak=60 port_avg=32.647 slot_peak=51 slot_avg=18.6316
+[MD_INFLIGHT] did=9 port_peak=74 port_avg=32.924 slot_peak=59 slot_avg=18.8995
+[MD_INFLIGHT] did=10 port_peak=70 port_avg=32.9135 slot_peak=56 slot_avg=18.8859
+[MD_INFLIGHT] did=11 port_peak=81 port_avg=33.8378 slot_peak=66 slot_avg=19.8051
+[MD_INFLIGHT] did=12 port_peak=74 port_avg=33.2666 slot_peak=58 slot_avg=19.2273
+[MD_INFLIGHT] did=13 port_peak=77 port_avg=33.6401 slot_peak=63 slot_avg=19.5951
+[MD_INFLIGHT] did=14 port_peak=71 port_avg=33.866 slot_peak=56 slot_avg=19.813
+[MD_INFLIGHT] did=15 port_peak=82 port_avg=34.7188 slot_peak=71 slot_avg=20.6554
+[MD_EXEC_LAT] ALL_meas_epoch n=160000 avg_exec=1905.13 ns [avg_xlate(ADMIT->READY_OUT)=892.994 avg_tail(READY_OUT->RESPONSE)=1012.14] min=408 p50=1033.38 p90=4669.47 p99=8486 max=11254
+[MD_EXEC_LAT] DATA n=116352 avg_exec=2337.99 ns [avg_xlate(ADMIT->READY_OUT)=1188.48 avg_tail(READY_OUT->RESPONSE)=1149.51] min=408 p50=1488 p90=5288 p99=8708 max=11254
+[MD_EXEC_LAT] CTRL n=43648 avg_exec=751.273 ns [avg_xlate(ADMIT->READY_OUT)=105.309 avg_tail(READY_OUT->RESPONSE)=645.964] min=408 p50=519 p90=1376 p99=2394.74 max=4431
+[MD_EXEC_LAT] READ n=72912 avg_exec=1775.94 ns [avg_xlate(ADMIT->READY_OUT)=1092.58 avg_tail(READY_OUT->RESPONSE)=683.366] min=408 p50=945.5 p90=4527.5 p99=7972 max=10684.2
+[MD_EXEC_LAT] WRITE n=87088 avg_exec=2013.29 ns [avg_xlate(ADMIT->READY_OUT)=725.899 avg_tail(READY_OUT->RESPONSE)=1287.4] min=408 p50=1116 p90=4736 p99=8755.25 max=11254
+[MD_FAIRNESS] ALL Mreq/s=207.357 Jain=0.999998
+[MD_DEVICE] did=0 kind=ALL window_count=8011 Mreq/s=12.9776 relative_bias=0.001375 warning=0
+[MD_DEVICE] did=1 kind=ALL window_count=7991 Mreq/s=12.9452 relative_bias=-0.001125 warning=0
+[MD_DEVICE] did=2 kind=ALL window_count=7991 Mreq/s=12.9452 relative_bias=-0.001125 warning=0
+[MD_DEVICE] did=3 kind=ALL window_count=7999 Mreq/s=12.9582 relative_bias=-0.000125 warning=0
+[MD_DEVICE] did=4 kind=ALL window_count=7992 Mreq/s=12.9469 relative_bias=-0.001 warning=0
+[MD_DEVICE] did=5 kind=ALL window_count=7992 Mreq/s=12.9469 relative_bias=-0.001 warning=0
+[MD_DEVICE] did=6 kind=ALL window_count=7993 Mreq/s=12.9485 relative_bias=-0.000875 warning=0
+[MD_DEVICE] did=7 kind=ALL window_count=7993 Mreq/s=12.9485 relative_bias=-0.000875 warning=0
+[MD_DEVICE] did=8 kind=ALL window_count=8011 Mreq/s=12.9776 relative_bias=0.001375 warning=0
+[MD_DEVICE] did=9 kind=ALL window_count=7993 Mreq/s=12.9485 relative_bias=-0.000875 warning=0
+[MD_DEVICE] did=10 kind=ALL window_count=8011 Mreq/s=12.9776 relative_bias=0.001375 warning=0
+[MD_DEVICE] did=11 kind=ALL window_count=7993 Mreq/s=12.9485 relative_bias=-0.000875 warning=0
+[MD_DEVICE] did=12 kind=ALL window_count=7997 Mreq/s=12.955 relative_bias=-0.000375 warning=0
+[MD_DEVICE] did=13 kind=ALL window_count=8002 Mreq/s=12.9631 relative_bias=0.00025 warning=0
+[MD_DEVICE] did=14 kind=ALL window_count=8003 Mreq/s=12.9647 relative_bias=0.000375 warning=0
+[MD_DEVICE] did=15 kind=ALL window_count=8028 Mreq/s=13.0052 relative_bias=0.0035 warning=0
+[MD_FAIRNESS] DATA Mreq/s=151.588 Jain=0.999997
+[MD_DEVICE] did=0 kind=DATA window_count=5860 Mreq/s=9.49307 relative_bias=0.00198773 warning=0
+[MD_DEVICE] did=1 kind=DATA window_count=5840 Mreq/s=9.46067 relative_bias=-0.00143202 warning=0
+[MD_DEVICE] did=2 kind=DATA window_count=5840 Mreq/s=9.46067 relative_bias=-0.00143202 warning=0
+[MD_DEVICE] did=3 kind=DATA window_count=5848 Mreq/s=9.47363 relative_bias=-6.41204e-05 warning=0
+[MD_DEVICE] did=4 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=5 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=6 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=7 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=8 kind=DATA window_count=5859 Mreq/s=9.49145 relative_bias=0.00181674 warning=0
+[MD_DEVICE] did=9 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=10 kind=DATA window_count=5859 Mreq/s=9.49145 relative_bias=0.00181674 warning=0
+[MD_DEVICE] did=11 kind=DATA window_count=5841 Mreq/s=9.46229 relative_bias=-0.00126103 warning=0
+[MD_DEVICE] did=12 kind=DATA window_count=5845 Mreq/s=9.46877 relative_bias=-0.000577083 warning=0
+[MD_DEVICE] did=13 kind=DATA window_count=5850 Mreq/s=9.47687 relative_bias=0.000277855 warning=0
+[MD_DEVICE] did=14 kind=DATA window_count=5851 Mreq/s=9.47849 relative_bias=0.000448843 warning=0
+[MD_DEVICE] did=15 kind=DATA window_count=5876 Mreq/s=9.51899 relative_bias=0.00472353 warning=0
+[MDMC_DELTA] PTW=75187 DDR_reads=224198
+
+========== PTW DDR Access Statistics ==========
+  PTW total completed tasks: 75354
+  PTW total DDR reads:       225722
+  PTW avg DDR reads/task:    3.00
+================================================
+
+========== PT Dedup Buffer Statistics ==========
+  Buffer Size:        320 entries
+  Peak Valid Count:   320 entries
+  Current Valid:      0 entries
+  Peak Usage:         100.0%
+  Buffer Full Bypass: 0 tasks
+  --- Buffer 实际占用率 (时间加权平均) ---
+    Avg Occupancy:    131.27 entries / 320 (41.02%)
+    Occupancy window: 823377.5 ns
+  --- Buffer Task Hold Time (alloc -> PTW-done free) ---
+    Avg hold:  2423.1 ns
+    Max hold:  8308.5 ns
+    Min hold:  5.0 ns
+    Samples:   44607
+==================================================
+
+========== Dedup Buffer Hold Decomposition ==========
+  总持有延时 = W1+W2+W3; W1=alloc->group_complete, W2=group_complete->agg_flush_exec, W3=agg_flush_exec->entry_free
+  MAIN head (dedup MISS)         n=15688   avg total=  3721.4 ns (W1= 3501.1 W2= 200.0 W3= 20.3) | maxSeg 8105.5/200.0/326.5
+  MAIN head (PF placeholder)     n=16      avg total=  4849.2 ns (W1= 4646.6 W2= 200.0 W3=  2.6) | maxSeg 4989.0/200.0/12.0
+  SUSPENDED (deduped)            n=28766   avg total=  1707.9 ns (W1= 1501.0 W2= 187.0 W3= 19.8) | maxSeg 6200.0/200.0/326.5
+======================================================
+
+========== Cache Hit/Miss Statistics (CacheSubsystem Internal) ==========
+
+========== IOMMU Cache Statistics Summary ==========
+Cache               Accesses        Hits      Misses   HitRate    Evicts    Invals  PF_Issue    PF_Hit    PFRate     ExecAvg    QueueAvg    TotalAvg        Reqs          IOPS
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+dc_cache              160288      160187         101    0.9994         0        16         0         0    0.0000      2.0008      0.0000      2.0008      160391499795894.8375
+dedup_cache                0           0           0    0.0000         0         0         0         0    0.0000      0.0000      0.0000      5.0000      110445        0.0000
+invalidation_pipeline           0           0           0    0.0000         0         0         0         0    0.0000      0.0000      0.0000    833.0000           2        0.0000
+msipt_cache            14688       14564         124    0.9916         0         0         0         0    0.0000      5.0090      0.0000      5.0093       14814199638833.4861
+pc_cache              160288           0      160288    0.0000         0         0         0         0    0.0000      4.0000      0.0000      4.0000      160290250001559.6828
+pt_cache              160288      112470       47818    0.7017     49682        64         0         0    0.0000      4.9703      0.0000      3.9939      235644199461655.6628
+walker_cache               0           0           0    0.0000         0         0         0         0    0.0000      0.0000      0.0000      0.8028      169552        0.0000
+walker_ptw_c1             59           0          59    0.0000        32        16         0         0    0.0000      3.0283      0.0000      0.0000           0        0.0000
+walker_ptw_c2          14824       14765          59    0.9960         0        32         0         0    0.0000      3.9979      0.0000      0.0000           0        0.0000
+walker_ptw_c3          18918        4094       14824    0.2164     13951        16         0         0    0.0000      5.6777      0.0000      0.0000           0        0.0000
+====================================================
+
+========== Latency Sample Counts ==========
+Cache                ExecSamples    QueueSamples      ReqSamples
+----------------------------------------------------------------
+dc_cache                  160391          160391          160391
+dedup_cache                    0               0          110445
+invalidation_pipeline               0               0               2
+msipt_cache                14814           14814           14814
+pc_cache                  160290          160290          160290
+pt_cache                  237690               0          235644
+walker_cache                   0               0          169552
+walker_ptw_c1                247               1               0
+walker_ptw_c2              15012               1               0
+walker_ptw_c3              33871               1               0
+=============================================
+
+========== RAM Access Path Breakdown ==========
+Cache                 Lookup     FillHit     FillInv    FillRepl      TotalRAM       ReadSet      WriteWay
+----------------------------------------------------------------------------------------------------------
+dc_cache              160288          69          32           0        160389        160389           101
+dedup_cache                0           0           0           0             0             0             0
+invalidation_pipeline           0           0           0           0             0             0             0
+msipt_cache            14688         108          16           0         14812         14812           124
+pc_cache              160288           0           0           0        160288        160288             0
+pt_cache              160288       17416        8256       49682        235642        235642         75354
+walker_cache               0           0           0           0             0             0             0
+walker_ptw_c1             59           0           0           0            59            59             0
+walker_ptw_c2          14824           0           0           0         14824         14824             0
+walker_ptw_c3          18918           0           0           0         18918         18918             0
+=================================================
+
+========== PT Cache Access by Phase ==========
+  REQUEST phase (execute_pt_request):
+    Lookup       = 160288
+    FillHit      = 0  (update_placeholder)
+    FillInv      = 0  (insert_placeholder)
+    FillRepl     = 0
+    Subtotal     = 160288
+  UPDATE phase (execute_pt_update_request):
+    Lookup       = 0
+    FillHit      = 17416  (fill_pt)
+    FillInv      = 8256
+    FillRepl     = 49682
+    Subtotal     = 75354
+  PTW_MONITOR phase (chain_head collection):
+    Lookup       = 0
+    FillHit      = 0
+    FillInv      = 0
+    FillRepl     = 0
+    Subtotal     = 0
+=============================================
+
+========== PT Cache Timing & Amplification ==========
+  First access time:  1258.0000 ns
+  Last access time:   825196.5000 ns
+  Access window:      823938.5000 ns
+  Total RAM accesses: 235642
+  Original tasks:     235644
+  Task amplification: 1.000x  (RAM accesses / original tasks)
+=====================================================
+
+========== PT Cache Cumulative Latency (Raw) ==========
+  [Queue Latency]
+    total_queue_latency_ns:    0.0000 ns
+    queue_latency_samples:     0
+    QueueAvg:                  0.0000 ns
+  [REQUEST Phase Task Latency - FIXED]
+    req_total_latency_ns:      480864.0000 ns
+    req_latency_samples:       160288
+    ReqAvg:                    3.0000 ns
+    req_first_start_ns:        1258.0000 ns
+    req_last_end_ns:           825199.5000 ns
+    req_window_ns:             823941.5000 ns
+  [UPDATE Phase Task Latency - FIXED]
+    upd_total_latency_ns:      458718.0000 ns
+    upd_latency_samples:       75354
+    UpdAvg:                    6.0875 ns
+    upd_first_start_ns:        6561.0000 ns
+    upd_last_end_ns:           824647.5000 ns
+    upd_window_ns:             818086.5000 ns
+  [Legacy - Mixed REQUEST+UPDATE, DO NOT USE]
+    total_request_latency_ns:  941128.0000 ns (MIXED!)
+    request_latency_samples:   235644
+  [Execution Latency]
+    total_execution_latency_ns:1181400.0000 ns
+    execution_latency_samples: 237690
+    ExecAvg:                   4.9703 ns
+  [Consistency Check]
+    current_sc_time_stamp:     825988.0000 ns
+    req_sum_vs_req_window:     OK
+    req_sum_vs_simtime:        OK
+=========================================================
+
+========== PT Cache Phase Timestamps ==========
+  [REQUEST Phase]
+    First start:  1258.0000 ns
+    Last end:     825199.5000 ns
+    Window:       823941.5000 ns
+    Task count:   160288
+  [UPDATE Phase]
+    First start:  6561.0000 ns
+    Last end:     824647.5000 ns
+    Window:       818086.5000 ns
+    Task count:   75354
+  [Overall Window]
+    First start:  1258.0000 ns
+    Last end:     825199.5000 ns
+    Window:       823941.5000 ns
+
+  [REQUEST Phase - FIFO Wait / Execute Breakdown]
+    FIFO wait time (sum):     47409.8530 ns
+    Execute time (sum):       480864.0000 ns
+    Total lifecycle:          528273.8530 ns
+    FIFO wait ratio:          8.9745 %
+    Avg FIFO wait per task:   0.2958 ns
+    Avg execute per task:     3.0000 ns
+    Avg lifecycle per task:   3.2958 ns
+
+  [UPDATE Phase - FIFO Wait / Execute Breakdown]
+    FIFO wait time (sum):     1310297.1120 ns
+    Execute time (sum):       458718.0000 ns
+    Total lifecycle:          1769015.1120 ns
+    FIFO wait ratio:          74.0693 %
+    Avg FIFO wait per task:   17.3886 ns
+    Avg execute per task:     6.0875 ns
+    Avg lifecycle per task:   23.4761 ns
+
+  [Combined Task Summary]
+    Total tasks:        235642
+    REQUEST execute:    480864.0000 ns
+    UPDATE  execute:    458718.0000 ns
+    Total execute:      939582.0000 ns
+    REQUEST FIFO wait:  47409.8530 ns
+    UPDATE  FIFO wait:  1310297.1120 ns
+    Total FIFO wait:    1357706.9650 ns
+    Total lifecycle:    2297288.9650 ns
+    Avg execute/task:   3.9873 ns
+    Avg FIFO wait/task: 5.7617 ns
+    Avg lifecycle/task: 9.7491 ns
+
+  [PT Cache Performance Summary]
+    Overall window:       823942 ns
+    Total tasks:          235642  (REQUEST=160288, UPDATE=75354)
+    PT Cache IOPS:        285.99 M tasks/s
+    RAM port util:        114.04 %
+    RAM port idle:        -115640.50 ns
+    Task amplification:   1.000x RAM accesses/task
+
+  [PT Cache Hit Rate by Request Interval]
+    Task   1~1000  Hit=  257  Miss=  742  Total=  999  HitRate=25.7%
+    Task1001~2000  Hit=  625  Miss=  375  Total= 1000  HitRate=62.5%
+    Task2001~3000  Hit=  708  Miss=  292  Total= 1000  HitRate=70.8%
+    Task3001~4000  Hit=  857  Miss=  143  Total= 1000  HitRate=85.7%
+    ---
+    Overall          Hit= 2447  Miss= 1552  Total= 3999  HitRate=61.2%
+=================================================
+========================================================================
+
+
+========== PT Scheduler Gap Analysis ==========
+  First task start:     1258.0 ns
+  Last task end:        825199.5 ns
+  Window (first~last):  823941.5 ns  (823.942 us)
+  ---
+  Total tasks:          235642  (REQUEST=160288, UPDATE=75354)
+  Total exec time:      939582.0 ns  (939.582 us)
+  Avg exec per task:    3.987 ns
+  ---
+  Total gap (idle):     273610.3 ns  (273.610 us)
+  Gap count:            128053  (times both FIFOs empty)
+  Avg gap:              2.137 ns
+  Max gap:              5052.0 ns
+  ---
+  Idle ratio:           33.21%  (gap / window)
+  Exec ratio:           114.04%  (exec / window)
+  ---
+  [Idle Source Analysis]
+    Gap = both pt_request_fifo AND pt_update_fifo are empty.
+    This means PTW has not yet produced UPDATE, and Collector has not
+    yet produced next REQUEST. The scheduler is waiting for data.
+=================================================
+
+========== DC Cache Query Interval Statistics ==========
+  Total DC queries:      160288
+  Interval samples:      160287
+  Avg query interval:    5.14 ns
+  Max query interval:    6886.00 ns
+  Min query interval:    2.00 ns
+==========================================================
+
+
+========== PT Cache 32-Task Group Latency Report ==========
+  Completed groups:  5009
+  ---
+  Pos     ExecAvg(ns)   QueueAvg(ns)  E2EAvg(ns)    UpdAvg    RAM_Access
+  ------  ------------  ------------  ------------  --------  ----------
+  T1            3.00          3.11          6.77       0.5         0.8
+  T2            3.00          2.87          6.84       0.5         0.7
+  T3            3.00          3.16          6.71       0.5         0.7
+  T4            3.00          2.66          6.74       0.4         0.8
+  T5            3.00          2.99          6.81       0.5         0.7
+  T6            3.00          3.19          6.81       0.5         0.7
+  T7            3.00          2.79          6.82       0.5         0.8
+  T8            3.00          2.76          6.76       0.5         0.8
+  T9            3.00          2.82          6.75       0.5         0.8
+  T10           3.00          2.85          6.63       0.5         0.7
+  T11           3.00          2.79          6.89       0.5         0.8
+  T12           3.00          2.54          6.83       0.4         0.8
+  T13           3.00          2.41          6.74       0.4         0.7
+  T14           3.00          2.54          6.68       0.4         0.8
+  T15           3.00          2.47          6.66       0.4         0.8
+  T16           3.00          2.72          6.66       0.4         0.8
+  T17           3.00          3.23          6.61       0.5         0.7
+  T18           3.00          3.24          6.72       0.5         0.7
+  T19           3.00          3.04          6.60       0.5         0.8
+  T20           3.00          2.73          6.52       0.5         0.7
+  T21           3.00          3.23          6.60       0.5         0.8
+  T22           3.00          2.81          6.58       0.5         0.7
+  T23           3.00          2.63          6.61       0.4         0.7
+  T24           3.00          2.80          6.59       0.5         0.8
+  T25           3.00          3.11          6.57       0.5         0.7
+  T26           3.00          2.83          6.65       0.5         0.8
+  T27           3.00          2.97          6.60       0.5         0.8
+  T28           3.00          2.63          6.70       0.4         0.8
+  T29           3.00          2.72          6.68       0.4         0.7
+  T30           3.00          2.89          6.69       0.5         0.7
+  T31           3.00          3.10          6.72       0.5         0.7
+  T32           3.00          2.95          6.71       0.5         0.8
+  ------  ------------  ------------  ------------  --------
+  TOTAL       96.00         91.58        214.25     75354
+  ---
+  Group interval:     187.58 ns  (exec + queue)
+  Exec ratio:        51.2%
+  Queue ratio:       48.8%
+=========================================================
+
+
+========== Dedup Scheduler Execution Latency Report ==========
+  First task start:     1262.0 ns
+  Last task end:        824647.5 ns
+  Window (first~last):  823385.5 ns  (823.385 us)
+  ---
+  Total tasks:          110445  (REQUEST=47818, UPDATE=62627)
+  Total exec time:      552225.0 ns  (552.225 us)
+  Avg exec per task:    5.000 ns
+  ---
+  [REQUEST]
+    Count:              47818
+    Total exec time:    239090.0 ns  (239.090 us)
+    Avg exec latency:   5.000 ns
+    Max exec latency:   5.0 ns
+    Min exec latency:   5.0 ns
+    ---
+  [UPDATE]
+    Count:              62627
+    Total exec time:    313135.0 ns  (313.135 us)
+    Avg exec latency:   5.000 ns
+    Max exec latency:   5.0 ns
+    Min exec latency:   5.0 ns
+    ---
+  [Utilization]
+    Exec ratio:         67.07%  (exec / window)
+    Idle ratio:         32.93%  (gap / window)
+============================================================
+
+
+========== PT Cache Multi-RAM Report ==========
+  Config:               num_rams=4, ram_fifo_depth=8
+  [Hash Unit]
+    Tasks hashed:        235642
+    Busy time:           244566.0 ns
+    Backpressure count:  3911
+    Backpressure time:   8924.0 ns (write-block on full RAM FIFO)
+  [Per-RAM Workers]  (window=825175.5 ns)
+    RAM   Tasks      Lookups    Updates    Busy(ns)     Util(%)   FIFO_Peak 
+    0     68200      49412      18786      264140.0     32.01     7         
+    1     63056      44246      18808      248751.0     30.15     7         
+    2     53669      34804      18863      220789.0     26.76     7         
+    3     50725      31826      18897      212078.0     25.70     7         
+    SUM   235650     -          -          945758.0    
+  [Throughput]
+    Results/cycle:       0.286  (total_tasks / window, clock=1ns)
+    Aggregate busy/win:  1.15  (>1 means cross-RAM concurrency)
+===============================================
+
+
+========== IOMMU 4KB Page Concurrency Statistics (512B data tasks; parser-admit->reorder-release span, bounded by outstanding cap) ==========
+  Sampling window:      811019.0 ns (811.019 us)
+  Tracked devices:      16
+    DID   AvgConc(pages) PeakConc   InTasks    OutTasks   DistinctPg Residual  NoMatch  
+    0     10.850         18         7272       7272       909        0         0        
+    1     10.917         19         7272       7272       909        0         0        
+    2     10.981         20         7272       7272       909        0         0        
+    3     11.010         20         7272       7272       909        0         0        
+    4     11.068         20         7272       7272       909        0         0        
+    5     11.121         19         7272       7272       909        0         0        
+    6     11.112         19         7272       7272       909        0         0        
+    7     11.222         20         7272       7272       909        0         0        
+    8     11.277         20         7272       7272       909        0         0        
+    9     11.289         19         7272       7272       909        0         0        
+    10    11.334         21         7272       7272       909        0         0        
+    11    11.387         22         7272       7272       909        0         0        
+    12    11.383         21         7272       7272       909        0         0        
+    13    11.432         20         7272       7272       909        0         0        
+    14    11.464         20         7272       7272       909        0         0        
+    15    11.545         20         7272       7272       909        0         0        
+    ---------------------------------------------------------------------------
+    TOTAL 179.391        302        116352     116352     14544      0         0        
+  Cross-check (Σ per-device avg): 179.391 pages
+  Max single-device peak:         22 pages
+  Dedup Cache capacity:           256 cachelines (sets=64 x ways=4)
+  AvgConc / Dedup capacity:       70.07%  (并发4KB页数 vs 去重Cache总行数)
+  PeakConc / Dedup capacity:      117.97%
+  ----------------------------------------------------------------------
+  Input-queue backlog (input_delay_queue_r/w, 位于端口准入之后、parser弹出之前):
+    peak tasks queued:              535  (read 283 / write 306)
+    time-weighted avg tasks queued: 138.7  (read 60.0 / write 78.8)
+    端口准入并发上限: Global=640 (peak used 640), Read=320, Write=320
+    注: [读写端口分离] 并发门控已在端口准入处完成(计数同点++),
+        此队列仅反映准入后等待 parser 轮询弹出的短暂停留。
+====================================================================================
+
+
+========== Dedup Cache Multi-RAM Report ==========
+  Config:               num_rams=4, ram_fifo_depth=8, inside_fifo_depth=32
+  [Hash Unit]
+    Tasks hashed:        157215
+    Busy time:           163481.5 ns
+    Backpressure count:  3372
+    Backpressure time:   6266.5 ns (write-block on full RAM FIFO)
+  [Per-RAM Workers]  (window=823385.5 ns)
+    RAM   Tasks      Requests   Updates    Prefetch   Busy(ns)     Util(%)   FIFO_Peak 
+    0     39331      12127      15613      11591      196655.0     23.88     7         
+    1     39201      11838      15633      11730      196005.0     23.80     7         
+    2     39325      11964      15674      11687      196625.0     23.88     7         
+    3     39358      11889      15707      11762      196790.0     23.90     7         
+    SUM   157215     -          -          -          786075.0    
+  [Prefetch]
+    Dropped (inside_fifo full): 150
+  [Buffer Full Bypass]
+    Bypass to PTW count:        0
+  [Admission Control] ENABLED (Buffer满跳过出队, request FIFO排队反压)
+    Admission stall waits:      6954
+    Admission stall total:      61955.0 ns (61.955 us)
+    dedup_request_fifo peak:    216
+    Reserved peak:              29
+  [Hash Conflict Bypass] (步骤iv: 无空位置可写(全V=1&is_req=1) -> bypass PTW)
+    Conflict count (main MISS & set-full): 3211
+    Conflict ratio (of main lookups 47818): 6.72%
+    Conflict ratio (of main MISS 18918):    16.97%
+    Conflict bypass to PTW tasks: 3211
+    Prefetch set-full skipped:    5831
+  [去重Cache命中率 (execute_dedup_request lookup)]
+    总查询(lookup):            47818
+    命中(占位CL存在):          28900
+    未命中:                    18918
+    总命中率:                  60.44%
+    主任务去重请求:            47818 (命中 28900, 未命中 18918, 命中率 60.44%)
+  [Valid Cacheline Occupancy] (每次 dedup lookup 采样)
+    Total lines:        256 (sets=64 x ways=4 x rams=4)
+    Lookup samples:     156598
+    Avg valid lines:    192.79  (75.3% of 256)
+    Max / Min valid:    256 / 0
+    Avg main-req lines: 102.98  (is_req=1, 其余为预取占位)
+    Final valid lines:  0
+  [Throughput]
+    Results/cycle:       0.191  (total_tasks / window, clock=1ns)
+    Aggregate busy/win:  0.95  (>1 means cross-RAM concurrency)
+==================================================
+
+
+========== Walker Cache Multi-RAM Report ==========
+  Config:               num_rams=4/subtable, workers=12 (三级子表独立分RAM), ram_fifo_depth=8
+  Front lookups:        0 (前置查询总数)
+  [Hash Unit]
+    Tasks hashed:        37836 (lookup+update, 不含S2/invalidate内联)
+    Busy time:           37849.0 ns
+    Backpressure count:  6
+    Backpressure time:   13.0 ns (write-block on full RAM FIFO)
+  [Per-Worker: SubTable x RAM]  (window=823245.5 ns)
+    Worker   SubOps     Lookups    Updates    Busy(ns)     Util(%)   FIFO_Peak 
+    C1-R0    120        59         59         340.0        0.04      0         
+    C1-R1    2          0          0          96.0         0.01      0         
+    C1-R2    2          0          0          96.0         0.01      0         
+    C1-R3    2          0          0          96.0         0.01      0         
+    C2-R0    14885      14824      59         44844.0      5.45      0         
+    C2-R1    2          0          0          96.0         0.01      0         
+    C2-R2    2          0          0          96.0         0.01      0         
+    C2-R3    2          0          0          96.0         0.01      0         
+    C3-R0    8559       4789       3768       40255.0      4.89      0         
+    C3-R1    8394       4703       3689       39378.0      4.78      0         
+    C3-R2    8424       4737       3685       39566.0      4.81      0         
+    C3-R3    8373       4689       3682       39368.0      4.78      0         
+    SUM      48767      -          -          204327.0    
+  [Throughput]
+    SubOps/cycle:        0.059  (total_subops / window, clock=1ns)
+    Aggregate busy/win:  0.25  (>1 means cross-RAM concurrency)
+===================================================
+
+========== VA Dedup Statistics ==========
+  VA Dedup Enabled:  NO
+  Dedup Table Miss:  0 (sent to PTW)
+  Dedup Table Hit:   0 (saved PTW tasks)
+==========================================
+
+========== MSI Path Statistics ==========
+  MSIPT Cache Hit:   14564
+  MSIPT Cache Miss:  124 (MSIPTW DDR walk)
+  MSIPT Hit Rate:    99.2%
+  Flat MSI done:     14688
+  MRIF MSI done:     0
+  MRIF atomic OR:    0
+  notice MSI sent:   0
+==========================================
+
+========== Walker Cache Update Statistics ==========
+  PTWC_1_2_3 updates:  59  (update c1+c2+c3)
+  PTWC_2_3 updates:    14765  (update c2+c3)
+  PTWC_3 updates:      4094  (update c3 only)
+  NONE (skipped):      0  (redundant updates avoided)
+  Total updates:       18918
+  Total requests:      18918
+  Update distribution:
+    PTWC_1_2_3: 0.3%
+    PTWC_2_3:   78.0%
+    PTWC_3:     21.6%
+    NONE:       0.0%  (redundancy elimination rate)
+======================================================
+
+========== VS-stage Walker Cache Statistics ==========
+  VS Lookups:          18918
+  VS Hits (total):     18859
+    C3 hit (1 DDR):    4094
+    C2 hit (2 DDR):    14765
+    C1 hit (3 DDR):    0
+  VS Miss (4 DDR):     59
+  VS LEAF hits:        0  (end-to-end hugepage leaf, 0 DDR)
+  VS Hit Rate:         99.7%
+  VS Hit Distribution (of lookups):
+    C3: 21.6%  C2: 78.0%  C1: 0.0%  Miss: 0.3%
+  VS Hit Distribution (of hits):
+    C3: 21.7%  C2: 78.3%  C1: 0.0%
+  DDR Walks Saved:     41812  (vs baseline 75672 reads)
+  DDR Actual Reads:    33860  (saved 55.3%)
+  ---
+  [Analysis] VS-stage Cache Level Hit Rate:
+    C3 (leaf, 1 DDR):  4094/18918 = 21.6%
+    C2 (L1, 2 DDR):    14765/18918 = 78.0%
+    C1 (L2, 3 DDR):    0/18918 = 0.0%
+    Miss (4 DDR):      59/18918 = 0.3%
+    Avg DDR/lookup:    1.79  (baseline=4.00, saved=2.21)
+==========================================================
+
+========== S2 Walker Cache Statistics ==========
+  S2 Cache Enabled:    YES
+  S2 Lookups:          75330
+  S2 Hits (total):     75294
+    C3 hit (1 DDR):    28
+    C2 hit (2 DDR):    75266
+    C1 hit (3 DDR):    0
+  S2 Miss (4 DDR):     36
+  S2 LEAF hits:        0  (end-to-end hugepage leaf, 0 DDR)
+  S2 Hit Rate:         100.0%
+  S2 Hit Distribution (of lookups):
+    C3: 0.0%  C2: 99.9%  C1: 0.0%  Miss: 0.0%
+  S2 Hit Distribution (of hits):
+    C3: 0.0%  C2: 100.0%  C1: 0.0%
+  DDR Walks Saved:     150616  (vs baseline 301320 reads)
+  DDR Actual Reads:    150704  (saved 50.0%)
+  ---
+  [Analysis] S2 Cache Level Hit Rate:
+    C3 (leaf, 1 DDR):  28/75330 = 0.0%
+    C2 (L1, 2 DDR):    75266/75330 = 99.9%
+    C1 (L2, 3 DDR):    0/75330 = 0.0%
+    Miss (4 DDR):      36/75330 = 0.0%
+    Avg DDR/lookup:    2.00  (baseline=4.00, saved=2.00)
+================================================
+
+========== IOMMU / PTW Throughput (IOPS) ==========
+  Sim Time:             825.988 us
+  IOMMU Completed:      160288 trans
+  IOMMU IOPS:           194.06 M trans/s
+  PTW  Completed:       75354 tasks
+    Main tasks:         18918
+    Prefetch tasks:     56436
+    Hugepage main:      0  (page_sz>4KB, prefetch spawn skipped)
+    Hugepage PF skip:   0  (prefetch spawns suppressed)
+    Invalid result slots: 0  (D per hugepage group, placeholder-clear only)
+    Front LEAF hits:    0  (short-circuit complete, 0 DDR)
+  PTW  IOPS:            91.23 M tasks/s
+  PTW  avg DDR reads:   3.00 reads/task
+  PTW  avg exec lat:    438.4 ns  (0.438 us)
+  ---
+  PTW DDR access detail:
+    Max DDR reads/task:  24
+    Min DDR reads/task:  2
+    Avg DDR latency:     215.2 ns
+    Max DDR latency:     613.5 ns
+    Min DDR latency:     202.0 ns
+  ---
+  PTW task latency:
+    Max task latency:    5490.0 ns  (5.490 us)
+    Min task latency:    438.5 ns  (0.439 us)
+  ---
+  PTW inject interval (pt_cache_to_ptw_fifo):
+    Avg inject interval: 43.42 ns
+    Max inject interval: 8471.00 ns
+    Min inject interval: 0.00 ns
+    Inject count:        18917
+  PTW output interval (walk_complete):
+    Avg output interval: 43.25 ns
+    Max output interval: 8229.50 ns
+    Min output interval: 0.00 ns
+    Output count:        18917
+  PTW avg exec latency:  438.36 ns
+  ---
+  PTW DDR reads distribution (ALL tasks):
+    DDR_reads    count    percent 
+    2            60530    80.33%
+    6            1        0.00%
+    7            14764    19.59%
+    20           23       0.03%
+    23           16       0.02%
+    24           20       0.03%
+  ---
+  PTW DDR reads distribution (MAIN tasks, count=18918):
+    Avg DDR reads:  5.97
+    Max DDR reads:  20
+    Min DDR reads:  2
+    [两阶段分解] 第一阶段(iova->gpa,VS_WALK) avg DDR: 1.790
+    [两阶段分解] 第二阶段(gpa->spa,GS_*)     avg DDR: 4.175
+    [两阶段分解] AD_UPDATE                   avg DDR: 0.000
+    [两阶段分解] 合计(VS+GS+AD) avg DDR/主任务: 5.965 (样本主任务=18918)
+    [预取启动] 主任务访问DDR几次后启动预取 (spawn事件=18891): 平均 5.949
+      late-spawn(GS leaf完成后):  5.949 DDR后启动 (count=18891)
+    DDR_reads    count    percent 
+    2            4094     21.64%
+    6            1        0.01%
+    7            14764    78.04%
+    20           23       0.12%
+    23           16       0.08%
+    24           20       0.11%
+  ---
+  PTW DDR reads distribution (PREFETCH tasks, count=56436):
+    Avg DDR reads:  2.00
+    Max DDR reads:  0
+    Min DDR reads:  0
+    DDR_reads    count    percent 
+    2            56436    100.00%
+  ---
+  PTW task exec latency distribution:
+    range            count    percent 
+    100~500ns        3        0.02%
+    500~1000ns       3970     20.99%
+    1000~5000ns      14909    78.81%
+    >5000ns          36       0.19%
+  ---
+  PTW Task Group Execution Statistics (1 main + 3 prefetch = 4 tasks/group):
+    Completed groups:    18891
+    Avg exec time:       1743.3 ns  (1.743 us)
+    Max exec time:       5490.0 ns  (5.490 us)
+    Min exec time:       842.0 ns  (0.842 us)
+    Group exec time distribution:
+      range            count    percent 
+      500~1000ns       3970     21.02%
+      1000~2000ns      10787    57.10%
+      2000~5000ns      4098     21.69%
+      >5000ns          36       0.19%
+  ---
+  PTW Task Group DDR Reads Statistics (per group, 1 main + D prefetch):
+    Avg DDR reads/group: 11.92
+    Max DDR reads/group: 30
+    Min DDR reads/group: 4
+    Group DDR reads distribution:
+      ddr_reads    count    percent 
+      4            10       0.05%
+      6            14       0.07%
+      7            34       0.18%
+      8            4067     21.53%
+      9            40       0.21%
+      11           21       0.11%
+      13           14669    77.65%
+      29           16       0.08%
+      30           20       0.11%
+  ---
+  Output interval data exported to: ptw_output_intervals.csv (18917 samples)
+  DDR reads distribution exported to: ptw_ddr_reads_distribution.csv (6 bins)
+  Task latency data exported to: ptw_task_latency.csv (18918 samples)
+  ---
+  Prefetch Analysis Report:
+    Main tasks entering PTW:           18918
+    Late-spawn triggered:              18891
+    Late-spawn skipped (MSI):          24
+    Late-spawn skipped (bypass):       0
+    Prefetch tasks spawned (total):    56436
+    Prefetch tasks completed:          56436
+    Avg prefetch per triggered main:   2.99 (target D=3)
+    Late-spawn trigger rate:           99.9%
+  Group exec latency data exported to: ptw_group_exec_latency.csv (18891 samples)
+  IO   avg e2e lat:     1911.6 ns  (1.912 us)
+  IO   max e2e lat:     11254.0 ns  (11.254 us)
+  IO   min e2e lat:     408.0 ns  (0.408 us)
+  IO   avg req time:    5.2 ns  (0.005 us)
+  IO   e2e latency distribution:
+    range            count    percent 
+    0~500ns          39549    24.67%
+    500~1000ns       38539    24.04%
+    1000~2000ns      32677    20.39%
+    2000~5000ns      35903    22.40%
+    5000~10000ns     13403    8.36%
+    >10000ns         217      0.14%
+====================================================
+
+========== Port Average Bandwidth ==========
+  slave_0r (读口入口):   30368256 B  avg 36.766 GB/s  (peak 64 GB/s, util 57.45%)
+  slave_0w (写口入口):   29980288 B  avg 36.296 GB/s  (peak 64 GB/s, util 56.71%)
+  slave_0  (入口合计):   60348544 B  avg 73.062 GB/s  (聚合peak 128 GB/s, util 57.08%)
+  master_0 (出口):   60348544 B  avg 73.062 GB/s  (peak 128 GB/s, util 57.08%)
+  master_1 (DDR):     1912136 B  avg 2.315 GB/s  (peak 16 GB/s, util 14.47%)
+============================================
+
+========== Port Bandwidth (稳态窗口 / 注入期口径) ==========
+  [稳态窗口] 未开启或窗口无效(需 RP 设置 steady_start_count/steady_end_count)
+  [读口注入期 622476.0 ns] 30349824 B -> 48.757 GB/s (util 76.18% of 64)
+  [写口注入期 809568.0 ns] 29978752 B -> 37.031 GB/s (util 57.86% of 64)
+  [入口合计注入期 809569.0 ns] -> 74.519 GB/s (聚合peak 128 GB/s, util 58.22%)
+  注: 全程平均口径的分母含 14969 ns warmup(页表构建+哨兵/预热epoch)与末尾 drain
+==========================================================
+
+========== IOMMU Port Task Interval Statistics ==========
+  Input Port (slave_0 合计, inbound_fifo_r/w):
+    Avg input interval:  5.14 ns
+    Max input interval:  6886.00 ns
+    Min input interval:  0.00 ns
+    Sample count:        160287
+  Input Read Port (slave_0r):
+    Avg input interval:  8.72 ns
+    Max input interval:  6927.00 ns
+    Min input interval:  1.00 ns
+    Sample count:        73007
+  Input Write Port (slave_0w):
+    Avg input interval:  9.36 ns
+    Max input interval:  6792.00 ns
+    Min input interval:  1.00 ns
+    Sample count:        87279
+  Output Port (master_0, response):
+    Avg output interval: 5.11 ns
+    Max output interval: 5952.00 ns
+    Min output interval: 0.03 ns
+    Sample count:        160287
+=========================================================
+
+========== PT Cache Output Interval Statistics ==========
+  Total PT Cache outputs:  160288 (HIT + MISS)
+  Avg output interval:   5.14 ns
+  Max output interval:   6886.00 ns
+  Min output interval:   0.00 ns
+  Sample count:          160287
+==========================================================
+
+========== SQ/CQ/MSI PT Cache Hit Statistics ==========
+  Control packets (SQ+CQ+MSI) total:  43904
+    SQ count:   14608
+    CQ count:   14608
+    MSI count:  14688
+  PT Cache HIT (bypass dedup/PTW):    43853
+  PT Cache MISS (enter dedup/PTW):    51
+  PT Cache hit rate for ctrl:       99.88%
+=========================================================
+
+========== PTW Task Ratio Statistics ==========
+  IOMMU input tasks (total):    160928
+  PTW completed tasks:          75354
+    Main tasks:                 18918
+    Prefetch tasks:             56436
+  PTW/IOMMU ratio:              47.01%
+================================================
+
+========== PTW Concurrency & Execution Latency ==========
+  PTW concurrent tasks (main + prefetch, outstanding计数单位=单任务):
+    Avg concurrency (time-weighted): 40.052 tasks
+    Max concurrency (peak):          64 tasks  (limit=64)
+    Sampling window:                 824721.0 ns (824.721 us)
+    Utilization (avg/limit):         62.58%
+    Saturation (peak/limit):         100.00%
+  ---
+  PTW execution latency (task enter PTW -> walk complete):
+    [ALL]      count=75354    avg=  438.36 ns  max= 5490.00 ns  min=  438.50 ns
+    [MAIN]     count=18918    avg= 1746.05 ns  max= 5490.00 ns  min=  438.50 ns
+    [PREFETCH] count=56436    avg=    0.00 ns  max=    0.00 ns  min=    0.00 ns
+    [MAIN+PF]  count=75354    avg=  438.36 ns  (合并校验口径)
+  ---
+    [MAIN]     latency distribution (n=18918):
+      100~500ns    3        0.02%
+      500~1000ns   3970     20.99%
+      1000~5000ns  14909    78.81%
+      >5000ns      36       0.19%
+  Main task latency exported to: ptw_main_task_latency.csv (18918 samples)
+  Prefetch task latency exported to: ptw_prefetch_task_latency.csv (0 samples)
+=========================================================
+
+========== Outstanding Peak Statistics ==========
+  IOMMU Global:                  peak= 640 / max= 640
+  IOMMU Read (场景13):         peak= 320 / max= 320
+  IOMMU Write (场景13):        peak= 320 / max= 320
+  PTW:                           peak=  64 / max=  64
+  xDTW DC walk:                  peak=  50 / max=  64
+  xDTW PC walk:                  peak=   0 / max=  64
+  Collector DC walk:             peak=  51 / max=  64
+  Collector PC walk:             peak=   0 / max=  64
+  DDR (master_1):                peak= 190 / max= 256
+  DDR master_1 READ(页表/目录): peak= 190  (读请求总数=225947)
+  DDR master_1 WRITE(AD/MRIF):   peak=   0  (写请求总数=0)
+  Output (master_0):             peak=   1 / max= 256
+=================================================
+
+========== 端口准入门控统计 (读写端口分离) ==========
+  门控上限: Global=640  Read=320  Write=320
+  读口(R-PORT) 准入任务总数:  73008
+  写口(W-PORT) 准入任务总数:  87280
+  ---
+  读口因(读满/全局满)阻塞:       1738 次, 总时长 140996.0 ns (140.996 us), 单次最大 4365.0 ns
+  写口因(写满/全局满)阻塞:      12441 次, 总时长 316593.0 ns (316.593 us), 单次最大 2769.0 ns
+  读口阻塞占准入比: 2.38%   写口阻塞占准入比: 14.25%
+  峰值并发(端口准入点): Read=320/320  Write=320/320  Global=640/640
+=========================================================
+
+========== 注入窗口内读写并发顶满程度 (RP 供给充足口径) ==========
+  注入窗口: 809570.0 ns (809.570 us)  [14969.0 ~ 824539.0 ns], 采样 319680 次
+  项目                 avg(时间加权)   上限 avg占比     peak 顶满时长占比
+  Read  并发               187.69      320    58.65%      320       18.51%
+  Write 并发               256.31      320    80.10%      320       44.72%
+  Global 并发              444.00      640    69.37%      640       11.07%
+  ---
+  [端口占用三分法: 节拍(逐包带宽)/门控(等额度)/空闲, 占各自注入跨度]
+    R口 跨度 622476.0 ns [14977.0~637453.0]: 节拍 77.40% + 门控 22.65% + 空闲 -0.05%
+    W口 跨度 809568.0 ns [14970.0~824538.0]: 节拍 60.92% + 门控 39.11% + 空闲 -0.02%
+    注: 空闲≈0 即 RP 供给充足; 门控占比高 => 320 额度为主约束; 节拍占比高 => 端口线速为主约束
+  判定 Read  : 间歇顶满320, 主约束=端口逐包节拍(线速)   (顶满时长 18.51%)
+  判定 Write : 间歇顶满320, 主约束=端口逐包节拍(线速)   (顶满时长 44.72%)
+  判定 Global: 顶满时长 11.07% (Global<=640)
+  [双口同时在注入子窗口 622476.0 ns: 14977.0~637453.0]
+    Read  并发               243.93      320     76.23%        24.07%
+    Write 并发               271.68      320     84.90%        48.89%
+    Global 并发              515.61      640     80.56%        14.39%
+    (列依次: 时间加权avg / 上限 / avg占比 / 顶满时长占比)
+  读口准入 73008 个任务, 写口准入 87280 个任务
+  端口方向校验失配次数(必须=0): 0
+====================================================================
+
+========== Parser 门控快照统计 (验证读满/写满队头阻塞) ==========
+  门控上限: Global=640  Read=320  Write=320
+  ---
+  收到请求总数(弹出):       160288  (Read=73008, Write=87280)
+  ---
+  [快照时额度已满的次数与占比]
+    Read  满(320):             24636  ( 15.37%)
+    Write 满(320):             64717  ( 40.38%)
+    读满 或 写满:                76161  ( 47.52%)   <-- 用户假设的判据
+    读写 同时 满:                13192  (  8.23%)
+    Global满(640):             13192  (  8.23%)
+  ---
+    自身方向已满(必阻塞):        42071  ( 26.25%)
+    另一方向满而自身未满:        34090  ( 21.27%)   <-- 额度不对称浪费
+  ---
+  [实际发生阻塞的次数与时长]
+    因 Read  满而 wait:              0 次
+    因 Write 满而 wait:              0 次
+    因 Global满而 wait:              0 次
+    方向门控阻塞总时长:     0.0 ns (0.000 us)
+    方向门控单次最大阻塞:   0.0 ns
+    全局门控阻塞总时长:     0.0 ns (0.000 us)
+    方向阻塞平均时长:       0.000 ns  (总时长/阻塞次数)
+    方向阻塞占收到请求比:   0.00%  (阻塞次数/请求总数)
+  ---
+  [Parser 视角的快照平均并发] (按请求数加权, 非时间加权)
+    Read  avg = 200.31 / 320  (62.60%)
+    Write avg = 256.08 / 320  (80.03%)
+    Global avg= 456.40 / 640  (71.31%)
+    Read+Write avg 相加  = 456.40
+=========================================================
+
+========== IOMMU 内部实际并发 (时间加权面积法) ==========
+  采样窗口: 825135.0 ns (825.135 us)   [853.0 ~ 825587.5 ns]
+  项目                     时间加权avg       peak   上限 avg利用率
+  Read  并发(实际在处理)     184.84        320      320     57.76%
+  Write 并发(实际在处理)     252.95        320      320     79.05%
+  Global并发(实际在处理)     437.79        640      640     68.40%
+  ---
+  Read+Write 相加校验   = 437.79  (Global avg = 437.79, 差 -0.0000)
+  累计面积: read=152518866.8  write=208715672.5  global=361234539.3  (task·ns)
+  ---
+  [Little's Law 交叉验证] λ=194.26 M/s, IO_avg_e2e=1911.64 ns -> λ×W=371349.72
+    注: IO_e2e 口径为 pop->response(含出口流水线), 比 outstanding
+        持有区间(admit->release)长, 故 λ×W 会高于实测 Global avg。
+=========================================================
+
+========== [MONITOR] 阻塞点监控统计 ==========
+--- 监控点1: flush_dedup_buffer_by_iova 阻塞 ---
+  flush调用总次数:          0
+  flush总耗时:              0.0 ns (0.000 us)
+  单次flush平均耗时:        0.00 ns
+  单次flush最大耗时:        0.0 ns
+  FIFO阻塞次数:             0
+  FIFO阻塞总耗时:           0.0 ns
+  FIFO阻塞平均耗时:         0.00 ns
+  FIFO阻塞最大耗时:         0.0 ns
+  [分解] 纯扫描总耗时:      0.0 ns (0.000 us)
+  [分解] 单次扫描平均耗时:  0.00 ns
+  [分解] 单次扫描最大耗时:  0.0 ns
+  [分解] FIFO阻塞占比:      0.0%
+  [分解] 扫描entry总数:     0 (每次320 entries)
+  [分解] 匹配entry总数:     0 (平均每次0.0个)
+
+--- 监控点2: PT Cache UPDATE 阻塞 ---
+  PT UPDATE写入总次数:      75327
+  PT UPDATE写入总耗时:      0.0 ns (0.000 us)
+  单次PT UPDATE平均耗时:    0.00 ns
+  单次PT UPDATE最大耗时:    0.0 ns
+  FIFO阻塞次数:             0
+  FIFO阻塞总耗时:           0.0 ns
+  [排队] UPDATE在FIFO中排队总时间: 0.0 ns (0.000 us)
+  [排队] 有排队的UPDATE次数:       0
+  [排队] 平均排队等待时间:         0.00 ns
+  [排队] 最大排队等待时间:         0.0 ns
+  [Stats] UPDATE任务数:          75354
+  [Stats] UPDATE FIFO排队总时间: 1310297.1 ns (1310.297 us)
+  [Stats] UPDATE平均排队时间:    17.39 ns
+  [Stats] REQUEST FIFO排队总时间: 47409.9 ns (47.410 us)
+  [Stats] REQUEST任务数:          160288
+  [Stats] REQUEST平均排队时间:    0.30 ns
+
+--- 监控点3: Monitor线程整体处理 ---
+  处理group总数:            18891
+  group总处理耗时:          0.0 ns (0.000 us)
+  单个group平均处理耗时:    0.00 ns
+  单个group最大处理耗时:    0.0 ns
+
+--- 监控点4: 重排序乱序暂存 ---
+  乱序到达任务数:           123927
+  标记ready总任务数:       160288
+  乱序比例:                 77.32%
+  写请求保序阻塞次数:       62674
+  写请求阻塞总耗时:         77282292.5 ns
+  写请求阻塞平均耗时:       1233.08 ns
+  写请求阻塞最大耗时:       9614.8 ns
+  等待队头次数:             1144280
+  [读请求] 总发送次数:       73008
+  [读请求] 有等待的次数:     55095 (比例=75.46%)
+  [读请求] 等待总耗时:       20660881.2 ns (20660.881 us)
+  [读请求] 平均等待耗时:     375.00 ns
+  [读请求] 最大等待耗时:     1701.0 ns
+============================================
+
+[MULTIDEV_MC_RESULT] PASS expected=160000 completed=160000
+
+Info: /OSCI/SystemC: Simulation stopped by user.
+IOMMU simulation completed

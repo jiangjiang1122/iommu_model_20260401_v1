@@ -21,6 +21,14 @@ struct DedupCacheLine {
     iova_t   iova       = 0;       // 4KB 页对齐
     uint16_t head_index = 0xFFFF;  // Buffer 任务链头索引
     bool     is_req     = false;   // 1=主任务占位, 0=预取占位
+    // [FIX-UAF] 主占位owner追踪: 区分"正在PTW行走的在途主任务"与"挂起等待者":
+    //   - owner_suspended=false (fresh MISS新建): owner已发往PTW行走, 可能已建预取组,
+    //     只能由其自己的组(task_id==owner_task_id)flush; 外国组的预取结果update
+    //     提前flush会释放仍在使用的task对象(use-after-free, 组main_task悬垂)。
+    //   - owner_suspended=true (命中预取占位升级): owner挂buffer等待, 不发PTW,
+    //     由任意组的该页翻译结果flush("预取路径受益")。
+    uint32_t owner_task_id  = 0;
+    bool     owner_suspended = false;
 
     void clear() {
         valid = false;
@@ -29,6 +37,8 @@ struct DedupCacheLine {
         iova = 0;
         head_index = 0xFFFF;
         is_req = false;
+        owner_task_id = 0;
+        owner_suspended = false;
     }
 };
 
@@ -54,8 +64,11 @@ public:
 
     // 插入占位(架构定义的条件替换: V=0直写 -> 淘汰预取占位 -> 失败=hash冲突)
     // 返回: true=插入成功, false=失败(set 内全为 V=1&is_req=1, 无空位置可写)
+    // [FIX-UAF] owner_task_id/owner_suspended: 主占位(is_req=1)的owner身份登记,
+    //   供 execute_dedup_update 判定是否允许外国组的update提前flush(见struct注释)
     bool insert(gscid_t gscid, pscid_t pscid, iova_t iova,
-                uint16_t head_index, bool is_req);
+                uint16_t head_index, bool is_req,
+                uint32_t owner_task_id = 0, bool owner_suspended = false);
     
     // [hash冲突判定] 目标 set 是否还有可写位置(V=0 空 way 或 V=1&is_req=0 可淘汰预取占位),
     //   无延时预检, 供调用方在分配 Buffer 前判定; false = hash冲突(步骤iv)
