@@ -14,6 +14,13 @@
 #define TEST_CFG_PERDEV_WRITE_ORDER 0
 #endif
 
+// [8盘实测回放] 新场景独立宏: 默认 0 = 完全关闭。
+//   仅在 TEST=real8_trace_replay 时由 Makefile 置 1; 关闭时共享文件中所有
+//   新场景适配代码(统计口径/流式导出/日志抑制)均不参与编译, 旧场景行为不变。
+#ifndef TEST_CFG_REAL8_TRACE_REPLAY
+#define TEST_CFG_REAL8_TRACE_REPLAY 0
+#endif
+
 // ===================== FIFO深度参数 =====================
 // Parser输出
 static const uint32_t FIFO_DEPTH_PARSER_TO_COLLECTOR = 4;

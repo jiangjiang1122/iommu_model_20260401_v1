@@ -81,6 +81,9 @@ void iommu_top::ptw_req_thread() {
         task->state = TASK_PTW_REQ;
         ptw_sample_concurrency_before_change();  // [STAT] 采样(count++前)
         ptw_outstanding_task_count++;
+#if TEST_CFG_REAL8_TRACE_REPLAY
+        real8_notify_ptw_occ_(ptw_outstanding_task_count);  // [8盘实测回放] 占用变化点
+#endif
         if (ptw_outstanding_task_count > peak_ptw_outstanding) {
             peak_ptw_outstanding = ptw_outstanding_task_count;
             printf("[PTW_STAT] New peak outstanding=%d at task_id=%u, time=%s\n",
@@ -639,13 +642,15 @@ void iommu_top::ptw_req_process_thread() {
                                 pf_req.size = ptesz;
                                 pf_req.is_write = false;
                                 pf_req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;
+                                // 在可能阻塞的FIFO写入前记录起点，包含DDR排队时间。
+                                ptw_task_start_ns[pf_task->task_id] = pf_req.submit_time_ns;
                                 ptw_req_ddr_fifo.write(pf_req);
 
                                 printf("[PTW_REQ_EARLY_PF] Spawned prefetch task_id=%u, idx=%u, vs_l0_pte_spa=0x%lx, pf_vpn0=%u, pf_iova=0x%lx\n",
                                        pf_task->task_id, d + 1, vs_l0_pte_spa, pf_vpn0, pf_iova);
                                 fflush(stdout);
                                 // [STAT] 记录预取任务起始时刻(用于延时计算)
-                                ptw_task_start_ns[pf_task->task_id] = sc_time_stamp().to_seconds() * 1e9;
+                                // 起点已在发送DDR请求前记录，此处不覆盖。
                                 actual_spawned++;
                             }
 
@@ -1423,7 +1428,31 @@ void iommu_top::ptw_rsp_process_thread() {
                 iommu::CacheMessage s2_resp = cache_sub.walker_response_fifo.read();
                 walker_cache_mtx.unlock();
                 
-                if (s2_resp.hit && !iommu::walker_is_leaf(s2_resp.walker_data)) {
+                if (s2_resp.hit && iommu::walker_is_leaf(s2_resp.walker_data)) {
+                    // 预取与主任务使用相同的大页叶项语义，完成后走统一组回填/计数路径。
+                    // next_ppn 是最终 SPA 帧，不是下一级页表地址。
+                    s2_pf_hit = true;
+                    task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
+                    const uint64_t s2_page_sz =
+                        (s2_resp.walker_level == 3) ? 0x200000ULL :
+                        (s2_resp.walker_level == 2) ? 0x40000000ULL : 0x8000000000ULL;
+                    const uint64_t s2_frame = (s2_resp.walker_data.next_ppn * PAGESIZE) &
+                                              ~(s2_page_sz - 1);
+                    task->pa = s2_frame | (data_page_gpa & (s2_page_sz - 1));
+                    task->gst_page_sz = s2_page_sz;
+                    task->g_pte.raw = 0;
+                    task->g_pte.PPN = task->pa / PAGESIZE;
+                    task->g_pte.D = task->g_pte.A = task->g_pte.U = 1;
+                    task->g_pte.X = task->g_pte.W = task->g_pte.R = task->g_pte.V = 1;
+                    task->g_pte.PBMT = PMA;
+                    handle_virtual_interrupt_file_overlap(&task->DC, task->gpa,
+                                                         &task->gst_page_sz);
+                    task->state = TASK_PTW_DONE;
+                    walk_complete = true;
+                    printf("[PTW_2STAGE_PF] task_id=%u, S2 LEAF HIT level=%d -> DONE (0 GS DDR), pa=0x%lx\n",
+                           task->task_id, s2_resp.walker_level, task->pa);
+                    fflush(stdout);
+                } else if (s2_resp.hit) {
                     s2_pf_hit = true;
                     task->walk_ctx.s2_walker_hit_level = s2_resp.walker_level;
                     uint8_t GS_LEVELS = 0;
@@ -1444,7 +1473,7 @@ void iommu_top::ptw_rsp_process_thread() {
                            task->task_id, s2_resp.walker_level, gs_start_level);
                     fflush(stdout);
                 } else {
-                    // [大页] leaf命中不能按中间级解释, 预取路径保守按MISS处理
+                    // 未命中时从 G-stage 根页表开始。
                     task->walk_ctx.s2_walker_hit_level = 0;
                 }
             }
@@ -1457,8 +1486,9 @@ void iommu_top::ptw_rsp_process_thread() {
                 need_next_ddr = true;
             }
             
-            printf("[PTW_2STAGE_PF] task_id=%u, VS_PTE_READ -> GS_EXPLICIT, data_gpa=0x%lx, ddr_count=%u\n",
-                   task->task_id, data_page_gpa, task->walk_ctx.ddr_read_count);
+            printf("[PTW_2STAGE_PF] task_id=%u, VS_PTE_READ -> %s, data_gpa=0x%lx, ddr_count=%u\n",
+                   task->task_id, walk_complete ? "DONE" : "GS_EXPLICIT",
+                   data_page_gpa, task->walk_ctx.ddr_read_count);
             fflush(stdout);
             
             break;
@@ -1913,6 +1943,11 @@ void iommu_top::ptw_rsp_process_thread() {
                     if (task->walk_ctx.ddr_read_count < ptw_min_ddr_reads)
                         ptw_min_ddr_reads = task->walk_ctx.ddr_read_count;
                     // [STAT] 预取任务walk完成路径: 延时(拆分统计)
+#if TEST_CFG_MULTI_DEVICE_SCENE
+                    md_trace.operation(task->task_id, "ptw", "prefetch_complete", task->device_id,
+                                       ptw_task_start_ns.at(task->task_id), true, -1, 0, 0,
+                                       task->walk_ctx.ddr_read_count);
+#endif
                     ptw_record_task_latency(task->task_id, true);
                     printf("[PTW_PREFETCH] Prefetch task %u completed, deferred to flush. DDR_reads=%u\n",
                            task->task_id, task->walk_ctx.ddr_read_count);
@@ -2183,6 +2218,8 @@ void iommu_top::ptw_rsp_process_thread() {
                     pf_req.size = ptesize;
                     pf_req.is_write = false;
                     pf_req.submit_time_ns = sc_time_stamp().to_seconds() * 1e9;
+                    // late-spawn与early-spawn统一统计完整预取生命周期。
+                    ptw_task_start_ns[pf_task->task_id] = pf_req.submit_time_ns;
                     ptw_req_ddr_fifo.write(pf_req);
                     
                     printf("[PTW_2STAGE_PF] Spawned prefetch task_id=%u, idx=%u, vs_l0_pte_spa=0x%lx, pf_vpn0=%u, pf_iova=0x%lx\n",

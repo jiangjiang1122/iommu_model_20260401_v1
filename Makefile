@@ -534,6 +534,43 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
         -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
         -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_MPS_LAYOUT_FLAGS)
+else ifeq ($(TEST), real8_trace_replay)
+    # [8盘实测回放] 两组实测 TLP 记录(4k_randrw_mem_1021_MRd/MWr)逐包回放:
+    #   8 设备(205/206/207/208/211/212/213/214 -> DID 0..7), 读写各一条常驻发送进程,
+    #   全局有效页表按原始 Address 低32位页基址跨设备/方向共享, 512MiB IOVA 池随机无放回。
+    #   固定配置: SPLIT=1, 8设备, 去重Cache 4RAMx16setx4way(256), PTW64, Buffer320,
+    #   R/W/G=320/320/640, ADM=1, D=3, VS/S2 Walker Cache 开启, 每设备写保序,
+    #   入口 R/W 各 64GB/s, DDR 链路 50+100+50=200ns, PC 2ns。
+    #   独立对象根 build_real8/ 与独立目标 iommu_model_real8: 不复用、不清理根 build/,
+    #   不覆盖现有 iommu_model 与历史结果。
+    REAL8_N ?= 8
+    REAL8_PTW ?= 64
+    REAL8_BUFFER ?= 320
+    REAL8_GLOBAL ?= 640
+    REAL8_READ ?= 320
+    REAL8_WRITE ?= 320
+    REAL8_SLINK_NS ?= 50
+    REAL8_DDR_NS ?= 100
+    BUILD_ROOT ?= build_real8
+    TARGET ?= iommu_model_real8
+    TEST_THREAD_SRC = rp/test_rp_real8_trace_replay_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_REAL8_TRACE_REPLAY=1 \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=$(REAL8_N) \
+        -DTEST_CFG_SPLIT_RW_PORTS=1 \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=1 \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(REAL8_GLOBAL) \
+        -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(REAL8_READ) \
+        -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(REAL8_WRITE) \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(REAL8_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(REAL8_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=1 \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(REAL8_SLINK_NS) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(REAL8_DDR_NS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)
@@ -599,12 +636,15 @@ CXX_SOURCES = \
 MAIN_SOURCE = main.cpp
 
 # Object files - place them in the build directory
-CXX_OBJECTS = $(patsubst %.cc,build/%.o,$(patsubst %.cpp,build/%.o,$(CXX_SOURCES)))
-MAIN_OBJECT = build/$(MAIN_SOURCE:.cpp=.o)
+#   [8盘实测回放] BUILD_ROOT/TARGET 可被 TEST 分支预先覆盖(real8 -> build_real8/iommu_model_real8);
+#   其它场景未覆盖时默认值与原规则完全一致(build/ 与 iommu_model)。
+BUILD_ROOT ?= build
+CXX_OBJECTS = $(patsubst %.cc,$(BUILD_ROOT)/%.o,$(patsubst %.cpp,$(BUILD_ROOT)/%.o,$(CXX_SOURCES)))
+MAIN_OBJECT = $(BUILD_ROOT)/$(MAIN_SOURCE:.cpp=.o)
 ALL_OBJECTS = $(CXX_OBJECTS) $(MAIN_OBJECT)
 
 # Target executable
-TARGET = iommu_model
+TARGET ?= iommu_model
 
 # Default target
 all: $(TARGET)
@@ -614,12 +654,12 @@ $(TARGET): $(ALL_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -L$(SYSTEMC_LIB) $(LIBS) -Wl,--allow-multiple-definition
 
 # Compile C++ sources into build directory
-build/%.o: %.cc
+$(BUILD_ROOT)/%.o: %.cc
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile C++ sources (.cpp) into build directory
-build/%.o: %.cpp
+$(BUILD_ROOT)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -627,8 +667,8 @@ build/%.o: %.cpp
 
 # Clean build artifacts
 clean:
-	rm -rf build/*.o $(TARGET) 2>/dev/null || true
-	rm -rf build 2>/dev/null || true
+	rm -rf $(BUILD_ROOT)/*.o $(TARGET) 2>/dev/null || true
+	rm -rf $(BUILD_ROOT) 2>/dev/null || true
 
 # Rebuild
 rebuild: clean all

@@ -48,10 +48,12 @@ void iommu_top::reorder_register_task(iommu_task_t* task) {
     }
     reorder_mtx.unlock();
 
+#if !TEST_CFG_REAL8_TRACE_REPLAY
     printf("[REORDER] register task_id=%u, %s, global_outstanding=%d (read=%d, write=%d)\n",
            task->task_id, is_write ? "WRITE" : "READ",
            iommu_global_outstanding, iommu_read_outstanding, iommu_write_outstanding);
     fflush(stdout);
+#endif
 }
 
 // ------------------------------------------------------------------
@@ -107,10 +109,12 @@ void iommu_top::reorder_mark_ready(iommu_task_t* task) {
         fflush(stdout);
     }
 
+#if !TEST_CFG_REAL8_TRACE_REPLAY
     printf("[REORDER] mark_ready task_id=%u, %s\n",
            task->task_id,
            it->second.is_write ? "WRITE" : "READ");
     fflush(stdout);
+#endif
 
     reorder_ready_event.notify(SC_ZERO_TIME);
 }
@@ -210,9 +214,11 @@ void iommu_top::reorder_output_thread() {
                     if (reorder_wait_ns > reorder_write_blocked_max_ns)
                         reorder_write_blocked_max_ns = reorder_wait_ns;
                     if (reorder_wait_ns > 1.0) {  // 只打印等待>1ns的
+#if !TEST_CFG_REAL8_TRACE_REPLAY
                         printf("[MONITOR_REORDER] WRITE wait: task_id=%u, reorder_wait=%.1f ns\n",
                                task->task_id, reorder_wait_ns);
                         fflush(stdout);
+#endif
                     }
                 }
                 // [MONITOR] 对于读请求，记录等待延时(ready->发送)
@@ -224,9 +230,11 @@ void iommu_top::reorder_output_thread() {
                         if (reorder_wait_ns > reorder_read_max_wait_ns)
                             reorder_read_max_wait_ns = reorder_wait_ns;
                         if (reorder_wait_ns > 1.0) {  // 只打印等待>1ns的
+#if !TEST_CFG_REAL8_TRACE_REPLAY
                             printf("[MONITOR_REORDER] READ wait: task_id=%u, reorder_wait=%.1f ns\n",
                                    task->task_id, reorder_wait_ns);
                             fflush(stdout);
+#endif
                         }
                     }
                 }
@@ -240,12 +248,14 @@ void iommu_top::reorder_output_thread() {
             if (axi_master_0_to_pcie_noc_outstanding > peak_axi_master_0_outstanding)
                 peak_axi_master_0_outstanding = axi_master_0_to_pcie_noc_outstanding;
 
+#if !TEST_CFG_REAL8_TRACE_REPLAY
             printf("[REORDER] output task_id=%u, %s, pa=0x%lx, axi_master_0_out=%d\n",
                    task->task_id,
                    (task->read_writeAMO == WRITE) ? "WRITE" : "READ",
                    task->pa,
                    axi_master_0_to_pcie_noc_outstanding);
             fflush(stdout);
+#endif
 
             // [流水线延时] 静态延时线: 仅入队(task + 到期时刻), 由常驻 output_delay_thread
             //   在到期后发送响应并统计/释放 task。替代 per-task sc_spawn, 避免多设备大事务量

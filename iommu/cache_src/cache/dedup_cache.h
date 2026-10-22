@@ -3,8 +3,14 @@
 
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 #include "common/types.h"
+
+// [8盘实测回放] 新场景独立宏兑底: 未定义时为 0, 以下所有新场景适配均不参与编译。
+#ifndef TEST_CFG_REAL8_TRACE_REPLAY
+#define TEST_CFG_REAL8_TRACE_REPLAY 0
+#endif
 
 namespace iommu {
 
@@ -112,6 +118,14 @@ public:
     uint32_t total_lines() const { return num_sets_ * num_ways_; }
     uint32_t valid_line_count() const { return valid_line_count_; }  // 当前有效(V=1)cacheline数
     uint32_t req_line_count() const { return req_line_count_; }      // 其中主占位(is_req=1)数
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    // [8盘实测回放] 占用变化无延时采样回调: (valid_lines, req_lines)。
+    //   由 iommu_top 在新场景开启时注册, 变化点流式写独立 CSV;
+    //   仅在 insert 成功/clear_line 实际改变计数后调用, 无仿真时间开销。
+    void set_occupancy_cb(std::function<void(uint32_t, uint32_t)> cb) {
+        occupancy_cb_ = std::move(cb);
+    }
+#endif
     uint64_t sample_count() const { return sample_count_; }          // lookup 采样次数
     double   avg_valid_lines() const {
         return sample_count_ > 0 ? (double)sample_valid_sum_ / (double)sample_count_ : 0.0;
@@ -153,6 +167,12 @@ private:
     uint64_t sample_req_sum_   = 0;             // Σ 主占位 cacheline 数
     uint32_t sample_valid_max_ = 0;             // 有效 cacheline 数峰值
     uint32_t sample_valid_min_ = UINT32_MAX;    // 有效 cacheline 数谷值
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    std::function<void(uint32_t, uint32_t)> occupancy_cb_;  // [8盘实测回放] 占用变化回调
+    inline void notify_occupancy_() {
+        if (occupancy_cb_) occupancy_cb_(valid_line_count_, req_line_count_);
+    }
+#endif
 };
 
 } // namespace iommu

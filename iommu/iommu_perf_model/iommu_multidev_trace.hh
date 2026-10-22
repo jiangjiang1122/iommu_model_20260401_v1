@@ -69,6 +69,25 @@ public:
     std::map<uint32_t, Request*> tasks;
     std::set<uint32_t> prefetch_ids;
     std::vector<Operation> operations;
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    // [8盘实测回放] 流式 operations: 新场景单次回放接近 80 万请求, 逐请求十余条
+    //   Cache/DDR/PTW 操作若全部驻留 std::vector<Operation>(含两个 std::string) 会
+    //   占用 GB 级内存。新场景改为建立时直接落盘, report() 不再重复遍历导出。
+    //   宏未启用时以下成员与分支不参与编译, 旧场景容器/导出路径完全不变。
+    std::ofstream operations_stream;
+    std::string   operations_path;
+    bool          operations_streaming = false;
+    mutable uint64_t operations_streamed = 0;   // report() 为 const, 仅收尾打印用
+    void set_operations_path(const std::string& path) {
+        operations_stream.open(path);
+        require(operations_stream.good(), "无法创建流式operations CSV: " + path);
+        operations_path = path;
+        operations_streaming = true;
+        operations_stream << "epoch,did,task_id,source,operation,bank,level,hit,value,"
+                             "start_ns,end_ns,queue_ns\n";
+        operations_stream << std::fixed << std::setprecision(3);
+    }
+#endif
     std::vector<HolInterval> hol_intervals;
     std::map<uint32_t, std::pair<uint32_t, double>> open_hol;
 
@@ -141,6 +160,15 @@ public:
         if (!id) return; // 配置/失效命令不属于某个RP业务请求。
         auto& r = task(id);
         require(did < devices && did == r.device, "Cache/DDR事件设备归属错误");
+#if TEST_CFG_REAL8_TRACE_REPLAY
+        if (operations_streaming) {
+            operations_stream << r.epoch << ',' << did << ',' << id << ',' << source << ','
+                              << op << ',' << bank << ',' << level << ',' << hit << ',' << value
+                              << ',' << start << ',' << now_ns() << ',' << std::max(0.0, queue) << '\n';
+            ++operations_streamed;
+            return;
+        }
+#endif
         operations.push_back({id, did, r.epoch, source, op, start, now_ns(),
                               std::max(0.0, queue), hit, bank, level, value});
     }
@@ -282,11 +310,32 @@ public:
                 if (type == 4) window_counts[d] = window;
                 if (type == 0) data_counts[d] = window;
             }
+            // 旧实现: 每个 1us 桶都全量扫描 measured(桶数 x N_devices x 请求数);
+            //   80 万请求下为 1e10 量级。新场景宏启用时改为单次遍历直方图, 逐桶结果等价。
+#if TEST_CFG_REAL8_TRACE_REPLAY
+            {
+                const long long nb = static_cast<long long>(std::floor((t1 - t0) / 1000.0));
+                std::vector<uint64_t> hist(static_cast<size_t>(nb) + 1, 0);
+                for (auto* r : measured) {
+                    if (r->device != d) continue;
+                    const double tr = r->at(Point::RESPONSE);
+                    if (!(tr > t0 && tr <= t1)) continue;
+                    long long i = static_cast<long long>((tr - t0) / 1000.0);
+                    if (i < 0) i = 0;
+                    if (i > nb) i = nb;
+                    ++hist[static_cast<size_t>(i)];
+                }
+                for (long long i = 0; i <= nb; ++i)
+                    buckets << (t0 + static_cast<double>(i) * 1000.0) << ',' << d << ','
+                            << hist[static_cast<size_t>(i)] << '\n';
+            }
+#else
             for (double b=t0;b<t1;b+=1000) {
                 uint64_t count=0;
                 for(auto* r:measured) if(r->device==d && r->at(Point::RESPONSE)>b && r->at(Point::RESPONSE)<=std::min(b+1000,t1)) ++count;
                 buckets << b << ',' << d << ',' << count << '\n';
             }
+#endif
         }
         // ============ [STAT] 任务在 IOMMU 内部的执行延时 ============
         //   起点 = ADMIT: parser_thread 从 inbound_fifo 弹出并注册进 reorder 之后
@@ -345,6 +394,18 @@ public:
         std::ofstream ops(prefix + "_operations.csv"), hol(prefix + "_hol.csv");
         require(ops.good() && hol.good(), "无法创建Cache/HOL CSV");
         ops << "epoch,did,task_id,source,operation,bank,level,hit,value,start_ns,end_ns,queue_ns,in_window\n";
+#if TEST_CFG_REAL8_TRACE_REPLAY
+        // [8盘实测回放] operations 已在产生时流式落盘(带 epoch 列), 此处仅关闭文件;
+        //   窗口标记(in_window)由专用离线脚本 rp/analyze_real8_trace.py 用 requests.csv
+        //   的 t10/t90 边界统一补算, 不在此处重读 GB 级文件。
+        if (operations_streaming) {
+            // report() 为 const: 流对象是导出资源的句柄, 不参与统计语义, 收尾时关闭
+            const_cast<std::ofstream&>(operations_stream).flush();
+            const_cast<std::ofstream&>(operations_stream).close();
+            std::cout << "[MD_OPS_STREAM] path=" << operations_path
+                      << " rows=" << operations_streamed << "\n";
+        } else
+#endif
         for(const auto& e:operations) ops << e.epoch << ',' << e.device << ',' << e.task_id << ',' << e.source
             << ',' << e.operation << ',' << e.bank << ',' << e.level << ',' << e.hit << ',' << e.value
             << ',' << e.start_ns << ',' << e.end_ns << ',' << e.queue_ns << ','

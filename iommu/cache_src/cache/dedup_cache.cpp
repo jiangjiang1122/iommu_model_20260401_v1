@@ -1,5 +1,9 @@
 #include "cache/dedup_cache.h"
 
+#ifndef TEST_CFG_REAL8_TRACE_REPLAY
+#define TEST_CFG_REAL8_TRACE_REPLAY 0
+#endif
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -111,6 +115,9 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
     for (uint32_t w = 0; w < num_ways_; w++) {
         if (!cache_array_[set][w].valid) {
             write_way(w);
+#if TEST_CFG_REAL8_TRACE_REPLAY
+            notify_occupancy_();   // [8盘实测回放] 占用变化采样(无延时)
+#endif
             return true;
         }
     }
@@ -130,6 +137,9 @@ bool DedupCache::insert(gscid_t gscid, pscid_t pscid, iova_t iova,
             if (cache_array_[set][w].valid && !cache_array_[set][w].is_req) {
                 if (seen == pick) {
                     write_way(w);
+#if TEST_CFG_REAL8_TRACE_REPLAY
+                    notify_occupancy_();   // [8盘实测回放] 占用变化采样(无延时)
+#endif
                     return true;
                 }
                 seen++;
@@ -159,6 +169,9 @@ void DedupCache::clear_line(DedupCacheLine* line) {
         if (line->valid) {
             if (valid_line_count_ > 0) valid_line_count_--;
             if (line->is_req && req_line_count_ > 0) req_line_count_--;
+#if TEST_CFG_REAL8_TRACE_REPLAY
+            notify_occupancy_();       // [8盘实测回放] 占用变化采样(无延时)
+#endif
         }
         line->clear();
     }

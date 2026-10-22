@@ -125,6 +125,12 @@ public:
     uint32_t get_dedup_min_valid_lines() const { return dedup_cache_ ? dedup_cache_->min_valid_lines() : 0; }
     // 仅清采样累加器(不影响cache内容): 供测量 epoch 开始前重置统计窗口
     void reset_dedup_valid_line_stats() { if (dedup_cache_) dedup_cache_->reset_valid_line_stats(); }
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    // [8盘实测回放] 转发注册去重Cache占用变化采样回调(仅新场景编译, 宏未启用零开销)
+    void set_dedup_occupancy_cb(std::function<void(uint32_t, uint32_t)> cb) {
+        if (dedup_cache_) dedup_cache_->set_occupancy_cb(std::move(cb));
+    }
+#endif
     // [FIX] Buffer满时等待PTW并发释放的机制:
     // - ptw_capacity_check_cb_: 回调函数, 检查PTW是否有空闲并发槽位
     // - dedup_buffer_full_event_: 事件, PTW每完成一个任务时notify

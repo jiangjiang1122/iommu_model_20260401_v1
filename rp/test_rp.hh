@@ -117,9 +117,12 @@ public:
 #if TEST_CFG_MULTI_DEVICE_SCENE
             if (md_response_handler) md_response_handler(trans);
 #endif
+#if !TEST_CFG_REAL8_TRACE_REPLAY
+            // [8盘实测回放] 逐响应 printf+fflush 在 80 万包下会拖垮仿真墙钟, 新场景关闭。
             printf("[RP_RSP] nb_transport_bw: BEGIN_RESP, addr=0x%lx, status=%s\n",
                    (uint64_t)trans.get_address(), trans.get_response_string().c_str());
             fflush(stdout);
+#endif
             // Save response and notify waiting thread
             pending_response_trans = &trans;
             response_event.notify(SC_ZERO_TIME);

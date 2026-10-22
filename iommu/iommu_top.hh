@@ -136,6 +136,32 @@ public:
     void reset_4kb_concurrency_window();           // 测量 epoch 前重置窗口
     void print_4kb_concurrency_report() const;     // 打印并发 4KB 页统计报告
 
+    #if TEST_CFG_REAL8_TRACE_REPLAY
+        // [8盘实测回放] 去重Cache占用变化流式采样(无仿真时间开销, 宏未启用不新增成员)
+        //   变化点由 DedupCache 回调写入独立 CSV: t_ns,valid_lines,req_lines
+        //   供离线脚本做 W 内时间加权均值/峰值/结束值重算(计划第26项口径)。
+        std::ofstream real8_dedup_occ_stream;
+        bool          real8_dedup_occ_open = false;
+        void  open_real8_dedup_occupancy_trace(const std::string& path);
+        void  close_real8_dedup_occupancy_trace();
+
+        // [8盘实测回放] PTW并发占用变化流式采样(计划第31项 W 内积分口径):
+        //   在 ptw_outstanding_task_count 唯一 ++ 点(ptw_req_thread)与唯一 --
+        //   函数(ptw_release_outstanding)变化后写入 t_ns,outstanding。
+        //   无仿真时间开销; 宏未启用时零成员零调用。
+        std::ofstream real8_ptw_occ_stream;
+        bool          real8_ptw_occ_open = false;
+        void  open_real8_ptw_occupancy_trace(const std::string& path);
+        void  close_real8_ptw_occupancy_trace();
+        void  real8_notify_ptw_occ_(int cnt) {
+            if (real8_ptw_occ_open) {
+                real8_ptw_occ_stream
+                    << (sc_core::sc_time_stamp().to_seconds() * 1e9)
+                    << ',' << cnt << '\n';
+            }
+        }
+    #endif
+
     // ===================== Task ID Counter =====================
     uint32_t next_task_id;
     sc_mutex task_id_mtx;
@@ -1163,6 +1189,9 @@ public:
         ptw_sample_concurrency_before_change();  // [STAT] 采样当前count×时长
         ptw_outstanding_task_count--;
         assert(ptw_outstanding_task_count >= 0);
+#if TEST_CFG_REAL8_TRACE_REPLAY
+        real8_notify_ptw_occ_(ptw_outstanding_task_count);  // [8盘实测回放] 占用变化点
+#endif
         ptw_task_completed_event.notify(SC_ZERO_TIME);
         cache_sub.get_dedup_buffer_full_event().notify(SC_ZERO_TIME);
     }

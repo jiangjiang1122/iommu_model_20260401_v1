@@ -229,7 +229,13 @@ inline uint32_t kb4_total_conc(const std::map<uint32_t, iommu_top::kb4_dev_stat_
 //     有匹配 -> page_is_valid 应为1, 仅 task_count++(并发数不变)
 // ------------------------------------------------------------------
 void iommu_top::track_4kb_page_in(iommu_task_t* task) {
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    // [8盘实测回放] 数据任务包长覆盖 64B..1024B 等多种长度, 按计划口径
+    //   "纳入所有 DATA 长度、排除 CTRL", 故只排除 is_ctrl; 旧场景仍保留 512B 门控。
+    if (!task || task->is_ctrl) return;
+#else
     if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 只统计512B数据任务
+#endif
 
     const double now_ns = sc_time_stamp().to_seconds() * 1e9;
     if (kb4_win_first_ns < 0.0) kb4_win_first_ns = now_ns;  // 首次采样开启窗口
@@ -269,7 +275,12 @@ void iommu_top::track_4kb_page_in(iommu_task_t* task) {
 //     有匹配 -> task_count--; 非0则结束; 为0则清零表项(valid=0, value=0), 并发数-1
 // ------------------------------------------------------------------
 void iommu_top::track_4kb_page_out(iommu_task_t* task) {
+#if TEST_CFG_REAL8_TRACE_REPLAY
+    // [8盘实测回放] 与入口同口径: 只排除控制包, 不限包长。
+    if (!task || task->is_ctrl) return;
+#else
     if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 控制包不额外做操作
+#endif
 
     const double now_ns = sc_time_stamp().to_seconds() * 1e9;
     const uint64_t page = task->iova & ~0xFFFULL;
@@ -304,6 +315,67 @@ void iommu_top::track_4kb_page_out(iommu_task_t* task) {
 // reset_4kb_concurrency_window - 测量 epoch 开始前重置统计窗口
 //   调用时已保证 IOMMU 内部无在途任务(quiescent), 故可安全清空跟踪表。
 // ------------------------------------------------------------------
+#if TEST_CFG_REAL8_TRACE_REPLAY
+// [8盘实测回放] 去重Cache占用变化流式采样: 注册回调并在变化点写入独立 CSV。
+//   回调触发于 SystemC 协作式线程内(同一仿真时刻顺序执行), 写文件无仿真时间开销。
+void iommu_top::open_real8_dedup_occupancy_trace(const std::string& path) {
+    real8_dedup_occ_stream.open(path);
+    if (!real8_dedup_occ_stream.good()) {
+        std::cerr << "[REAL8_OCC] 无法创建去重占用CSV: " << path << "\n";
+        fflush(stderr);
+        return;
+    }
+    real8_dedup_occ_stream << "t_ns,valid_lines,req_lines\n";
+    real8_dedup_occ_stream << std::fixed << std::setprecision(3);
+    real8_dedup_occ_open = true;
+    cache_sub.set_dedup_occupancy_cb([this](uint32_t v, uint32_t r) {
+        if (!real8_dedup_occ_open) return;
+        real8_dedup_occ_stream << (sc_time_stamp().to_seconds() * 1e9)
+                               << ',' << v << ',' << r << '\n';
+    });
+    std::cout << "[REAL8_OCC] dedup occupancy trace -> " << path << "\n";
+    fflush(stdout);
+}
+
+void iommu_top::close_real8_dedup_occupancy_trace() {
+    if (real8_dedup_occ_open) {
+        real8_dedup_occ_stream.flush();
+        real8_dedup_occ_stream.close();
+        real8_dedup_occ_open = false;
+        std::cout << "[REAL8_OCC] dedup occupancy trace closed\n";
+        fflush(stdout);
+    }
+}
+
+// [8盘实测回放] PTW并发占用变化流式采样: 与去重占用流同构(计划第31项口径)。
+//   变化点由 ptw_req_thread(++)与 ptw_release_outstanding(--)写入独立 CSV,
+//   调用点均在 SystemC 协作式线程内, 写文件无仿真时间开销。
+void iommu_top::open_real8_ptw_occupancy_trace(const std::string& path) {
+    real8_ptw_occ_stream.open(path);
+    if (!real8_ptw_occ_stream.good()) {
+        std::cerr << "[REAL8_OCC] 无法创建PTW占用CSV: " << path << "\n";
+        fflush(stderr);
+        return;
+    }
+    real8_ptw_occ_stream << "t_ns,outstanding\n";
+    real8_ptw_occ_stream << std::fixed << std::setprecision(3);
+    real8_ptw_occ_open = true;
+    real8_notify_ptw_occ_(ptw_outstanding_task_count);  // 初始占用快照
+    std::cout << "[REAL8_OCC] ptw occupancy trace -> " << path << "\n";
+    fflush(stdout);
+}
+
+void iommu_top::close_real8_ptw_occupancy_trace() {
+    if (real8_ptw_occ_open) {
+        real8_ptw_occ_stream.flush();
+        real8_ptw_occ_stream.close();
+        real8_ptw_occ_open = false;
+        std::cout << "[REAL8_OCC] ptw occupancy trace closed\n";
+        fflush(stdout);
+    }
+}
+#endif
+
 void iommu_top::reset_4kb_concurrency_window() {
     const double now_ns = sc_time_stamp().to_seconds() * 1e9;
     kb4_total_area_ns      = 0.0;
@@ -781,6 +853,10 @@ tlm::tlm_sync_enum iommu_top::axi_slave_r_nb_transport_fw(
         // [STAT] 控制包(SQ/CQ/MSI)入口计数
         if (task->is_ctrl) {
             ctrl_total_count++;
+#if TEST_CFG_REAL8_TRACE_REPLAY
+            // [8盘实测回放] 本场景不合成 SQ/CQ/MSI 子类型, 16B 写控制包仅计入 CTRL 总数,
+            //   不按固定 IOVA 误判为 MSI; 旧场景按 IOVA 细分的分支原样保留。
+#else
 #ifdef TEST_CFG_S13_IOVA_512MB
             if (task->iova == 0x22000000)      ctrl_sq_count++;
             else if (task->iova == 0x22001000) ctrl_cq_count++;
@@ -790,15 +866,18 @@ tlm::tlm_sync_enum iommu_top::axi_slave_r_nb_transport_fw(
             else if (task->iova == 0x5001000)  ctrl_cq_count++;
             else                               ctrl_msi_count++;
 #endif
+#endif
         }
 
         // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
         track_4kb_page_in(task);
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+#if !TEST_CFG_REAL8_TRACE_REPLAY
         printf("[IOMMU_TOP] axi_slave_r_nb_transport_fw(R-PORT): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo_r [t=%.1f ns]\n",
                task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
+#endif
 
         // [STAT] 入口任务间隔采样(合计 + 读口)
         if (iommu_in_last_ns > 0.0) {
@@ -968,6 +1047,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_w_nb_transport_fw(
         // [STAT] 控制包(SQ/CQ/MSI)入口计数
         if (task->is_ctrl) {
             ctrl_total_count++;
+#if TEST_CFG_REAL8_TRACE_REPLAY
+            // [8盘实测回放] 同读口: 只计 CTRL 总数, 不做 SQ/CQ/MSI 推断。
+#else
 #ifdef TEST_CFG_S13_IOVA_512MB
             if (task->iova == 0x22000000)      ctrl_sq_count++;
             else if (task->iova == 0x22001000) ctrl_cq_count++;
@@ -977,15 +1059,18 @@ tlm::tlm_sync_enum iommu_top::axi_slave_w_nb_transport_fw(
             else if (task->iova == 0x5001000)  ctrl_cq_count++;
             else                               ctrl_msi_count++;
 #endif
+#endif
         }
 
         // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
         track_4kb_page_in(task);
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
+#if !TEST_CFG_REAL8_TRACE_REPLAY
         printf("[IOMMU_TOP] axi_slave_w_nb_transport_fw(W-PORT): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> inbound_fifo_w [t=%.1f ns]\n",
                task->task_id, task->device_id, task->iova, task->at, ts_ns);
         fflush(stdout);
+#endif
 
         // [STAT] 入口任务间隔采样(合计 + 写口)
         if (iommu_in_last_ns > 0.0) {
@@ -1351,9 +1436,11 @@ void iommu_top::ddr_arbiter_thread() {
                                    (source_module == DDR_SRC_PTW) ? "PTW" :
                                    (source_module == DDR_SRC_MSIPTW) ? "MSIPTW" :
                                    (source_module == DDR_SRC_MSI_MRIF) ? "MSI_MRIF" : "CTRL";
-            printf("[DDR_ARBITER] Route %s request: task_id=%u, addr=0x%lx, size=%d, is_write=%d -> DDR\n",
+            #if !TEST_CFG_REAL8_TRACE_REPLAY
+printf("[DDR_ARBITER] Route %s request: task_id=%u, addr=0x%lx, size=%d, is_write=%d -> DDR\n",
                    src_name, req.task_id, req.addr, req.size, req.is_write);
             fflush(stdout);
+#endif
 
             // Construct ddr_pending_entry and enqueue
             ddr_pending_entry_t pending;
@@ -1415,9 +1502,11 @@ void iommu_top::ddr_arbiter_thread() {
                 if (axi_master_1_read_outstanding > peak_axi_master_1_read_outstanding)
                     peak_axi_master_1_read_outstanding = axi_master_1_read_outstanding;
             }
-            printf("[DDR_ARBITER] axi_master_1 outstanding++ -> %d (task_id=%u)\n",
+            #if !TEST_CFG_REAL8_TRACE_REPLAY
+printf("[DDR_ARBITER] axi_master_1 outstanding++ -> %d (task_id=%u)\n",
                    axi_master_1_to_cmn_rnd_outstanding, req.task_id);
             fflush(stdout);
+#endif
         }
     }
 }
@@ -1440,9 +1529,11 @@ void iommu_top::send_response_to_initiator(iommu_task_t* task) {
     double ts_ns = sc_time_stamp().to_seconds() * 1e9;
     double entry_ns = task->timestamp.to_seconds() * 1e9;
     double e2e_ns = ts_ns - entry_ns;
-    printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d [entry=%.1f ns, exit=%.1f ns, e2e=%.1f ns]\n",
+    #if !TEST_CFG_REAL8_TRACE_REPLAY
+printf("[IOMMU_TOP] send_response_to_initiator: task_id=%u, pa=0x%lx, state=%d [entry=%.1f ns, exit=%.1f ns, e2e=%.1f ns]\n",
            task->task_id, task->pa, task->state, entry_ns, ts_ns, e2e_ns);
     fflush(stdout);
+#endif
 
 #if TEST_CFG_MULTI_DEVICE_SCENE
     md_trace.stamp(task->task_id, iommu_md::Point::RESPONSE);
