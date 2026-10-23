@@ -305,6 +305,67 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev)
         -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
         -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) $(MULTIDEV_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multidev_mc_data)
+    # [纯数据多设备×多通道] 8设备×2通道: 只压测 512B 读写数据任务(不发 SQ/CQ/MSI 控制信息),
+    #   读写端口完全独立注入(SPLIT_RW=1, sender_r/sender_w 各走读口/写口)。机制参考
+    #   rand4k_msi_mix_multidev_mc(16设备×8通道), 复用同一线程源, 以 TEST_CFG_MD_DATA_ONLY=1 隔离:
+    #   测量每设备 = 组数×8 个 512B 数据包, 组号奇读偶写交替; 报告前缀 multidev_mc_rwsplit_data_*。
+    MULTIDEV_DATA_N ?= 8
+    MULTIDEV_DATA_CHAN ?= 2
+    MULTIDEV_IOVA_MB ?= 512
+    MULTIDEV_GROUPS ?= 909
+    MULTIDEV_QUEUE_DEPTH ?= 32
+    MULTIDEV_RR_START ?= 0
+    MULTIDEV_D ?= 3
+    MULTIDEV_PERDEV_WO ?= 1
+    DEDUP_ADM ?= 1
+    MULTIDEV_DATA_SLINK_NS ?= 50
+    ifeq ($(filter $(MULTIDEV_DATA_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTIDEV_DATA_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTIDEV_DATA_CHAN),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MULTIDEV_DATA_CHAN must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MULTIDEV_IOVA_MB),16 512),)
+        $(error MULTIDEV_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(MULTIDEV_IOVA_MB),512)
+        SCENE13_PTW ?= 64
+        SCENE13_BUFFER ?= 320
+        SCENE13_GLOBAL ?= 640
+        SCENE13_READ ?= 320
+        SCENE13_WRITE ?= 320
+        MULTIDEV_DATA_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        SCENE13_PTW ?= 64
+        SCENE13_BUFFER ?= 320
+        MULTIDEV_DATA_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=640 \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=320 \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=320
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multidev_mc_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTIDEV_MC_SCENE=1 \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_MD_DATA_ONLY=1 \
+        -DTEST_CFG_NUM_DEVICES=$(MULTIDEV_DATA_N) \
+        -DTEST_CFG_MD_CHAN_PER_DEV=$(MULTIDEV_DATA_CHAN) \
+        -DTEST_CFG_NUM_PAGES=$(MULTIDEV_GROUPS) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=$(MULTIDEV_QUEUE_DEPTH) \
+        -DTEST_CFG_MD_RR_START=$(MULTIDEV_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=$(MULTIDEV_PERDEV_WO) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTIDEV_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTIDEV_DATA_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=1 \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=65536 $(MULTIDEV_DATA_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
     # 多设备 × 每设备多通道: N 设备, 每设备内部 C 通道, 共 N*C 条流, 2D 逐包轮询(流号 i=c*N+d)。
     #   轮询顺序: (d1,c1)..(dN,c1),(d1,c2)..(dN,c2),.. 通道外层、设备内层, 每次访问取1包 -> 各通道
@@ -327,6 +388,9 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
     # [DDR页表访问延时] SLINK单趟延时(ns): 一次DDR页表访问 = 前向SLINK + DDR内部100 + 回程SLINK。
     #   默认50(合计200ns), 与单设备读写分离基线一致。
     MULTIDEV_MC_SLINK_NS ?= 50
+    # [纯数据负载] 1=只发 8x512B 读写数据包, 不发 SQ/CQ/MSI 控制包(无控制包预热);
+    #   默认0=既有含控制包负载, 行为不变。
+    MULTIDEV_MC_DATA_ONLY ?= 0
     ifeq ($(filter $(MULTIDEV_MC_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
         $(error MULTIDEV_MC_N must be an integer in 1..16)
     endif
@@ -371,7 +435,8 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTIDEV_MC_SLINK_NS) \
         -DTEST_CFG_SPLIT_RW_PORTS=$(MULTIDEV_MC_SPLIT_RW) \
-        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTIDEV_MC_RWQ_DEPTH) $(MULTIDEV_MC_LAYOUT_FLAGS)
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTIDEV_MC_RWQ_DEPTH) \
+        -DTEST_CFG_MD_DATA_ONLY=$(MULTIDEV_MC_DATA_ONLY) $(MULTIDEV_MC_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan)
     # 单设备多通道激励注入: 同一设备(device_id=0/GSCID=1)内 n 路并发通道,
     #   每通道各自在 IOVA 范围内随机选 4KB(组内 8x512B 连续) + 共享 SQ/CQ/MSI 控制包,
@@ -571,6 +636,46 @@ else ifeq ($(TEST), real8_trace_replay)
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=1 \
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(REAL8_SLINK_NS) \
         -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(REAL8_DDR_NS)
+else ifeq ($(TEST), real16_trace_replay)
+    # [16盘实测回放] 两组 8 盘实测 TLP 记录逐包交替轮询回放:
+    #   组A = 实测 xlsx(205/206/207/208/211/212/213/214 -> DID 0..7);
+    #   组B = 组A 内存虚拟副本(request id 逐行+8, 不落地 _1.xlsx) -> DID 8..15;
+    #   每方向 A[0],B[0],A[1],B[1]... 交替注入, 模拟 16 设备公共交错发包;
+    #   两组 4KB 页映射完全独立(页表键=(组别<<32)|原始页号, 同地址也不复用);
+    #   每文件取前 10000 包, 共 40000 包。固定配置与 real8 完全一致,
+    #   保证 16盘 vs 8盘 为设备数/负载单变量对照。
+    #   TEST_CFG_REAL8_TRACE_REPLAY 为 trace-replay 场景宏(命名沿袭), iommu 侧
+    #   占用采样/统计路径依赖该宏, 故 16 盘沿用定义, 不修改 iommu/ 任何代码。
+    #   独立对象根 build_real16/ 与独立目标 iommu_model_real16: 不复用、不清理
+    #   根 build/, 不覆盖现有 iommu_model/iommu_model_real8 与历史结果。
+    REAL16_N ?= 16
+    REAL16_PTW ?= 64
+    REAL16_BUFFER ?= 320
+    REAL16_GLOBAL ?= 640
+    REAL16_READ ?= 320
+    REAL16_WRITE ?= 320
+    REAL16_SLINK_NS ?= 50
+    REAL16_DDR_NS ?= 100
+    BUILD_ROOT ?= build_real16
+    TARGET ?= iommu_model_real16
+    TEST_THREAD_SRC = rp/test_rp_real16_trace_replay_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_REAL8_TRACE_REPLAY=1 \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=$(REAL16_N) \
+        -DTEST_CFG_SPLIT_RW_PORTS=1 \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=1 \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(REAL16_GLOBAL) \
+        -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(REAL16_READ) \
+        -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(REAL16_WRITE) \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(REAL16_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(REAL16_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=1 \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(REAL16_SLINK_NS) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(REAL16_DDR_NS)
 else ifeq ($(TEST), msi_perf)
     # MSI地址翻译性能模型功能验证 (方案修订v2)
     #   三设备覆盖: 场景A(S1=Bare直达MSIPT) / 场景B(两级PTW S1后识别+is_msi回填)
