@@ -203,6 +203,20 @@ public:
     //   用于回答"每包固定延时瓶颈落在哪一级"，避免只看占比不看绝对能力。
     void print_serial_stage_budget_report() const;
 
+    // [STAT需求] 入口/去重 4个FIFO(pt_request/pt_update/dedup_request/dedup_update)占用采样:
+    //   每个时钟拍读取 num_available(), 记录占用峰值与时间加权平均占用/利用率。
+    //   窗口对每个FIFO独立取[首包非空~末包非空], 避免 warmup/drain 稀释。
+    struct FifoOccStat {
+        const char* name = "";
+        int    depth = 0;
+        int    peak  = 0;
+        double integral_occ_ns   = 0.0;   // sum(occ * dt_ns)
+        double first_nonempty_ns = -1.0;
+        double last_nonempty_ns  = -1.0;
+    };
+    void fifo_util_sampler_thread();
+    void print_fifo_util_report() const;
+
 private:
 #if TEST_CFG_MULTI_DEVICE_SCENE
     iommu_md::Trace* md_trace_ = nullptr;
@@ -412,6 +426,15 @@ private:
     uint64_t dedup_admission_wait_cnt_ = 0;
     double   dedup_admission_wait_ns_  = 0.0;
     int      dedup_request_fifo_peak_  = 0;
+    // [STAT需求] 4个入口/去重FIFO占用采样结果(峰值+时间加权平均)
+    FifoOccStat fifo_stat_pt_req_;
+    FifoOccStat fifo_stat_pt_upd_;
+    FifoOccStat fifo_stat_dedup_req_;
+    FifoOccStat fifo_stat_dedup_upd_;
+    // [STAT需求] PT Cache 响应链 pt_hit_response_fifo / pt_miss_response_fifo 占用采样
+    FifoOccStat fifo_stat_pt_hit_rsp_;
+    FifoOccStat fifo_stat_pt_miss_rsp_;
+    static void sample_fifo_occ(FifoOccStat& s, int occ, double now, double dt);
     // [hash冲突] 去重cache set满(无空way且不可替换)冲突统计:
     //   主请求MISS且set满 -> 任务bypass直转PTW(不写cacheline/不占Buffer)
     uint64_t dedup_hash_conflict_count_  = 0;   // 主请求hash冲突次数

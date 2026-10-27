@@ -114,19 +114,19 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       walker_front_response_fifo(16),
       walker_join_fifo(64),
       walker_serial_fifo(64),
-      dedup_request_fifo(1024),
-      dedup_update_fifo(1024),
+      dedup_request_fifo(64),
+      dedup_update_fifo(64),
       dedup_inside_request_fifo(32),
       dedup_hash_in_fifo(1),
       dc_response_fifo(16),
       pc_response_fifo(16),
-      pt_hit_response_fifo(1024),
-      pt_miss_response_fifo(1024),
+      pt_hit_response_fifo(32),
+      pt_miss_response_fifo(32),
       walker_response_fifo(1),
       msi_response_fifo(1024),
       dc_update_fifo(1),
       pc_update_fifo(1),
-      pt_update_fifo(1024),
+      pt_update_fifo(32),
       walker_update_fifo(1024),
       msi_update_fifo(1),
       dc_invalidate_fifo(1),
@@ -215,6 +215,8 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     SC_THREAD(walker_join_thread);
     SC_THREAD(msi_scheduler_thread);
     SC_THREAD(invalidation_worker_thread);
+    // [STAT需求] 入口/去重 4个FIFO占用采样线程(每拍读 num_available, 峰值+时间加权平均)
+    SC_THREAD(fifo_util_sampler_thread);
     
     // [NEW] 初始化PT Cache去重功能
     dedup_buffer_ = new DedupBuffer();
@@ -1437,6 +1439,65 @@ void CacheSubsystem::print_pt_multi_ram_report() const {
                total_busy / window_ns);
     }
     printf("===============================================\n\n");
+}
+
+// ============================================================
+// [STAT需求] 入口/去重 4个FIFO(pt_request/pt_update/dedup_request/dedup_update)占用采样
+//   每时钟拍读 num_available() 记录占用峰值与时间加权平均。
+//   窗口对每个FIFO独立取[首包非空~末包非空], 避免 warmup/drain 稀释平均值。
+// ============================================================
+void CacheSubsystem::sample_fifo_occ(FifoOccStat& s, int occ, double now, double dt) {
+    if (occ > s.peak) s.peak = occ;
+    if (occ > 0) {
+        if (s.first_nonempty_ns < 0.0) s.first_nonempty_ns = now;
+        s.last_nonempty_ns = now;
+    }
+    // 仅在窗口开启后才积分(含窗口内的瞬时空拍, 它们对 integral 贡献 0)
+    if (s.first_nonempty_ns >= 0.0) s.integral_occ_ns += occ * dt;
+}
+
+void CacheSubsystem::fifo_util_sampler_thread() {
+    // 深度取自构造初始化列表值(sc_fifo::size() 为 protected, 不可直接读)
+    fifo_stat_pt_req_    = FifoOccStat{"pt_request_fifo",    16,   0, 0.0, -1.0, -1.0};
+    fifo_stat_pt_upd_    = FifoOccStat{"pt_update_fifo",     32,   0, 0.0, -1.0, -1.0};
+    fifo_stat_dedup_req_ = FifoOccStat{"dedup_request_fifo", 64,   0, 0.0, -1.0, -1.0};
+    fifo_stat_dedup_upd_ = FifoOccStat{"dedup_update_fifo",  64,   0, 0.0, -1.0, -1.0};
+    fifo_stat_pt_hit_rsp_  = FifoOccStat{"pt_hit_response_fifo",  32, 0, 0.0, -1.0, -1.0};
+    fifo_stat_pt_miss_rsp_ = FifoOccStat{"pt_miss_response_fifo", 32, 0, 0.0, -1.0, -1.0};
+    const double dt = clock_period_.to_seconds() * 1e9;
+    while (true) {
+        wait(clock_period_);
+        const double now = sc_time_stamp().to_seconds() * 1e9;
+        sample_fifo_occ(fifo_stat_pt_req_,    pt_request_fifo.num_available(),    now, dt);
+        sample_fifo_occ(fifo_stat_pt_upd_,    pt_update_fifo.num_available(),     now, dt);
+        sample_fifo_occ(fifo_stat_dedup_req_, dedup_request_fifo.num_available(), now, dt);
+        sample_fifo_occ(fifo_stat_dedup_upd_, dedup_update_fifo.num_available(),  now, dt);
+        sample_fifo_occ(fifo_stat_pt_hit_rsp_,  pt_hit_response_fifo.num_available(),  now, dt);
+        sample_fifo_occ(fifo_stat_pt_miss_rsp_, pt_miss_response_fifo.num_available(), now, dt);
+    }
+}
+
+void CacheSubsystem::print_fifo_util_report() const {
+    const FifoOccStat* all[6] = {&fifo_stat_pt_req_, &fifo_stat_pt_upd_,
+                                 &fifo_stat_dedup_req_, &fifo_stat_dedup_upd_,
+                                 &fifo_stat_pt_hit_rsp_, &fifo_stat_pt_miss_rsp_};
+    printf("\n========== Entry/Dedup FIFO Utilization (每拍采样, 时间加权) ==========\n");
+    printf("  %-22s %7s %7s %10s %9s %10s\n",
+           "FIFO", "Depth", "Peak", "PeakUtil", "AvgOcc", "AvgUtil");
+    printf("  ----------------------------------------------------------------------\n");
+    for (int i = 0; i < 6; ++i) {
+        const FifoOccStat& s = *all[i];
+        const double win = s.last_nonempty_ns - s.first_nonempty_ns;
+        const double avg_occ = (win > 0.0) ? s.integral_occ_ns / win : 0.0;
+        const double peak_util = s.depth > 0 ? 100.0 * s.peak / s.depth : 0.0;
+        const double avg_util  = s.depth > 0 ? 100.0 * avg_occ / s.depth : 0.0;
+        printf("  %-22s %7d %7d %9.1f%% %9.2f %9.1f%%\n",
+               s.name, s.depth, s.peak, peak_util, avg_occ, avg_util);
+    }
+    printf("  注: 采样步长=%.1fns; AvgOcc/AvgUtil 时间加权窗口=[首包非空~末包非空], 各FIFO独立。\n",
+           clock_period_.to_seconds() * 1e9);
+    printf("==============================================================\n");
+    fflush(stdout);
 }
 
 // ============================================================

@@ -1884,6 +1884,9 @@ void iommu_top::print_cache_statistics() {
     // [STAT] 串行环节预算表(每包固定延时归属/多RAM分布与同RAM背靠背)
     cache_sub.print_serial_stage_budget_report();
 
+    // [STAT需求] 入口/去重 4个FIFO 占用峰值与时间加权平均利用率
+    cache_sub.print_fifo_util_report();
+
     // [STAT需求1] IOMMU 内部并发 4KB 页统计(每设备 + 全设备)
     print_4kb_concurrency_report();
 
