@@ -1,0 +1,23 @@
+# ============ 行尾统一（Windows 编辑器 + WSL 双环境）============
+# 所有文本文件入库统一为 LF，工作区检出也统一为 LF。
+# 避免 Windows 侧编辑器保存 CRLF 后，git 认为整文件被重写而产生假 diff
+# （近期 default_config.json 与 8 个脚本均被此问题污染）。
+* text=auto eol=lf
+
+# ============ 二进制文件（禁止任何文本/行尾转换）============
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.bmp   binary
+*.xlsx  binary
+*.xls   binary
+*.pdf   binary
+*.docx  binary
+*.zip   binary
+*.gz    binary
+*.o     binary
+*.a     binary
+*.so    binary
+*.lib   binary
+*.bin   binary
