@@ -44,6 +44,14 @@ typedef struct iommu_t {
     uint8_t command_queue_stall_for_itag;
     uint8_t ats_inv_req_timeout;
     uint8_t iofence_wait_pending_inv;
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [缓存失效多核] IOFENCE 需等待在途打标请求排空: do_iofence_c 置 1 并挂起(不推进 CQH),
+    //   由 cq_async_process_thread 停止打标 + 等 iofence_inflight_count 归零后清 0 并完成命令。
+    //   drain_done: 排空已完成标志, 使 do_iofence_c 第二次进入(经 do_pending_iofence)时跳过挂起直接完成。
+    //   [基线零影响] 仅失效场景编译, 保证基线 iommu_t 大小/布局逐位不变。
+    uint8_t iofence_wait_inflight_drain;
+    uint8_t iofence_inflight_drain_done;
+#endif
     uint8_t iofence_pending_PR, iofence_pending_PW, iofence_pending_AV, iofence_pending_WSI_BIT;
     uint64_t iofence_pending_ADDR;
     uint32_t iofence_pending_DATA;

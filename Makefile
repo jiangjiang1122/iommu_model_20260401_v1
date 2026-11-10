@@ -366,6 +366,228 @@ else ifeq ($(TEST), rand4k_msi_mix_multidev_mc_data)
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTIDEV_DATA_SLINK_NS) \
         -DTEST_CFG_SPLIT_RW_PORTS=1 \
         -DTEST_CFG_MC_RW_QUEUE_DEPTH=65536 $(MULTIDEV_DATA_LAYOUT_FLAGS)
+else ifneq ($(filter $(TEST),rand4k_nvme10_multidev_mc_n8c1 rand4k_nvme10_multidev_mc_n16c1 rand4k_nvme10_multidev_mc_n8c2 rand4k_nvme10_multidev_mc_n8c4 rand4k_nvme10_multidev_mc_n16c2 rand4k_nvme10_multidev_mc_n16c4),)
+    # 六个独立测试入口共用全部参数: N∈{8,16}×C∈{1,2,4}, 总包数恒=20000
+    # (N=8→250组/设备, N=16→125组/设备); 硬件参数逐宏一致(含 PERDEV_WRITE_ORDER=0)。
+    MDMC_NVME10_N := $(if $(filter rand4k_nvme10_multidev_mc_n16c1 rand4k_nvme10_multidev_mc_n16c2 rand4k_nvme10_multidev_mc_n16c4,$(TEST)),16,8)
+    MDMC_NVME10_C := $(if $(filter rand4k_nvme10_multidev_mc_n8c2 rand4k_nvme10_multidev_mc_n16c2,$(TEST)),2,$(if $(filter rand4k_nvme10_multidev_mc_n8c4 rand4k_nvme10_multidev_mc_n16c4,$(TEST)),4,1))
+    # [同配置对照] 默认不注入 PT_UPDATE_FIFO 宏 => n8/n16 均用模型默认深度32。
+    # 显式 MDMC10_PT_UPDATE_FIFO=1024 仅用于复现既往扩容实验, 该结果与n8基线不同构,
+    # 不得用于"仅扩设备"归因。
+    ifneq ($(strip $(MDMC10_PT_UPDATE_FIFO)),)
+        MDMC_NVME10_FIFO_FLAGS = -DTEST_CFG_PT_UPDATE_FIFO_DEPTH=$(MDMC10_PT_UPDATE_FIFO)
+    else
+        MDMC_NVME10_FIFO_FLAGS =
+    endif
+    # [A/B] agg_flush 两条通路写出顺序: 默认不注入宏, 用 iommu_perf_params.hh 的
+    # 默认值1(整组先释放dedup_update, 后回填pt_update); 显式置0可复现旧的按iova交替
+    # 顺序(即死锁版本), 便于同码A/B对照。
+    ifneq ($(strip $(MDMC10_AGG_FLUSH_ORDER)),)
+        MDMC_NVME10_ORDER_FLAGS = -DTEST_CFG_AGG_FLUSH_RELEASE_FIRST=$(MDMC10_AGG_FLUSH_ORDER)
+    else
+        MDMC_NVME10_ORDER_FLAGS =
+    endif
+    # [回放包型拟合] 每组8×512B+SQ64B+CQ16B，无MSI及尾包；只改激励，沿用合成页表与MSIPTP配置。
+    # n8c1=250组/设备(20000包, 基线); n16c1=125组/设备(激励减半, 总包数仍20000)。
+    MDMC81_GROUPS ?= $(if $(filter rand4k_nvme10_multidev_mc_n16c1 rand4k_nvme10_multidev_mc_n16c2 rand4k_nvme10_multidev_mc_n16c4,$(TEST)),125,250)
+    MDMC81_QUEUE_DEPTH ?= 32
+    MDMC81_RR_START ?= 0
+    MDMC81_D ?= 3
+    MDMC81_SLINK_NS ?= 50
+    MDMC81_DDR_NS ?= 100
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    BUILD_ROOT ?= build_mdmc_n$(MDMC_NVME10_N)c$(MDMC_NVME10_C)_nvme10
+    TARGET ?= iommu_model_mdmc_n$(MDMC_NVME10_N)c$(MDMC_NVME10_C)_nvme10
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multidev_mc_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTIDEV_MC_SCENE=1 -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_MD_NVME10=1 -DTEST_CFG_MD_DATA_ONLY=0 \
+        -DTEST_CFG_NUM_DEVICES=$(MDMC_NVME10_N) -DTEST_CFG_MD_CHAN_PER_DEV=$(MDMC_NVME10_C) \
+        -DTEST_CFG_NUM_PAGES=$(MDMC81_GROUPS) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=$(MDMC81_QUEUE_DEPTH) \
+        -DTEST_CFG_MD_RR_START=$(MDMC81_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=0 \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MDMC81_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=1 \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MDMC81_SLINK_NS) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MDMC81_DDR_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=1 -DTEST_CFG_MC_RW_QUEUE_DEPTH=65536 \
+        -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+        -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+        -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE) -DTEST_CFG_S13_IOVA_512MB \
+        $(MDMC_NVME10_FIFO_FLAGS) $(MDMC_NVME10_ORDER_FLAGS)
+else ifneq ($(filter $(TEST),rand4k_nvme10_rr_n8c1 rand4k_nvme10_rr_n8c2 rand4k_nvme10_rr_n8c4 rand4k_nvme10_rr_n8c8),)
+    # ===================== [激励重构 20261103] NVMe 任务队列 + 嵌套轮询仲裁 =====================
+    # 场景2(8盘1通道)/场景3(8盘2通道)的重构激励版: 与 rand4k_nvme10_multidev_mc_n8c1/n8c2
+    #   的 **IOMMU 侧宏集合逐宏同值**(PTW64/Buffer320/G-R-W=640-320-320/ADM1/D3/SPLIT_RW1/
+    #   PERDEV_WRITE_ORDER=0/PORT_WIDTH_BIT1024/SLINK50/DDR100/Walker+S2 Walker/512MB IOVA),
+    #   只把 RP 侧激励组织方式换成:
+    #     - 每设备 1 个 NVMe 任务生成进程, 严格按"1读任务+1写任务"交替生成;
+    #     - 1 个任务 = 10 包, 顺序 SQ(读,64B) -> 8x512B 数据 -> CQ(写,16B), 不含 MSI;
+    #     - 每设备 C 组读口队列 + C 组写口队列, 任务按方向拆成"方向突发"后各自 RR 派发;
+    #     - 全系统仅 2 个发送进程(读口/写口各 1, 各自独占端口), 嵌套轮询(外层设备 RR、
+    #       内层设备内队列 RR), 每步只出队 1 个包 => 设备内读写与同向多队列完全打散。
+    # 负载口径: 每设备 NVRR_TASKS(250) 个任务 x 10 包; N=8 时全局 20000 包
+    #   (读口 10000 / 写口 10000), 与场景1(8盘实测回放: 读表 10000 + 写表 10000)同规模。
+    # 独立对象根 build_nvrr_n8c{1,2}/ 与独立目标 iommu_model_nvrr_n8c{1,2}: 不覆盖
+    #   build/、build_mdmc_n8c*_nvme10/ 与既有二进制; 报告前缀由线程派生为
+    #   multidev_mc_rwsplit_nvme10_rr_n8_c{C}_512mb_*, 与旧场景 CSV 天然隔离。
+    # 注: TEST_CFG_MD_QUEUE_DEPTH / TEST_CFG_MD_RR_START 仅被旧线程文件
+    #   rp/test_rp_rand4k_msi_mix_multidev_mc_thread.cc 消费(本分支不编译该文件),
+    #   此处保留与旧分支同值只为让宏集合 diff 干净, 对新线程无任何作用。
+    NVRR_C := $(if $(filter rand4k_nvme10_rr_n8c8,$(TEST)),8,$(if $(filter rand4k_nvme10_rr_n8c4,$(TEST)),4,$(if $(filter rand4k_nvme10_rr_n8c2,$(TEST)),2,1)))
+    # [负载口径 20261104] per_queue(默认): 每个队列对自带 TASKS 任务/TASKS 独立页,
+    #   每设备任务数与页数随 C 线性翻倍(C=2 → 5000 包/设备, 全局 40000);
+    #   fixed_total: 每设备恒 NVRR_TASKS 任务(旧口径, 仅扩展性对照矩阵用)。
+    NVRR_LOAD_MODE ?= per_queue
+    ifeq ($(filter $(NVRR_LOAD_MODE),fixed_total per_queue),)
+        $(error NVRR_LOAD_MODE must be fixed_total or per_queue)
+    endif
+    NVRR_MSUF := $(if $(filter per_queue,$(NVRR_LOAD_MODE)),pq,ft)
+    NVRR_PQ   := $(if $(filter per_queue,$(NVRR_LOAD_MODE)),1,0)
+    NVRR_N ?= 8
+    NVRR_TASKS ?= 250
+    # 每队列突发深度: 0=自动(TASKS+8), 生成进程整轮不阻塞 => 供给恒充足(需求4),
+    #   与场景1(实测回放将全部记录载入内存后无界供给)同口径; 传较小值可重新启用
+    #   反压做灵敏度对比(但会把一侧端口的并发阻塞传导为另一侧缺任务)。
+    NVRR_QUEUE_DEPTH ?= 0
+    NVRR_RR_START ?= 0
+    NVRR_D ?= 3
+    NVRR_SLINK_NS ?= 50
+    NVRR_DDR_NS ?= 100
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(filter $(NVRR_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error NVRR_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(NVRR_C),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error NVRR_C must be an integer in 1..16)
+    endif
+    ifeq ($(strip $(NVRR_TASKS)),)
+        $(error NVRR_TASKS must be a positive even integer)
+    endif
+    ifeq ($(strip $(NVRR_QUEUE_DEPTH)),)
+        $(error NVRR_QUEUE_DEPTH must be a positive integer)
+    endif
+    BUILD_ROOT ?= build_nvrr_n$(NVRR_N)c$(NVRR_C)_$(NVRR_MSUF)
+    TARGET ?= iommu_model_nvrr_n$(NVRR_N)c$(NVRR_C)_$(NVRR_MSUF)
+    TEST_THREAD_SRC = rp/test_rp_nvme10_rr_arb_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_NVME10_RR_SCENE=1 -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_MD_NVME10=1 -DTEST_CFG_MD_DATA_ONLY=0 \
+        -DTEST_CFG_NUM_DEVICES=$(NVRR_N) -DTEST_CFG_MD_CHAN_PER_DEV=$(NVRR_C) \
+        -DTEST_CFG_NUM_PAGES=$(NVRR_TASKS) \
+        -DTEST_CFG_NVRR_TASKS_PER_DEV=$(NVRR_TASKS) \
+        -DTEST_CFG_NVRR_QUEUE_DEPTH=$(NVRR_QUEUE_DEPTH) \
+        -DTEST_CFG_NVRR_RR_START=$(NVRR_RR_START) \
+        -DTEST_CFG_NVRR_PER_QUEUE=$(NVRR_PQ) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=32 -DTEST_CFG_MD_RR_START=$(NVRR_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=0 \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(NVRR_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=1 \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(NVRR_SLINK_NS) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(NVRR_DDR_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=1 -DTEST_CFG_MC_RW_QUEUE_DEPTH=65536 \
+        -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+        -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+        -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE) -DTEST_CFG_S13_IOVA_512MB
+else ifeq ($(TEST), rand4k_msi_mix_multidev_mc_n8c2)
+    # [8设备 × 每设备2通道 合成激励] 在"单设备8通道"基线(rand4k_msi_mix_multichan,
+    #   稳态 ALL=286.90 M/s)之上, 把注入激励改为 8 设备 × 每设备 2 通道 = 16 条流。
+    #   轮询/建表/负载口径**完全沿用** rand4k_msi_mix_multidev_mc(16设备×8通道)的同一线程源
+    #   (2D 逐包轮询 i=c*N+d, 通道外层、设备内层, 每次访问取1包 -> 各通道 4KB 的 8x512B
+    #   高度交错注入), 仅以宏把 N/C 由 16/8 改为 8/2 => 与 16×8 场景单变量可比。
+    #   激励由本测试项参数构造(**非实测数据回放**); GROUPS/IOVA_MB/D/QUEUE_DEPTH/并发额度等
+    #   均可命令行覆盖, 供后续与实测 8 盘数据做对比与调参拟合。
+    # 负载口径 fixed_total: 每设备 GROUPS(909) 组均分到 C(2) 通道(chan base=454 rem=1),
+    #   每设备包数 = GROUPS*11+1 = 10000(tail MSI 只给通道0), 总 = N*10000 = 80000。
+    #   每包成分: 每组 8x512B 数据(组号奇读偶写交替) + SQ + CQ + MSI。
+    # 页策略: 全局唯一随机页, N*GROUPS = 7272 个 4KB 页两两不重复(跨设备跨通道);
+    #   容量判据 N*GROUPS <= RANGE_PAGES-D = 131072-3 = 131069 由线程内 static_assert 强制。
+    # 并发/延时默认对齐 286.90 基线: 512MB / PTW64 / Buf320 / Global640 / Read320 / Write320 /
+    #   ADM1 / D3 / PERDEV_WO1 / SPLIT_RW1 / PORT_WIDTH_BIT1024 / SLINK50+DDR100+SLINK50=200ns。
+    # 独立对象根 build_mdmc_n8c2/ 与目标 iommu_model_mdmc_n8c2: 不覆盖 build/ 与 iommu_model;
+    #   报告前缀由线程自动派生为 multidev_mc_rwsplit_n8_c2_512mb_*, 与 n16_c8 基线天然隔离。
+    MDMC82_N ?= 8
+    MDMC82_CHAN ?= 2
+    MDMC82_IOVA_MB ?= 512
+    MDMC82_GROUPS ?= 909
+    MDMC82_QUEUE_DEPTH ?= 32
+    MDMC82_RR_START ?= 0
+    MDMC82_D ?= 3
+    MDMC82_PERDEV_WO ?= 1
+    MDMC82_ADM ?= 1
+    MDMC82_SPLIT_RW ?= 1
+    MDMC82_RWQ_DEPTH ?= 65536
+    # [DDR页表访问延时] 一次访问 = 前向SLINK + DDR内部 + 回程SLINK; 默认 50+100+50=200ns,
+    #   与单设备8通道 286.90 基线一致(基线经 MULTICHAN_SLINK_NS/MULTICHAN_DDR_NS 显式注入同值)。
+    MDMC82_SLINK_NS ?= 50
+    MDMC82_DDR_NS ?= 100
+    # [纯数据负载] 0=含 SQ/CQ/MSI 控制包(对齐 286.90 基线的负载成分); 1=只发 8x512B 数据包。
+    MDMC82_DATA_ONLY ?= 0
+    ifeq ($(filter $(MDMC82_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MDMC82_N must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MDMC82_CHAN),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+        $(error MDMC82_CHAN must be an integer in 1..16)
+    endif
+    ifeq ($(filter $(MDMC82_IOVA_MB),16 512),)
+        $(error MDMC82_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(MDMC82_DATA_ONLY),0 1),)
+        $(error MDMC82_DATA_ONLY must be 0 or 1)
+    endif
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(MDMC82_IOVA_MB),512)
+        MDMC82_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB
+    else
+        MDMC82_LAYOUT_FLAGS =
+    endif
+    BUILD_ROOT ?= build_mdmc_n8c2
+    TARGET ?= iommu_model_mdmc_n8c2
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multidev_mc_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTIDEV_MC_SCENE=1 \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=$(MDMC82_N) \
+        -DTEST_CFG_MD_CHAN_PER_DEV=$(MDMC82_CHAN) \
+        -DTEST_CFG_NUM_PAGES=$(MDMC82_GROUPS) \
+        -DTEST_CFG_MD_QUEUE_DEPTH=$(MDMC82_QUEUE_DEPTH) \
+        -DTEST_CFG_MD_RR_START=$(MDMC82_RR_START) \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=$(MDMC82_PERDEV_WO) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MDMC82_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(MDMC82_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MDMC82_SLINK_NS) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MDMC82_DDR_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MDMC82_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MDMC82_RWQ_DEPTH) \
+        -DTEST_CFG_MD_DATA_ONLY=$(MDMC82_DATA_ONLY) \
+        -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+        -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+        -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE) $(MDMC82_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multidev_mc)
     # 多设备 × 每设备多通道: N 设备, 每设备内部 C 通道, 共 N*C 条流, 2D 逐包轮询(流号 i=c*N+d)。
     #   轮询顺序: (d1,c1)..(dN,c1),(d1,c2)..(dN,c2),.. 通道外层、设备内层, 每次访问取1包 -> 各通道
@@ -517,6 +739,184 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan)
         -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
         -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) \
         -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MULTICHAN_DDR_NS) $(MULTICHAN_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multichan_inval_strict)
+    # [单设备-单通道-strict模式缓存失效场景 + CQ反压闭环]
+    #   激励蓝本: rand4k_msi_mix_multichan(N=1, fixed_total) = 909 组 NVMe + 1 tail MSI = 10000 包。
+    #   IOMMU 出口记录"同一4KB页8个512B任务全部完成"时刻(TEST_CFG_CPU_INVAL_SCENE hook),
+    #   CPU 失效进程延时 INVAL_DELAY_NS(默认32ns, 模拟软件处理MSI中断)后经 CQ 下发
+    #   IOTINVAL.VMA **010** (GV=0,AV=1,PSCV=0,NL=0,ADDR=页IOVA): 按 addr 匹配,
+    #   只失效 PT Cache 匹配的 cacheline, NL=0 故不失效 Walker Cache, AV=1 故不进 LIB
+    #   (不启动延时失效策略)。
+    #   CQ 异步化: 投递(iotinval_doorbell)与执行(iommu_top::cq_async_process_thread)解耦,
+    #   深度 INVAL_CQ_DEPTH(默认64)。命令到达速率 >> 单笔执行速率 => CQ 被填满 =>
+    #   CPU 失效进程与请求发送进程同时被反压; IOMMU 每推进一次 CQH 释放 1 个队列槽
+    #   = 1 组 NVMe(11包)注入信用。稳态吞吐卡在软件-IOMMU 的 CQ 交互能力上。
+    #   报告前缀 mc_inval_strict_n1_512mb_*.csv, 与基线完全隔离。
+    MULTICHAN_N ?= 1
+    MULTICHAN_IOVA_MB ?= 512
+    MULTICHAN_GROUPS ?= 909
+    MULTICHAN_QUEUE_DEPTH ?= 32
+    MULTICHAN_D ?= 3
+    MULTICHAN_RR_START ?= 0
+    MULTICHAN_RWQ_DEPTH ?= 65536
+    MULTICHAN_SPLIT_RW ?= 1
+    MULTICHAN_SLINK_NS ?= 50
+    MULTICHAN_DDR_NS ?= 100
+    MULTICHAN_LOAD_MODE ?= per_channel
+    # [多核] CPU 核数 = 请求发送进程数 = CPU失效命令进程数(每核独立 nvme_id + 信用反压)。
+    #   输出仍为单通道(MULTICHAN_N=1); per_channel 口径下每核发 MULTICHAN_GROUPS 组=10000包。
+    CPU_COUNT ?= 1
+    # [失效参数] 完成->失效发起延时(ns, 软件反应); IOMMU 命令队列深度(条目数, 2的幂, 多核共享单CQ)
+    INVAL_DELAY_NS ?= 32
+    INVAL_CQ_DEPTH ?= 8192
+    # [防死锁] pt_update_fifo 深度: lazy 全局失效引发 miss 风暴时, agg_flush 会阻塞在
+    #   pt_update_fifo 写入上而无法继续发出 dedup_update(dedup Buffer 的唯一释放通路),
+    #   与 pt_ram_fifo/dedup_request_fifo/Buffer 形成环形等待。扩容使 agg_flush 永不
+    #   阻塞即可断开该环(治标; 默认 32 保持不变以不影响基线, 见 iommu_perf_params.hh)。
+    INVAL_PT_UPDATE_FIFO ?= 1024
+    DEDUP_ADM ?= 1
+    ifeq ($(filter $(CPU_COUNT),1 4 32),)
+        $(error inval_strict CPU_COUNT must be 1, 4 or 32)
+    endif
+    ifeq ($(filter $(MULTICHAN_IOVA_MB),16 512),)
+        $(error MULTICHAN_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(INVAL_CQ_DEPTH),64 128 256 512 1024 2048 4096 8192),)
+        $(error INVAL_CQ_DEPTH must be a power of 2 in 64..8192)
+    endif
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(MULTICHAN_IOVA_MB),512)
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTI_CHANNEL_INVAL_SCENE=1 \
+        -DTEST_CFG_CPU_INVAL_SCENE=1 \
+        -DTEST_CFG_INVAL_MODE=0 \
+        -DTEST_CFG_INVAL_DELAY_NS=$(INVAL_DELAY_NS) \
+        -DTEST_CFG_INVAL_CQ_DEPTH=$(INVAL_CQ_DEPTH) \
+        -DTEST_CFG_CPU_COUNT=$(CPU_COUNT) \
+        -DTEST_CFG_PT_UPDATE_FIFO_DEPTH=$(INVAL_PT_UPDATE_FIFO) \
+        -DTEST_CFG_NUM_CHANNELS=$(MULTICHAN_N) \
+        -DTEST_CFG_MC_QUEUE_DEPTH=$(MULTICHAN_QUEUE_DEPTH) \
+        -DTEST_CFG_MC_RR_START=$(MULTICHAN_RR_START) \
+        -DTEST_CFG_MC_LOAD_MODE=$(if $(filter fixed_total,$(MULTICHAN_LOAD_MODE)),1,0) \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=1 \
+        -DTEST_CFG_NUM_PAGES=$(MULTICHAN_GROUPS) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTICHAN_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MULTICHAN_DDR_NS) $(MULTICHAN_LAYOUT_FLAGS)
+else ifeq ($(TEST), rand4k_msi_mix_multichan_inval_lazy)
+    # [单设备-单通道-lazy模式缓存失效场景 + CQ反压闭环] 与 inval_strict 共用 CQ 异步模型,
+    #   差别在 CPU 失效进程: 每 INVAL_LAZY_N(默认32, 可配 16/32/64/128/256) 个"4KB页最后一个TLP包返回"
+    #   事件后发一笔 IOTINVAL.VMA **100** (GV=1,AV=0,PSCV=0,GSCID=1): 扫描缓存表匹配
+    #   GSCID, 清除 PT Cache 与 Walker Cache 中所有 GSCID 匹配的行(本场景全部行 GSCID=1,
+    #   等价整表清除), 并由 IOMMU 内部**启动延时失效策略**(LIB 记录 + VN 递增, 查询
+    #   旁路比对 CL.VN<LIB.VN 生效, VN 回绕触发 PT+Walker 批量扫表)。
+    #   报告前缀 mc_inval_lazy_n1_512mb_*.csv。
+    MULTICHAN_N ?= 1
+    MULTICHAN_IOVA_MB ?= 512
+    MULTICHAN_GROUPS ?= 909
+    MULTICHAN_QUEUE_DEPTH ?= 32
+    MULTICHAN_D ?= 3
+    MULTICHAN_RR_START ?= 0
+    MULTICHAN_RWQ_DEPTH ?= 65536
+    MULTICHAN_SPLIT_RW ?= 1
+    MULTICHAN_SLINK_NS ?= 50
+    MULTICHAN_DDR_NS ?= 100
+    MULTICHAN_LOAD_MODE ?= per_channel
+    # [多核] CPU 核数 = 请求发送进程数 = CPU失效命令进程数(每核独立 nvme_id + 信用反压)。
+    CPU_COUNT ?= 1
+    # [失效参数] 完成->失效发起延时(ns, 软件反应); lazy 批量 N(每 N 个 4KB 页完成发一笔全局失效);
+    #   IOMMU 命令队列深度(条目数, 2的幂, 多核共享单CQ)
+    #   [N 双效应] N 同时是每核初始发送信用(init_credit=N, 见测试线程 run_epoch):
+    #     N 越大 => 失效粒度越粗(命令更少) 且 稳态在途组数 cpu_count*N 越大。
+    #     两个效应叠加, 故扫 N 时吞吐变化不能只归因于"失效命令条数减少"。
+    INVAL_DELAY_NS ?= 32
+    INVAL_LAZY_N ?= 32
+    INVAL_CQ_DEPTH ?= 8192
+    # [INVAL_LAZY_N 白名单] N 决定每核在途窗口(cpu_count*N 组): 取非 2 的幂会与
+    #   GROUPS(909) 不整除, N>GROUPS 则每核一组都发不满、只剩 final-drain 收尾,
+    #   两种都会让失效条数/并发口径失真 => 只允许下面 5 档。
+    ifeq ($(filter $(INVAL_LAZY_N),16 32 64 128 256),)
+        $(error INVAL_LAZY_N must be 16, 32, 64, 128 or 256)
+    endif
+    # [防死锁] 见 inval_strict 分支同注: lazy 全局失效的 miss 风暴会让 agg_flush
+    #   阻塞在 pt_update_fifo 上, 切断 dedup Buffer 的唯一释放通路 => 环形等待死锁。
+    INVAL_PT_UPDATE_FIFO ?= 1024
+    DEDUP_ADM ?= 1
+    # [CPU_COUNT 白名单] 原为 1/4/32; 为做 cpu 规模扫描(c8)放开 2/8/16。
+    #   约束来源: 测试线程 static_assert(NCHAN<=32) 与 iommu_top::MAX_CPU_COUNT=32。
+    ifeq ($(filter $(CPU_COUNT),1 2 4 8 16 32),)
+        $(error inval_lazy CPU_COUNT must be 1, 2, 4, 8, 16 or 32)
+    endif
+    ifeq ($(filter $(MULTICHAN_IOVA_MB),16 512),)
+        $(error MULTICHAN_IOVA_MB must be 16 or 512)
+    endif
+    ifeq ($(filter $(INVAL_CQ_DEPTH),64 128 256 512 1024 2048 4096 8192),)
+        $(error INVAL_CQ_DEPTH must be a power of 2 in 64..8192)
+    endif
+    SCENE13_PTW ?= 64
+    SCENE13_BUFFER ?= 320
+    SCENE13_GLOBAL ?= 640
+    SCENE13_READ ?= 320
+    SCENE13_WRITE ?= 320
+    ifeq ($(MULTICHAN_IOVA_MB),512)
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_S13_IOVA_512MB \
+            -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    else
+        MULTICHAN_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
+            -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
+            -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    endif
+    TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc
+    TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
+        -DTEST_CFG_MULTI_CHANNEL_INVAL_SCENE=1 \
+        -DTEST_CFG_CPU_INVAL_SCENE=1 \
+        -DTEST_CFG_INVAL_MODE=1 \
+        -DTEST_CFG_INVAL_DELAY_NS=$(INVAL_DELAY_NS) \
+        -DTEST_CFG_INVAL_LAZY_N=$(INVAL_LAZY_N) \
+        -DTEST_CFG_INVAL_CQ_DEPTH=$(INVAL_CQ_DEPTH) \
+        -DTEST_CFG_CPU_COUNT=$(CPU_COUNT) \
+        -DTEST_CFG_PT_UPDATE_FIFO_DEPTH=$(INVAL_PT_UPDATE_FIFO) \
+        -DTEST_CFG_NUM_CHANNELS=$(MULTICHAN_N) \
+        -DTEST_CFG_MC_QUEUE_DEPTH=$(MULTICHAN_QUEUE_DEPTH) \
+        -DTEST_CFG_MC_RR_START=$(MULTICHAN_RR_START) \
+        -DTEST_CFG_MC_LOAD_MODE=$(if $(filter fixed_total,$(MULTICHAN_LOAD_MODE)),1,0) \
+        -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
+        -DTEST_CFG_NUM_DEVICES=1 \
+        -DTEST_CFG_NUM_PAGES=$(MULTICHAN_GROUPS) \
+        -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=$(MULTICHAN_D) \
+        -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
+        -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \
+        -DTEST_CFG_PTW_MAX_OUTSTANDING_TASKS=$(SCENE13_PTW) \
+        -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=$(SCENE13_BUFFER) \
+        -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
+        -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
+        -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) \
+        -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MULTICHAN_DDR_NS) $(MULTICHAN_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     # [MPS/MRRS=128B 小包场景] 在 rand4k_msi_mix_multichan 基线(单设备/8通道/512MB/DDR页表200ns/
     #   PTW64/Buf320/Global640/Read320/Write320/ADM1/D3, 稳态ALL=250.43 Mreq/s)之上,
@@ -545,6 +945,13 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     # [MPS/MRRS 粒度(字节)] 默认128; 传512 可退化为基线切割, 用于自检参数化中性。
     MULTICHAN_MPS ?= 128
     DEDUP_ADM ?= 1
+    # [去重延迟更新] 小包场景去重Cache更新优化开关(TEST_CFG_DEDUP_DELAYED_UPDATE):
+    #   1=PTW组完成(1+D)结果先入延迟FIFO(深度24/每条目定时器200ns/压力阈值20),
+    #     按三条件转入dedup_update_fifo, 延迟清除去重Cache占位;
+    #   0=旧方案PTW直写dedup_update_fifo。开关on时去重Buffer默认320->416。
+    DEDUP_DELAYED_UPDATE ?= 1
+    DEDUP_DELAYED_FIFO_DEPTH ?= 24
+    DEDUP_DELAYED_TIMER_NS ?= 200
     ifeq ($(filter $(MULTICHAN_N),1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
         $(error MULTICHAN_N must be an integer in 1..16)
     endif
@@ -564,7 +971,11 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
     endif
     # [并发资源] 默认对齐九逸单设备基线; 可命令行升级/降级
     SCENE13_PTW ?= 64
-    SCENE13_BUFFER ?= 320
+    ifeq ($(DEDUP_DELAYED_UPDATE),1)
+        SCENE13_BUFFER ?= 416
+    else
+        SCENE13_BUFFER ?= 320
+    endif
     SCENE13_GLOBAL ?= 640
     SCENE13_READ ?= 320
     SCENE13_WRITE ?= 320
@@ -577,6 +988,13 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
         MULTICHAN_MPS_LAYOUT_FLAGS = -DTEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING=$(SCENE13_GLOBAL) \
             -DTEST_CFG_IOMMU_READ_MAX_OUTSTANDING=$(SCENE13_READ) \
             -DTEST_CFG_IOMMU_WRITE_MAX_OUTSTANDING=$(SCENE13_WRITE)
+    endif
+    ifeq ($(DEDUP_DELAYED_UPDATE),1)
+        MULTICHAN_DELAYED_UPD_FLAGS = -DTEST_CFG_DEDUP_DELAYED_UPDATE=1 \
+            -DTEST_CFG_DEDUP_DELAYED_FIFO_DEPTH=$(DEDUP_DELAYED_FIFO_DEPTH) \
+            -DTEST_CFG_DEDUP_DELAYED_UPDATE_TIMER_NS=$(DEDUP_DELAYED_TIMER_NS)
+    else
+        MULTICHAN_DELAYED_UPD_FLAGS =
     endif
     TEST_THREAD_SRC = rp/test_rp_rand4k_msi_mix_multichan_mps128_thread.cc
     TEST_FLAGS = -DTEST_RAND_4K -DTEST_TWO_STAGE \
@@ -598,7 +1016,7 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_mps128)
         -DTEST_CFG_DEDUP_ADMISSION_CTRL=$(DEDUP_ADM) \
         -DTEST_CFG_SLINK_NOC_LATENCY_NS=$(MULTICHAN_SLINK_NS) \
         -DTEST_CFG_SPLIT_RW_PORTS=$(MULTICHAN_SPLIT_RW) \
-        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_MPS_LAYOUT_FLAGS)
+        -DTEST_CFG_MC_RW_QUEUE_DEPTH=$(MULTICHAN_RWQ_DEPTH) $(MULTICHAN_MPS_LAYOUT_FLAGS) $(MULTICHAN_DELAYED_UPD_FLAGS)
 else ifeq ($(TEST), real8_trace_replay)
     # [8盘实测回放] 两组实测 TLP 记录(4k_randrw_mem_1021_MRd/MWr)逐包回放:
     #   8 设备(205/206/207/208/211/212/213/214 -> DID 0..7), 读写各一条常驻发送进程,
@@ -624,7 +1042,7 @@ else ifeq ($(TEST), real8_trace_replay)
         -DTEST_CFG_MULTI_DEVICE_SCENE=1 \
         -DTEST_CFG_NUM_DEVICES=$(REAL8_N) \
         -DTEST_CFG_SPLIT_RW_PORTS=1 \
-        -DTEST_CFG_PERDEV_WRITE_ORDER=1 \
+        -DTEST_CFG_PERDEV_WRITE_ORDER=0 \
         -DTEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3 \
         -DTEST_CFG_PTW_WALKER_CACHE_ENABLED=1 -DTEST_CFG_WALKER_CACHE_S2_ENABLED=1 \
         -DTEST_CFG_AXI_PORT_WIDTH_BIT=1024 \

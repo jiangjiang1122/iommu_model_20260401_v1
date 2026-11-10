@@ -297,6 +297,11 @@ struct iommu_task_t {
     uint8_t is_bare_translation;
     uint8_t is_b_transport;         // 1 if task created via b_transport (don't delete in forwarder)
     uint8_t is_ctrl;                // [场景13] 1=SQ/CQ/MSI控制包(不计入IOPS), 0=Data数据包
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [缓存失效多核] 仅失效场景编译, 保证基线 iommu_task_t 大小/堆布局逐位不变。
+    uint32_t nvme_id;               // NVMe任务组号(=CPU核id), 从PayloadExtention传递
+    uint8_t iofence_tagged;         // IOFENCE在途打标: 1=已打标(需排空后才完成iofence)
+#endif
 
     // NEW: 去重模块相关
     uint8_t dedup_head_index = 0xFF;  // Buffer任务链头指针（0-255，0xFF=无效）
@@ -329,6 +334,9 @@ struct iommu_task_t {
           is_msi(0), is_mrif(0), mrif_nid(0), dest_mrif_addr(0),
           cause(0), iotval(0), iotval2(0),
           is_bare_translation(0), is_b_transport(0), is_ctrl(0),
+#if TEST_CFG_CPU_INVAL_SCENE
+          nvme_id(0), iofence_tagged(0),
+#endif
           dedup_head_index(0xFF),
           state(TASK_INIT), dc_valid(0), dc_hit(0), pc_valid(0), pc_hit(0),
           need_pc(0), tlm_trans_ptr(nullptr), walk_ctx() {}

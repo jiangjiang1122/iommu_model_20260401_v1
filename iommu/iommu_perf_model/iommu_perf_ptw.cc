@@ -5,6 +5,7 @@
 #include "iommu_top.hh"
 #include "iommu_task_cache_convert.hh"
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 // [STAT] Helper function to print PTW task DDR access summary
@@ -2628,7 +2629,8 @@ void iommu_top::ptw_rsp_process_thread() {
                 dedup_upd.pt_data.g_pte.raw = task->g_pte.raw;
                 dedup_upd.pt_data.reserved.is_msi = task->is_msi ? 1U : 0U;
                 dedup_upd.timestamp = sc_time_stamp();
-                cache_sub.dedup_update_fifo.write(dedup_upd);
+                // [去重延迟更新] 统一入队封装: on=延迟FIFO, off=直写dedup_update_fifo
+                cache_sub.dedup_update_enqueue(dedup_upd);
                 main_task_flushed_via_chain = true;  // 任务将由 dedup flush 回调转发
                 printf("[PTW_NO_PREFETCH] task_id=%u -> dedup_update enqueued (iova=0x%lx, pa_base=0x%lx)\n",
                        task->task_id, main_iova, dedup_upd.dedup_pa_base);
@@ -2657,7 +2659,8 @@ void iommu_top::ptw_rsp_process_thread() {
                         pf_clean.dedup_pa_base = 0;
                         pf_clean.pt_data.reserved.is_msi = 0U;
                         pf_clean.timestamp = sc_time_stamp();
-                        cache_sub.dedup_update_fifo.write(pf_clean);
+                        // [去重延迟更新] 统一入队封装: on=延迟FIFO, off=直写dedup_update_fifo
+                        cache_sub.dedup_update_enqueue(pf_clean);
                     }
                     printf("[PTW_MSI_CLEAN] task_id=%u -> cleared %u prefetch placeholder CLs (base_iova=0x%lx)\n",
                            task->task_id, D_clean, main_iova);
@@ -3023,19 +3026,46 @@ void iommu_top::agg_flush_process_thread() {
         // [重构] 统一处理: 每个 iova 写 dedup_update_fifo(刷 Buffer + 清 dedup 占位),
         //        正常组额外写 pt_update_fifo(填 PT Cache 常规 CL)。
         //        fault/大页组仅写 dedup_update_fifo(释放挂起任务, 不填 PT Cache)。
+        // [释放优先] 先收集本组两条通路的全部消息, 再按开关决定写出顺序:
+        //   TEST_CFG_AGG_FLUSH_RELEASE_FIRST=1: 整组释放消息(dedup_update)写完才写
+        //     回填消息(pt_update)。
+        //   【作用边界修正 20261109】本开关只能保证"**本组**的释放不被本组的回填阻断"。
+        //     它**不能**保护"其后组": 本线程是单线程、一次只处理一个组, 一旦卡在
+        //     第 N 组的 write_pt_update(pt_update_fifo 满), 就永远回不到循环头去取
+        //     第 N+1 组 => 后续组的释放消息根本生产不出来。实测(8盘8通道,
+        //     pt_update_fifo=32): 已调度 174 组、仅走完 61 组、积压 113 组永不释放,
+        //     主占位 147 创建/38 释放 => 112 条链头成为孤儿, Buffer 满而 ptw=0/groups=0。
+        //     真正防死锁靠 PT_UPDATE_FIFO_DEPTH=1024(见 iommu_perf_params.hh 的推导),
+        //     使 agg_flush 的回填写入不可能被顶住。本开关保留为组内顺序的纵深防御。
+        //   =0: 按 iova 交替写(旧行为), 供 A/B 复现历史时序与死锁。
+        //   timestamp 一律在真正写出前赋值, 与旧实现语义一致; 消息内容不变。
+        std::vector<iommu::CacheMessage> dedup_msgs, pt_msgs;
+        std::vector<std::pair<int, int>> iova_slots;  // 每iova的(释放,回填)下标, -1=无
         uint32_t processed_iova_count = 0;
         for (uint32_t i = 0; i < pgu.total_tasks && i < pgu.batch_updates.size(); i++) {
             uint64_t iova = pgu.batch_updates[i].first;
             const iommu::PTData& pt_data = pgu.batch_updates[i].second;
             if (iova == 0) continue;
 #if TEST_CFG_MULTI_DEVICE_SCENE
-            iommu_md::require(pt_data.vs_pte.V != 0 && pt_data.g_pte.V != 0,
-                              "两阶段聚合结果PTE无效，禁止写入缓存或唤醒等待者");
+            // [FIX 20261109] 预取任务读到"未映射的相邻 4KB 页"时，PTW_VS_PTE_READ 分支已
+            //   把该槽 vs_ptes/g_ptes 清零并 skip(见 1379 分支)。此处若继续 require 断言，
+            //   就与 walk 阶段的 skip 语义冲突 => 直接 abort。
+            //   合法性: 该 slot 的 iova 是预取推导出的相邻页地址，从未有真实任务请求，
+            //   dedup buffer 无占位、PT Cache 无 CL，跳过(不回填/不释放)等价于"未预取"。
+            //   触发条件: 页集合覆盖 512MB 区末页时, 预取 +D 越过 RANGE_PAGES 上界(测试侧
+            //   建表用 page+k<RANGE_PAGES 挡住了，模型侧只挡 2MB 边界, 挡不住区上界)。
+            if (pt_data.vs_pte.V == 0 || pt_data.g_pte.V == 0) {
+                printf("[AGG_FLUSH] task_id=%u slot=%u iova=0x%lx -> PTE invalid (纯预取槽，跳过)\n",
+                       pgu.task_id, i, (unsigned long)iova);
+                fflush(stdout);
+                continue;
+            }
 #endif
 
             uint64_t pa_base = (i < pgu.pa_bases.size()) ? pgu.pa_bases[i] : 0ULL;
+            int dedup_slot = -1, pt_slot = -1;
 
-            // (a) 写 dedup_update_fifo: 由 dedup_scheduler 查 dedup_cache + 刷 Buffer + 清占位
+            // (a) 释放通路 dedup_update: 由 dedup_scheduler 查 dedup_cache + 刷 Buffer + 清占位
             //     [bypass预取] bypass组跳过: 主任务未在dedup cache占位/未挂buffer, 按需求
             //     "去重cache未命中则不操作,不写dedup cache,不操作buffer", 故bypass组不碰dedup
             if (!pgu.is_bypass) {
@@ -3047,14 +3077,14 @@ void iommu_top::agg_flush_process_thread() {
                 dedup_upd.iova = iova;
                 dedup_upd.dedup_pa_base = pa_base;
                 dedup_upd.pt_data = pt_data;
-                dedup_upd.timestamp = sc_time_stamp();
                 dedup_upd.md_group_start_ns = pgu.group_start_ns;        // [STAT] 持有延时细分
                 dedup_upd.md_group_complete_ns = pgu.group_complete_ns;
                 dedup_upd.md_agg_flush_ns = pgu.agg_flush_ns;
-                cache_sub.dedup_update_fifo.write(dedup_upd);
+                dedup_slot = static_cast<int>(dedup_msgs.size());
+                dedup_msgs.push_back(dedup_upd);
             }
 
-            // (b) 正常组+bypass组: 写 pt_update_fifo 填 PT Cache 常规 CL(fault/大页组跳过)
+            // (b) 回填通路 pt_update: 正常组+bypass组填 PT Cache 常规 CL(fault/大页组跳过)
             //     [bypass预取] bypass组PT Cache未命中则update插入cacheline(正常更新PT Cache)
             if (!pgu.has_fault && !pgu.is_hugepage) {
                 iommu::CacheMessage update_msg;
@@ -3068,27 +3098,48 @@ void iommu_top::agg_flush_process_thread() {
                 update_msg.pt_gstage_x4 = pgu.gstage_x4;
                 update_msg.pt_data = pt_data;
                 update_msg.from_prefetch = false;
-                update_msg.timestamp = sc_time_stamp();
-
-                const double pt_upd_start_ns = sc_time_stamp().to_seconds() * 1e9;
-                const int pt_fifo_avail = cache_sub.pt_update_fifo.num_available();
-                cache_sub.pt_update_fifo.write(update_msg);
-                const double pt_upd_end_ns = sc_time_stamp().to_seconds() * 1e9;
-                const double pt_upd_delay_ns = pt_upd_end_ns - pt_upd_start_ns;
-                monitor_pt_update_total_count++;
-                monitor_pt_update_total_ns += pt_upd_delay_ns;
-                if (pt_upd_delay_ns > monitor_pt_update_max_ns)
-                    monitor_pt_update_max_ns = pt_upd_delay_ns;
-                if (pt_upd_delay_ns > 0.0) {
-                    monitor_pt_update_fifo_block_count++;
-                    monitor_pt_update_fifo_block_ns += pt_upd_delay_ns;
-                    printf("[MONITOR_PT_UPD] FIFO BLOCK: group=%u, iova=0x%lx, delay=%.1f ns, fifo_avail=%d\n",
-                           pgu.group_id, iova, pt_upd_delay_ns, pt_fifo_avail);
-                    fflush(stdout);
-                }
+                pt_slot = static_cast<int>(pt_msgs.size());
+                pt_msgs.push_back(update_msg);
             }
+            iova_slots.emplace_back(dedup_slot, pt_slot);
             processed_iova_count++;
         }
+
+        // 两条通路的写出封装: 计时/打点口径与旧实现完全一致(仅写出时机受开关控制)。
+        auto write_dedup_update = [&](iommu::CacheMessage& dedup_upd) {
+            dedup_upd.timestamp = sc_time_stamp();
+            // [去重延迟更新] 统一入队封装: on=写延迟FIFO(组完成即完成), off=直写
+            cache_sub.dedup_update_enqueue(dedup_upd);
+        };
+        auto write_pt_update = [&](iommu::CacheMessage& update_msg) {
+            update_msg.timestamp = sc_time_stamp();
+            const double pt_upd_start_ns = sc_time_stamp().to_seconds() * 1e9;
+            const int pt_fifo_avail = cache_sub.pt_update_fifo.num_available();
+            cache_sub.pt_update_fifo.write(update_msg);
+            const double pt_upd_end_ns = sc_time_stamp().to_seconds() * 1e9;
+            const double pt_upd_delay_ns = pt_upd_end_ns - pt_upd_start_ns;
+            monitor_pt_update_total_count++;
+            monitor_pt_update_total_ns += pt_upd_delay_ns;
+            if (pt_upd_delay_ns > monitor_pt_update_max_ns)
+                monitor_pt_update_max_ns = pt_upd_delay_ns;
+            if (pt_upd_delay_ns > 0.0) {
+                monitor_pt_update_fifo_block_count++;
+                monitor_pt_update_fifo_block_ns += pt_upd_delay_ns;
+                printf("[MONITOR_PT_UPD] FIFO BLOCK: group=%u, iova=0x%lx, delay=%.1f ns, fifo_avail=%d\n",
+                       pgu.group_id, update_msg.iova, pt_upd_delay_ns, pt_fifo_avail);
+                fflush(stdout);
+            }
+        };
+
+#if TEST_CFG_AGG_FLUSH_RELEASE_FIRST
+        for (auto& dedup_upd : dedup_msgs) write_dedup_update(dedup_upd);
+        for (auto& update_msg : pt_msgs) write_pt_update(update_msg);
+#else
+        for (const auto& slot : iova_slots) {
+            if (slot.first >= 0) write_dedup_update(dedup_msgs[slot.first]);
+            if (slot.second >= 0) write_pt_update(pt_msgs[slot.second]);
+        }
+#endif
         printf("[AGG_FLUSH] group_id=%u, %s%s (%u iovas) flushed at %.1f ns (after %u ns PEQ agg-flush delay)\n",
                pgu.group_id,
                pgu.has_fault ? "FLUSH-only(fault)" :

@@ -128,10 +128,13 @@ bool WalkerSubCache::lookup_ram(const WalkerTag& tag, WalkerData& out_data,
                 stats_.record_miss(cache_name_);
                 stats_.record_lookup(cache_name_);
                 stats_.record_latency(cache_name_, op_latency_ns);
-                printf("[WALKER_LAZY_INVAL] %s stale CL dropped on lookup (gscid=%u, pscid=%u, va_seg=0x%lx, CL.VN=%u < LIB.VN=%u)\n",
-                       cache_name_.c_str(), tag.gscid, tag.pscid,
-                       (unsigned long)tag.va_segment, cl_vn, lib_vn);
-                fflush(stdout);
+                // [降噪] 同 PT Cache: 保留前16笔 + 之后每256笔, 计数以 lazy_inval_drops_ 为准。
+                if (lazy_inval_drops_ <= 16 || (lazy_inval_drops_ % 256) == 0) {
+                    printf("[WALKER_LAZY_INVAL] #%lu %s stale CL dropped on lookup (gscid=%u, pscid=%u, va_seg=0x%lx, CL.VN=%u < LIB.VN=%u)\n",
+                           (unsigned long)lazy_inval_drops_, cache_name_.c_str(), tag.gscid, tag.pscid,
+                           (unsigned long)tag.va_segment, cl_vn, lib_vn);
+                    fflush(stdout);
+                }
                 return false;
             }
         }

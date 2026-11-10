@@ -188,7 +188,10 @@ public:
 
     int8_t reset_system(uint8_t mem_gb, uint16_t num_vms);
     uint32_t log2szm1(uint32_t n);
-    int8_t enable_cq(iommu_top *iommu,uint32_t nppn);
+    // [CQ深度] entries(默认0): 显式指定命令队列条目数(必须为2的幂), 此时
+    //   cqb.log2szm1 = log2(entries)-1, 使 IOMMU 侧 qsize = 1<<(log2szm1+1) = entries。
+    //   entries==0 时沿用原公式(按 nppn 页数换算), 行为与既有测试项完全一致。
+    int8_t enable_cq(iommu_top *iommu,uint32_t nppn,uint32_t entries = 0);
     int8_t enable_fq(iommu_top *iommu,uint32_t nppn);
     int8_t enable_disable_pq(iommu_top *iommu,uint32_t nppn, uint8_t enable_disable) ;
     int8_t enable_iommu(iommu_top *iommu,uint8_t iommu_mode);
@@ -196,10 +199,20 @@ public:
     // [失效] NL 参数(默认0): 非叶PTE失效扩展位, 需 capabilities.NL=1 才合法。
     // NL=1 且 AV=1 时 IOMMU 将联动失效 Walker Cache(非叶PTE缓存)全部级别。
     void iotinval(iommu_top *iommu,uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address, uint8_t NL = 0);
+    // [CQ异步] 与 iotinval() 相同的"写命令入CQ内存 + 推进CQT"动作, 但**不调用
+    //   process_commands()**: 命令留在队列中, 由 IOMMU 侧 cq_async_process_thread
+    //   逐笔取出执行(阻塞于失效流水线)后推进 CQH, 从而复现真实的 CQ 满反压。
+    //   投递后调用 iommu->cq_doorbell_ring() 敲门铃唤醒该线程。
+    void iotinval_doorbell(iommu_top *iommu,uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address, uint8_t NL = 0);
     void ats_command(iommu_top *iommu,uint8_t f3, uint8_t DSV, uint8_t PV, uint32_t PID, uint8_t DSEG, uint16_t RID, uint64_t payload) ;
     void generic_any(iommu_top *iommu,command_t cmd);
     void iodir(iommu_top *iommu,uint8_t f3, uint8_t DV, uint32_t DID, uint32_t PID);
     void iofence(iommu_top *iommu,uint8_t f3, uint8_t PR, uint8_t PW, uint8_t AV, uint8_t WSI_bit, uint64_t addr, uint32_t data);
+    // [CQ异步] 与 iofence() 相同的"写 IOFENCE.C 入CQ内存 + 推进CQT"动作, 但**不调用
+    //   process_commands()**: 命令留在队列中, 由 IOMMU 侧 cq_async_process_thread 取出。
+    //   IOMMU 执行 IOFENCE.C 时停止对在途请求打标, 等已打标请求全部排空后才推进 CQH。
+    //   与 iotinval_doorbell 成对使用(每笔 invalid 后紧跟一笔 iofence, CQ tail +2)。
+    void iofence_doorbell(iommu_top *iommu,uint8_t f3, uint8_t PR, uint8_t PW, uint8_t AV, uint8_t WSI_bit, uint64_t addr, uint32_t data);
 
     // ============================================================
     // [CPU侧] RISC-V hart 侧 Cache/TLB 失效指令行为建模

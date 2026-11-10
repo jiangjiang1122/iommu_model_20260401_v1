@@ -9,6 +9,7 @@
 #include <queue>
 #include <vector>
 #include <map>
+#include <deque>
 #include "iommu_struct.hh"
 #include "param_trans_def.hh"
 #include "iommu_task.hh"
@@ -41,6 +42,70 @@ extern uint64_t g_pt_cache_hit_count;
 extern uint64_t g_pt_cache_miss_count;
 extern uint64_t g_msipt_cache_hit_count;
 extern uint64_t g_msipt_cache_miss_count;
+
+// [稳态窗口] 全局门控标志: 仅当仿真时刻落在稳态窗口(完成数 10%~90%)内为 true。
+//   峰值/最值/分位数类统计无法用"双快照做差"得到窗口值, 必须在累加现场用本标志
+//   过滤。定义为全局(而非 iommu_top 成员)是为了让 dedup_buffer.h 这类不持有
+//   iommu_top 引用的纯头文件组件也能参与同一套窗口口径。
+extern bool g_iommu_steady_sampling;
+
+// ===================== [稳态窗口] 全量统计快照 =====================
+// 需求: 每一项性能指标都只统计稳态窗口(完成数 10%~90%), 排除预热段与收尾段。
+// 机制: 在 steady_start_ns / steady_end_ns 两个触发点各拍一次全量快照。
+//   - 计数/求和/时间加权面积类 => 用 (end - base) 做差, 得到窗口内增量;
+//   - 峰值/最值/分位数类不可做差 => 由 iommu_top 的 steady_pk_* / steady_e2e_values_
+//     在窗口内(steady_sampling_==true)单独累加。
+// 本结构只做"可读快照", 不含任何行为, 因此可整体拷贝。
+struct iommu_steady_snap_t {
+    bool     valid = false;
+    double   t_ns = 0.0;                    // 快照时刻(ns)
+    // ---- 吞吐 / 字节 ----
+    uint64_t completed = 0;
+    uint64_t slave_r_bytes = 0, slave_w_bytes = 0, master0_bytes = 0;
+    // ---- cache 命中率: CacheStats 全量拷贝(pt/dc/pc/msipt/dedup/walker_c1..c3) ----
+    std::map<std::string, iommu::CacheStats> cache_stats;
+    // ---- 全局命中率计数器 ----
+    uint64_t g_dc_hit = 0, g_dc_miss = 0, g_pc_hit = 0, g_pc_miss = 0;
+    uint64_t g_pt_hit = 0, g_pt_miss = 0, g_msipt_hit = 0, g_msipt_miss = 0;
+    // ---- 控制包(SQ/CQ/MSI) PT Cache 命中路径 ----
+    uint64_t ctrl_total = 0, ctrl_pt_hit = 0, ctrl_pt_miss = 0;
+    uint64_t ctrl_sq = 0, ctrl_cq = 0, ctrl_msi = 0;
+    // ---- 并发: 时间加权面积(task·ns) + 快照瞬间的计数(用于尾段结算) ----
+    double   conc_area_r = 0, conc_area_w = 0, conc_area_g = 0;
+    double   conc_last_change_ns = 0;
+    uint32_t conc_r = 0, conc_w = 0, conc_g = 0;
+    double   ptw_conc_area = 0, ptw_conc_last_change_ns = 0;
+    uint32_t ptw_conc = 0;
+    // ---- 4KB 页并发: 全设备面积 + 每设备面积/瞬时并发/上次变化时刻 ----
+    double   kb4_total_area = 0, kb4_total_last_change_ns = 0;
+    std::map<uint32_t, double>   kb4_dev_area;
+    std::map<uint32_t, uint32_t> kb4_dev_conc;
+    std::map<uint32_t, double>   kb4_dev_last;
+    // ---- PTW ----
+    uint64_t ptw_completed = 0, ptw_ddr_reads = 0;
+    double   ptw_exec_ns = 0;
+    uint64_t ptw_task_lat_count = 0;
+    std::map<uint32_t, uint32_t> ptw_ddr_dist, ptw_main_ddr_dist, ptw_pf_ddr_dist;
+    uint64_t ptw_group_count = 0;
+    double   ptw_group_total_ns = 0;
+    // ---- 去重 Buffer ----
+    double   buf_occ_integral = 0, buf_occ_last_change_ns = 0;
+    double   buf_hold_total_ns = 0;
+    uint64_t buf_hold_count = 0;
+    uint32_t buf_valid = 0;
+    // ---- 去重 Cache ----
+    uint64_t dedup_lookup_total = 0, dedup_lookup_hit = 0, dedup_lookup_miss = 0;
+    uint64_t dedup_req_total = 0, dedup_req_hit = 0;
+    uint64_t dedup_hash_conflict = 0, dedup_conflict_bypass = 0, dedup_buf_full_bypass = 0;
+    uint64_t dedup_sample_count = 0;
+    double   dedup_sample_valid_sum = 0, dedup_sample_req_sum = 0;
+    // ---- 入口队列 backlog ----
+    double   inq_area = 0, inq_r_area = 0, inq_w_area = 0, inq_last_ns = 0;
+    uint32_t inq_count = 0;
+    // ---- 端到端延时 ----
+    double   e2e_sum = 0;
+    uint64_t e2e_count = 0;
+};
 
 class iommu_top : public sc_module
 {
@@ -135,6 +200,116 @@ public:
     void track_4kb_page_out(iommu_task_t* task);   // 出口: 512B 数据任务完成
     void reset_4kb_concurrency_window();           // 测量 epoch 前重置窗口
     void print_4kb_concurrency_report() const;     // 打印并发 4KB 页统计报告
+
+#if TEST_CFG_CPU_INVAL_SCENE
+    // ===================== [CPU缓存失效场景] 4KB 页完成事件记录点(多核) =====================
+    //   在 track_4kb_page_out 中, 当同一 (nvme_id, 4KB页) 的 8 个 512B 数据任务全部完成
+    //   (task_count 减到 0)时, 记录该页的完成时刻并通知对应核的 CPU 失效进程。
+    //   纯记录+事件通知, 无任何 wait, 不改变既有时序; 宏关闭时零成员零代码。
+    static constexpr unsigned MAX_CPU_COUNT = 32;   // 支持的最大 CPU 核数(cpu_count 上限)
+    struct cpu_inval_page_t {
+        uint64_t page_iova;   // 完成的 4KB 页值(iova & ~0xFFF)
+        double   done_ns;     // 该页最后一个 512B 任务的出口完成时刻(ns)
+        uint32_t nvme_id;     // [多核] 该页所属 NVMe 组号(=CPU核id)
+    };
+    // [多核] 每核独立的完成事件队列与通知事件: CPU_j 只消费 cpu_inval_done_pages[j],
+    //   即每个进程只监控与自己进程 id 一致的 nvme_id 任务完成数目。
+    std::deque<cpu_inval_page_t> cpu_inval_done_pages[MAX_CPU_COUNT];
+    sc_event cpu_inval_page_event[MAX_CPU_COUNT];
+    uint64_t cpu_inval_4kb_done_total = 0;                    // 全核累计完成 4KB 页数(报告/自检)
+    uint64_t cpu_inval_4kb_done_per_cpu[MAX_CPU_COUNT] = {};  // 每核累计完成 4KB 页数
+    // [多核] 按 (nvme_id, 4KB页) 独立跟踪页内在途 512B 任务数; 与原 kb4_dev_stats(按设备
+    //   聚合的并发统计)完全独立, 不触碰基线并发口径。仅在宏开启时编译。
+    std::map<std::pair<uint32_t,uint64_t>, kb4_page_info_t> cpu_inval_pages;
+
+    // ===================== [CPU缓存失效场景] IOFENCE 在途请求打标机制 =====================
+    //   与 LIB/VN 延时失效打标完全独立。语义(需求 5-(2)):
+    //     - io_bridge(端口准入)对所有还在 iommu 内部的请求持续打标; tag 释放(reorder 出口)时撤销;
+    //     - 执行 iofence 指令则停止打标(iofence_tagging_active=false);
+    //     - 等待所有已打标请求结束(iofence_inflight_count 归零)后才完成 iofence;
+    //     - iofence 执行完成, 再次开始打标。
+    //   打标开始时刻 = iommu 开始执行该 iofence 命令的时刻(非 CPU 更新 CQT 时刻)。
+    bool     iofence_tagging_active = true;   // 仅在 iofence 排空期间置 false
+    int      iofence_inflight_count = 0;      // 已打标的在途请求数(端口准入++, reorder 出口--)
+    sc_event iofence_drain_event;             // 计数下降时 notify, 唤醒排空等待
+    uint64_t iofence_exec_count = 0;          // 完成的 iofence 命令数(统计)
+    double   iofence_drain_ns_sum = 0.0;      // 排空等待累计时长(ns)
+    double   iofence_drain_ns_max = 0.0;      // 单次最长排空等待(ns)
+    // [多核] 第 1 个 IOFENCE 执行(排空)窗口内"新准入"统计: 验证批量注入受 outstanding
+    //   上限节流时, iofence 执行期间是否仍有新任务/新4KB页进入 IOMMU(lazy_c4 应 >0)。
+    //   窗口 = [停止打标, 恢复打标](即 iofence 排空执行期)。
+    bool     iofence_win_active      = false; // 窗口开启标志(排空期间为 true)
+    uint64_t iofence_win_admit_tasks = 0;     // 窗口内新准入(未打标)任务数
+    uint64_t iofence_win_new_pages   = 0;     // 窗口内新准入(未打标)的 distinct 4KB页数
+    std::map<uint64_t,uint8_t> iofence_win_page_seen;       // 窗口内未打标准入页去重
+    uint64_t iofence_win_tagged_tasks = 0;    // 窗口开启瞬间"已打标在途"任务数(本条iofence等待对象)
+    uint64_t iofence_win_tagged_pages = 0;    // 窗口开启瞬间"已打标在途" distinct 4KB页数
+    // 全局已打标在途页引用计数(维护 tagged_distinct_pages)
+    std::map<uint64_t,uint32_t> iofence_tagged_page_refcnt;
+    uint64_t iofence_tagged_distinct_pages = 0;
+    uint64_t first_iofence_win_tasks = 0;     // 第1个窗口快照: 未打标准入任务/页
+    uint64_t first_iofence_win_pages = 0;
+    uint64_t first_iofence_win_tagged_tasks = 0;  // 第1个窗口快照: 已打标在途任务/页
+    uint64_t first_iofence_win_tagged_pages = 0;
+    double   first_iofence_win_ns    = 0.0;
+    // 全窗口聚合(求每 iofence 平均 + 分布均衡性 min/max/标准差/非零数)
+    uint64_t iofence_win_sum_tasks   = 0, iofence_win_sum_pages = 0;
+    uint64_t iofence_win_sum_tagged_tasks = 0, iofence_win_sum_tagged_pages = 0;
+    uint64_t iofence_win_max_tasks   = 0, iofence_win_max_pages = 0;
+    uint64_t iofence_win_min_tasks   = ~0ULL, iofence_win_min_pages = ~0ULL;
+    uint64_t iofence_win_max_tagged_tasks = 0, iofence_win_max_tagged_pages = 0;
+    uint64_t iofence_win_min_tagged_tasks = ~0ULL, iofence_win_min_tagged_pages = ~0ULL;
+    double   iofence_win_sq_tasks = 0.0, iofence_win_sq_pages = 0.0;  // 平方和(算标准差)
+    uint64_t iofence_win_nonzero     = 0;     // 未打标准入>0 的窗口个数
+
+    // ===================== [CPU缓存失效场景] CQ 异步执行 + 反压闭环 =====================
+    //   真实硬件语义: 软件写命令入 CQ 内存并推进 CQT(门铃), IOMMU 命令处理线程
+    //   逐笔取指 -> 阻塞执行失效流水线 -> 推进 CQH。二者速率不匹配时 CQ 被填满
+    //   (深度 64 -> 可用 63), 软件侧写入被反压; 同时 IOMMU 每推进一次 CQH 释放
+    //   一个队列槽, 该槽即请求发送进程的"1 组 NVMe(11 包)注入信用"。
+    //   不变式: credit = 深度 - CQ占用 - 未写入CQ的完成事件数
+    //     => credit 归零与 CQ 满同时发生, 两个反压点由同一机制满足。
+    //   全部成员/线程均在宏守卫内, 宏关闭时零成员零代码, 基线不受影响。
+    sc_event  cq_doorbell_event;        // RP 写 CQT 后门铃(唤醒命令处理线程)
+    sc_event  cq_cqh_event;             // CQH 前进(释放 1 个槽 = 1 组注入信用)
+    uint64_t  cq_submitted_cmds  = 0;   // 已投递(写入 CQ 内存 + CQT 前进)的命令数
+    uint64_t  cq_completed_cmds  = 0;   // 已执行完并推进 CQH 的命令数
+    uint32_t  cq_depth_entries   = 0;   // CQ 深度(条目数), 由测试项在 setup 时写入
+    int       cq_inject_credit   = 0;   // 请求发送进程注入信用(= 空闲 CQ 槽)
+    bool      cq_credit_gate_enabled = false;  // 信用门控是否启用(strict/lazy 均启用)
+    // 每笔命令完成(CQH 前进 1 次)释放的注入信用 = 可注入的 NVMe 组数:
+    //   strict: 每 4KB 页(每组)一笔精准失效 => 1 组/命令;
+    //   lazy  : 每 N 个 4KB 页一笔全局失效 => N 组/命令(N = INVAL_LAZY_N)。
+    uint32_t  cq_credit_per_cmd  = 1;
+    uint64_t  cq_credit_earned   = 0;   // 累计授信组数(= completed × per_cmd)
+    uint32_t  cq_occ_peak        = 0;   // CQ 占用峰值(条目)
+    uint32_t  cq_occ_cur         = 0;   // 当前占用(时间加权采样用)
+    double    cq_occ_area_ns     = 0.0; // Σ(占用 × Δt), 用于时间加权均值
+    double    cq_occ_last_ns     = -1.0;// 上次占用变化时刻
+    double    cq_full_area_ns    = 0.0; // 占用 == 可用深度(满) 的累计时长
+    double    cq_exec_ns_sum     = 0.0; // Σ单笔命令执行耗时(取指->CQH推进)
+    double    cq_exec_ns_max     = 0.0;
+    double    cq_exec_ns_min     = 1e18;
+    double    cq_first_done_ns   = -1.0;// 首笔命令完成时刻
+    double    cq_last_done_ns    = 0.0; // 末笔命令完成时刻
+    double    cq_win_start_ns    = -1.0;// 测量窗口起点(由测试项设置, 用于占比计算)
+    double    cq_win_end_ns      = 0.0; // 测量窗口终点
+    // CQ 几何/占用便捷访问(寄存器口径: qsize = 1<<(cqb.log2szm1+1), 可用深度 = qsize-1)
+    uint32_t cq_qsize() const {
+        return 1u << (iommu_inst.reg_file.cqb.log2szm1 + 1);
+    }
+    uint32_t cq_usable_depth() const { return cq_qsize() - 1u; }
+    uint32_t cq_occupancy() const {
+        const uint64_t q = cq_qsize();
+        const uint64_t t = iommu_inst.reg_file.cqt.index % q;
+        const uint64_t h = iommu_inst.reg_file.cqh.index % q;
+        return static_cast<uint32_t>((t + q - h) % q);
+    }
+    void cq_async_process_thread();     // 常驻 SC_THREAD: 异步取指执行 + 推进 CQH
+    void cq_doorbell_ring();            // RP 侧调用: submitted++ + notify(SC_ZERO_TIME)
+    void cq_sample_occupancy();         // 占用/满 时间加权采样
+    void print_cq_async_report() const; // CQ 反压与注入信用统计块
+#endif
 
     #if TEST_CFG_REAL8_TRACE_REPLAY
         // [8盘实测回放] 去重Cache占用变化流式采样(无仿真时间开销, 宏未启用不新增成员)
@@ -333,7 +508,8 @@ public:
     uint64_t slave_0_total_bytes;    // axi_slave_0  入口接收总字节数(SPLIT下=读口)
     uint64_t slave_0w_total_bytes = 0;   // [读写端口分离] 写口接收总字节数(带宽分开统计)
     uint64_t master_0_total_bytes;   // axi_master_0 出口发送总字节数
-    uint64_t master_1_total_bytes;   // axi_master_1 DDR 访问总字节数
+    uint64_t master_1_total_bytes;   // axi_master_1 DDR 访问总字节数(有效字节)
+    uint64_t master_1_beat_bytes;    // [整拍占用] DDR 访问按 128bit 整拍向上取整后的占用字节数(beats*16)
     
     // ===================== Outstanding Peak Trackers =====================
     int peak_iommu_global_outstanding;     // IOMMU全局outstanding峰值
@@ -500,6 +676,34 @@ public:
     uint64_t ctrl_cq_count;                // CQ请求数
     uint64_t ctrl_msi_count;               // MSI请求数
 
+    // [STAT] 控制包(SQ/CQ/MSI)子类型分类: 按 IOVA 落在哪个控制页区判定。
+    //   仅用于统计报表, 不影响任何处理路径(MSIPT 等仍由 ext->at / msiptp 配置决定)。
+    //   [控制包散布 20261105] nvrr 场景的 SQ/CQ 已按设备页段散布到 45/24 个页,
+    //   不能再用"单一 IOVA 等值"判定(否则除第0页外全部被误归为 MSI)。
+    //   区间与 rp/test_rp_nvme10_rr_arb_thread.cc 的地址布局常量一致:
+    //     SQ 区 [0x22000000, 0x22400000) / CQ 区 [0x22400000, 0x22800000) / 哨兵 0x22800000
+    void classify_ctrl_pkt(uint64_t iova) {
+        ctrl_total_count++;
+#if TEST_CFG_NVME10_RR_SCENE
+        if      (iova >= 0x22000000ULL && iova < 0x22400000ULL) ctrl_sq_count++;
+        else if (iova >= 0x22400000ULL && iova < 0x22800000ULL) ctrl_cq_count++;
+        else                                                    ctrl_msi_count++;
+#elif TEST_CFG_REAL8_TRACE_REPLAY
+        // [8盘实测回放] 本场景不合成 SQ/CQ/MSI 子类型, 16B 写控制包仅计入 CTRL 总数,
+        //   不按固定 IOVA 误判为 MSI。
+#else
+#ifdef TEST_CFG_S13_IOVA_512MB
+        if      (iova == 0x22000000ULL) ctrl_sq_count++;
+        else if (iova == 0x22001000ULL) ctrl_cq_count++;
+        else                            ctrl_msi_count++;
+#else
+        if      (iova == 0x5000000ULL)  ctrl_sq_count++;
+        else if (iova == 0x5001000ULL)  ctrl_cq_count++;
+        else                            ctrl_msi_count++;
+#endif
+#endif
+    }
+
     // ===================== End-to-End Latency Statistics =====================
     double   iommu_total_e2e_latency_ns;  // 所有IO端到端延时总和(ns)
     double   iommu_e2e_max_ns;            // 单笔IO最大端到端延时(ns)
@@ -582,6 +786,29 @@ public:
     uint64_t steady_end_count;            // 稳态结束时的完成数
     uint64_t ptw_steady_start_completed;  // 稳态开始时PTW完成数
     uint64_t ptw_steady_end_completed;    // 稳态结束时PTW完成数
+
+    // ============ [稳态窗口] 双快照 + 窗口内单独累加的峰值/样本 ============
+    // steady_sampling_ : 当前仿真时刻是否落在稳态窗口内(peak/分位数类只在窗口内累加)
+    // steady_snap_ok_  : base 与 end 两个快照是否都已取到(取到才输出稳态口径报告)
+    iommu_steady_snap_t steady_snap_base_, steady_snap_end_;
+    bool     steady_sampling_ = false;
+    bool     steady_snap_ok_  = false;
+    uint32_t steady_pk_kb4_total_ = 0;                 // 窗口内 4KB 页并发峰值(全设备)
+    std::map<uint32_t, uint32_t> steady_pk_kb4_dev_;   // 窗口内每设备 4KB 页并发峰值
+    uint32_t steady_pk_conc_r_ = 0, steady_pk_conc_w_ = 0, steady_pk_conc_g_ = 0;
+    uint32_t steady_pk_ptw_conc_ = 0;
+    uint32_t steady_pk_buf_valid_ = 0;                 // 窗口内去重 Buffer 峰值占用
+    double   steady_e2e_max_ = 0.0, steady_e2e_min_ = 1e18;
+    std::vector<double> steady_e2e_values_;            // 窗口内 e2e 样本(算分位数)
+    double   steady_hold_max_ = 0.0, steady_hold_min_ = 1e18;
+    // 拍一次全量快照(会先强制结算所有面积型累加器的尾段, 保证窗口边界不丢面积)
+    void capture_steady_snapshot(iommu_steady_snap_t& s);
+    // 稳态窗口开启/关闭(由 output_delay_thread 在完成数达到 10%/90% 时调用)
+    void on_steady_window_begin();
+    void on_steady_window_end();
+    // 输出"仅稳态窗口"口径的全量指标报告(与全程口径并列, 不替换任何现有输出)
+    //   非 const: 需读取 cache_sub.get_pt_dedup_buffer() 等非 const 透传接口
+    void print_steady_window_report();
 
     // ===================== Walker Active Walks =====================
     std::map<uint32_t, iommu_task_t*> xdtw_active_walks;
@@ -806,6 +1033,14 @@ public:
             iommu_conc_last_change_ns = now_ns;
         }
         iommu_conc_last_sample_ns = now_ns;
+        // [稳态窗口] 峰值不可做差: 在每次变化前用旧值更新窗口内峰值。
+        //   begin 时已用当时值初始化, end 快照前会再调一次本函数(此时 sampling 仍为 true),
+        //   因此窗口内出现过的每一个计数值都会被看到, 不漏峰。
+        if (steady_sampling_) {
+            if ((uint32_t)iommu_read_outstanding   > steady_pk_conc_r_) steady_pk_conc_r_ = (uint32_t)iommu_read_outstanding;
+            if ((uint32_t)iommu_write_outstanding  > steady_pk_conc_w_) steady_pk_conc_w_ = (uint32_t)iommu_write_outstanding;
+            if ((uint32_t)iommu_global_outstanding > steady_pk_conc_g_) steady_pk_conc_g_ = (uint32_t)iommu_global_outstanding;
+        }
     }
 
     // 重排序辅助方法
@@ -985,6 +1220,7 @@ public:
         slave_0_total_bytes(0),
         master_0_total_bytes(0),
         master_1_total_bytes(0),
+        master_1_beat_bytes(0),
         peak_iommu_global_outstanding(0),
         peak_ptw_outstanding(0),
         peak_xdtw_dc_outstanding(0),
@@ -1158,6 +1394,11 @@ public:
         SC_THREAD(pt_forwarder_thread);
         SC_THREAD(msipt_forwarder_thread);
         SC_THREAD(fault_cq_proc_thread);
+#if TEST_CFG_CPU_INVAL_SCENE
+        // [CPU缓存失效场景] CQ 命令异步处理线程: 门铃驱动, 逐笔取指->执行失效
+        //   流水线(阻塞)->推进 CQH->释放 1 组注入信用。宏关闭时不注册, 零影响。
+        SC_THREAD(cq_async_process_thread);
+#endif
         SC_THREAD(ddr_arbiter_thread);
         SC_THREAD(reorder_output_thread);   // 出口重排序线程
         // [静态延时线] 入口(读/写各一条)/出口流水线延时常驻线程(替代 per-task sc_spawn)
@@ -1211,6 +1452,11 @@ public:
             ptw_concurrency_last_change_ns = now_ns;
         }
         ptw_concurrency_last_sample_ns = now_ns;
+        // [稳态窗口] 同上: 峰值不可做差, 在变化前用旧值更新窗口内峰值
+        if (steady_sampling_) {
+            const uint32_t cur = (uint32_t)ptw_outstanding_task_count;
+            if (cur > steady_pk_ptw_conc_) steady_pk_ptw_conc_ = cur;
+        }
     }
 
     // [STAT] PTW任务执行延时统一记录入口: 同时更新

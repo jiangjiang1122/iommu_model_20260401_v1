@@ -17,6 +17,9 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
     , io_id(-1)
     , sequence_id(-1)
     , is_ctrl(0)
+#if TEST_CFG_CPU_INVAL_SCENE
+    , nvme_id(0)
+#endif
     {
     }
 
@@ -28,6 +31,9 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         e->io_id = io_id;
         e->sequence_id =sequence_id;
         e->is_ctrl = is_ctrl;
+#if TEST_CFG_CPU_INVAL_SCENE
+        e->nvme_id = nvme_id;
+#endif
         return e;
     }
 
@@ -38,6 +44,9 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
         io_id = e.io_id;
         sequence_id=e.sequence_id;
         is_ctrl = e.is_ctrl;
+#if TEST_CFG_CPU_INVAL_SCENE
+        nvme_id = e.nvme_id;
+#endif
     }
 
     virtual void copy_from(tlm::tlm_extension_base const&ext)
@@ -100,6 +109,15 @@ struct PayloadExtention: tlm::tlm_extension<PayloadExtention>
 
     // [场景13] 控制包标记: 1=SQ/CQ/MSI(不计入IOPS), 0=Data(512B, 计入IOPS)
     uint32_t is_ctrl;
+
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [缓存失效多核] NVMe 任务组号(= 下发该组的 CPU 核 id / 请求发送进程 id)。
+    //   同一组 NVMe 任务(11 包)的每个包都携带相同 nvme_id, 贯穿整个地址翻译流水,
+    //   供 IOMMU 出口按 (nvme_id, 4KB页) 记录完成事件, CPU 侧只监控自己 nvme_id 的
+    //   任务完成数目。[基线零影响] 仅在 TEST_CFG_CPU_INVAL_SCENE=1 时编译,
+    //   保证基线场景 PayloadExtention 结构体大小/堆布局逐位不变。
+    uint32_t nvme_id;
+#endif
 };
 
 class NocTransaction;

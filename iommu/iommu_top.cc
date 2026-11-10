@@ -2,6 +2,7 @@
 #include "iommu_task_cache_convert.hh"
 #include <cstdio>
 #include <iostream>
+#include <cmath>
 
 // ===================== Cache命中率统计全局变量定义 =====================
 uint64_t g_dc_cache_hit_count = 0;
@@ -12,6 +13,9 @@ uint64_t g_pt_cache_hit_count = 0;
 uint64_t g_pt_cache_miss_count = 0;
 uint64_t g_msipt_cache_hit_count = 0;
 uint64_t g_msipt_cache_miss_count = 0;
+
+// [稳态窗口] 全局门控标志定义(声明见 iommu_top.hh; dedup_buffer.h 自行 extern)
+bool g_iommu_steady_sampling = false;
 
 // ===================== [失效] CQ->性能模型失效桥接 =====================
 // 由功能模型 iommu_command_queue.cc 的 do_inval_*/do_iotinval_* 调用。
@@ -108,6 +112,14 @@ void iommu_top::before_end_of_elaboration()
     }
 
     iommu_inst.reg_file.ddtp.iommu_mode = DDT_1LVL;
+
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [缓存失效多核] 显式初始化 IOFENCE 在途排空标志(字段仅失效场景编译)。
+    //   reset_iommu 仅 memset(reg_file), iommu_t 其余标量字段(含本组)不被清零;
+    //   未初始化会导致 do_iofence_c 首次进入误判 drain_done 而跳过排空。
+    iommu_inst.iofence_wait_inflight_drain = 0;
+    iommu_inst.iofence_inflight_drain_done = 0;
+#endif
 }
 
 /**********************************************/
@@ -172,6 +184,9 @@ void iommu_top::axi_slave_b_transport(tlm::tlm_generic_payload &trans, sc_time &
     task->no_write = ext->no_write;
     task->is_cxl_dev = 0;
     task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+#if TEST_CFG_CPU_INVAL_SCENE
+    task->nvme_id = ext->nvme_id;  // [缓存失效多核] NVMe任务组号(=CPU核id)贯穿翻译流水
+#endif
     task->iova = trans.get_address();
     task->length = trans.get_data_length();
     task->read_writeAMO = (trans.get_command() == tlm::TLM_READ_COMMAND) ? READ : WRITE;
@@ -232,7 +247,13 @@ void iommu_top::track_4kb_page_in(iommu_task_t* task) {
 #if TEST_CFG_REAL8_TRACE_REPLAY
     // [8盘实测回放] 数据任务包长覆盖 64B..1024B 等多种长度, 按计划口径
     //   "纳入所有 DATA 长度、排除 CTRL", 故只排除 is_ctrl; 旧场景仍保留 512B 门控。
-    if (!task || task->is_ctrl) return;
+    // [口径统一 20261109] 经 -DTEST_CFG_KB4_GATE_STRICT_512=1 可强制回放倒也只计 512B,
+    //   以便与合成场景(nvme10_rr 等)用同一仪器读数直接对照。仅改统计计入条件。
+    #if defined(TEST_CFG_KB4_GATE_STRICT_512) && TEST_CFG_KB4_GATE_STRICT_512
+        if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;
+    #else
+        if (!task || task->is_ctrl) return;
+    #endif
 #else
     if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 只统计512B数据任务
 #endif
@@ -241,6 +262,18 @@ void iommu_top::track_4kb_page_in(iommu_task_t* task) {
     if (kb4_win_first_ns < 0.0) kb4_win_first_ns = now_ns;  // 首次采样开启窗口
 
     const uint64_t page = task->iova & ~0xFFFULL;   // iova -> 4KB 页值
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [多核] 按 (nvme_id, page) 独立跟踪页内在途 512B 任务数(与 kb4_dev_stats 并发统计独立)。
+    //   置于 kb4_dev_stats 早返回之前, 保证每笔入口都被记录。
+    {
+        auto& ci = cpu_inval_pages[{task->nvme_id, page}];
+        const bool new_page = !ci.page_is_valid;
+        if (new_page) { ci.page_is_valid = true; ci.page_value = page; ci.task_count = 0; }
+        ci.task_count++;
+        // [窗口统计] iofence 执行窗口内新进入的 distinct (cpu,4KB页) 数
+        if (new_page && iofence_win_active) iofence_win_new_pages++;
+    }
+#endif
     kb4_dev_stat_t& ds = kb4_dev_stats[task->device_id];
     ds.in_tasks++;
 
@@ -266,6 +299,12 @@ void iommu_top::track_4kb_page_in(iommu_task_t* task) {
     ds.cur_conc++;
     if (ds.cur_conc > ds.peak_conc) ds.peak_conc = ds.cur_conc;
     if (old_total + 1 > kb4_total_peak) kb4_total_peak = old_total + 1;
+    // [稳态窗口] 峰值不可做差, 单独累加仅窗口内的峰值
+    if (steady_sampling_) {
+        if (ds.cur_conc > steady_pk_kb4_dev_[task->device_id])
+            steady_pk_kb4_dev_[task->device_id] = ds.cur_conc;
+        if (old_total + 1 > steady_pk_kb4_total_) steady_pk_kb4_total_ = old_total + 1;
+    }
 }
 
 // ------------------------------------------------------------------
@@ -277,13 +316,44 @@ void iommu_top::track_4kb_page_in(iommu_task_t* task) {
 void iommu_top::track_4kb_page_out(iommu_task_t* task) {
 #if TEST_CFG_REAL8_TRACE_REPLAY
     // [8盘实测回放] 与入口同口径: 只排除控制包, 不限包长。
-    if (!task || task->is_ctrl) return;
+    //   口径统一开关必须与 track_4kb_page_in 保持完全一致, 否则会出现
+    //   "入口计入/出口不计数"的失配, 导致 out_no_match 虚高与并发数永久不归零。
+    #if defined(TEST_CFG_KB4_GATE_STRICT_512) && TEST_CFG_KB4_GATE_STRICT_512
+        if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;
+    #else
+        if (!task || task->is_ctrl) return;
+    #endif
 #else
     if (!task || task->is_ctrl || task->length != KB4_DATA_LEN) return;  // 控制包不额外做操作
 #endif
 
     const double now_ns = sc_time_stamp().to_seconds() * 1e9;
     const uint64_t page = task->iova & ~0xFFFULL;
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [多核] 按 (nvme_id, page) 独立跟踪: 该核该页最后一个 512B 任务完成 -> 记录完成时刻,
+    //   压入对应核队列并 notify。与 kb4_dev_stats 的并发统计/早返回完全独立(置于其前)。
+    {
+        auto cit = cpu_inval_pages.find({task->nvme_id, page});
+        if (cit != cpu_inval_pages.end() && cit->second.page_is_valid) {
+            if (cit->second.task_count > 0) cit->second.task_count--;
+            if (cit->second.task_count == 0) {
+                cit->second.page_is_valid = false;
+                cit->second.page_value    = 0;
+                const uint32_t cpu = task->nvme_id;
+                if (cpu < MAX_CPU_COUNT) {
+                    cpu_inval_done_pages[cpu].push_back(cpu_inval_page_t{page, now_ns, cpu});
+                    ++cpu_inval_4kb_done_per_cpu[cpu];
+                    cpu_inval_page_event[cpu].notify(SC_ZERO_TIME);
+                }
+                ++cpu_inval_4kb_done_total;
+            }
+        } else {
+            printf("[KB4_CPU_ANOMALY] out-no-match: nvme_id=%u page=0x%lx task_id=%u\n",
+                   task->nvme_id, (unsigned long)page, task->task_id);
+            fflush(stdout);
+        }
+    }
+#endif
     kb4_dev_stat_t& ds = kb4_dev_stats[task->device_id];
     ds.out_tasks++;
 
@@ -310,6 +380,254 @@ void iommu_top::track_4kb_page_out(iommu_task_t* task) {
     kb4_accum_area(kb4_total_area_ns, old_total, kb4_win_last_change_ns, now_ns);
     if (ds.cur_conc > 0) ds.cur_conc--;
 }
+
+#if TEST_CFG_CPU_INVAL_SCENE
+// ============================================================================
+// [CPU缓存失效场景] CQ 命令异步处理 + 反压闭环
+//
+// 硬件语义(规范 3.2 命令队列):
+//   软件写命令入 CQ 内存 -> 推进 CQT(门铃); IOMMU 逐笔取指(cqh) -> 解码/合法性
+//   检查 -> 执行(本模型中 do_iotinval_vma -> perf_enqueue_cache_invalidation
+//   阻塞至失效流水线完成) -> 推进 CQH。软件侧在 cqt == (cqh-1) mod size 时
+//   不得写入(CQ 满), 必须等待 CQH 前进。
+//
+// 反压闭环(需求 1-(2)(3)(4)):
+//   每推进一次 CQH => 释放 1 个队列槽 => cq_inject_credit++ => 请求发送进程
+//   放行 1 组 NVMe 任务(11 包)。信用耗尽(= CQ 满)时请求发送进程被反压。
+// ============================================================================
+
+// RP 侧投递命令后敲门铃: 记账 + 占用采样 + 唤醒命令处理线程。
+// 无 wait, 不消耗仿真时间, 不改变既有翻译路径时序。
+void iommu_top::cq_doorbell_ring() {
+    cq_submitted_cmds++;
+    cq_sample_occupancy();
+    cq_doorbell_event.notify(SC_ZERO_TIME);
+}
+
+// 占用/满 时间加权采样: 在每个变化点(RP 投递 / CQH 推进)调用。
+void iommu_top::cq_sample_occupancy() {
+    const double now = sc_time_stamp().to_seconds() * 1e9;
+    const uint32_t occ = cq_occupancy();
+    const uint32_t usable = cq_usable_depth();
+    if (cq_occ_last_ns < 0.0) {           // 首次采样: 只建立基线
+        cq_occ_last_ns = now;
+        cq_occ_cur     = occ;
+        if (occ > cq_occ_peak) cq_occ_peak = occ;
+        return;
+    }
+    const double dt = now - cq_occ_last_ns;
+    if (dt > 0.0) {
+        cq_occ_area_ns += dt * static_cast<double>(cq_occ_cur);
+        if (cq_occ_cur >= usable) cq_full_area_ns += dt;
+    }
+    cq_occ_cur     = occ;
+    cq_occ_last_ns = now;
+    if (occ > cq_occ_peak) cq_occ_peak = occ;
+}
+
+// 常驻命令处理线程: 门铃驱动, 队空则等待; 每笔命令阻塞执行后推进 CQH。
+void iommu_top::cq_async_process_thread() {
+    while (true) {
+        // 队空等待门铃。检查与 wait 之间无时间推进(SystemC 协作式),
+        // 且 cq_doorbell_ring 的 SC_ZERO_TIME notify 只对已在等待的进程有效,
+        // 故必须"先判后等"以避免丢唤醒。
+        while (iommu_inst.reg_file.cqh.index == iommu_inst.reg_file.cqt.index) {
+            wait(cq_doorbell_event);
+        }
+        const uint64_t cqh_before = iommu_inst.reg_file.cqh.index;
+        const double t0 = sc_time_stamp().to_seconds() * 1e9;
+        cq_sample_occupancy();
+
+        // 复用功能模型完整命令处理: 取指 -> 解码 -> 执行(阻塞) -> CQH += 1
+        process_commands(&iommu_inst);
+
+#if TEST_CFG_CPU_INVAL_SCENE
+        // [IOFENCE排空] 若本条命令是 IOFENCE 且请求了在途打标排空(do_iofence_c 挂起, CQH 未推进):
+        //   停止打标 -> 等待所有已打标在途请求从 reorder 出口排空 -> 恢复打标 -> 经
+        //   do_pending_iofence 完成命令(推进 CQH, 不二次取指)。排空等待计入本命令执行耗时。
+        //   打标开始时刻 = 此刻(iommu 开始执行本 iofence), 而非 CPU 更新 CQT 的时刻。
+        if (iommu_inst.reg_file.cqh.index == cqh_before &&
+            iommu_inst.iofence_wait_inflight_drain) {
+            const bool is_first_iofence = (iofence_exec_count == 0);
+            // 每个 iofence 执行窗口都统计: 窗口=[停止打标,恢复打标]。
+            //   窗口开启瞬间快照"已打标在途"(本条 iofence 等待对象); 窗口内新准入=未打标。
+            iofence_win_active = true;
+            iofence_win_admit_tasks = 0;
+            iofence_win_new_pages = 0;
+            iofence_win_page_seen.clear();
+            iofence_win_tagged_tasks = iofence_inflight_count;
+            iofence_win_tagged_pages = iofence_tagged_distinct_pages;
+            iofence_tagging_active = false;              // 执行 iofence 则停止打标
+            const double td0 = sc_time_stamp().to_seconds() * 1e9;
+            while (iofence_inflight_count > 0) wait(iofence_drain_event);
+            const double drain_ns = sc_time_stamp().to_seconds() * 1e9 - td0;
+            iofence_drain_ns_sum += drain_ns;
+            if (drain_ns > iofence_drain_ns_max) iofence_drain_ns_max = drain_ns;
+            iofence_tagging_active = true;               // iofence 执行完成, 再次开始打标
+            iofence_exec_count++;
+            iofence_win_active = false;
+            // 聚合: 求每 iofence 平均 + 分布均衡性(min/max/标准差/非零数)
+            iofence_win_sum_tasks += iofence_win_admit_tasks;
+            iofence_win_sum_pages += iofence_win_new_pages;
+            iofence_win_sum_tagged_tasks += iofence_win_tagged_tasks;
+            iofence_win_sum_tagged_pages += iofence_win_tagged_pages;
+            if (iofence_win_admit_tasks > iofence_win_max_tasks) iofence_win_max_tasks = iofence_win_admit_tasks;
+            if (iofence_win_admit_tasks < iofence_win_min_tasks) iofence_win_min_tasks = iofence_win_admit_tasks;
+            if (iofence_win_new_pages > iofence_win_max_pages) iofence_win_max_pages = iofence_win_new_pages;
+            if (iofence_win_new_pages < iofence_win_min_pages) iofence_win_min_pages = iofence_win_new_pages;
+            if (iofence_win_tagged_tasks > iofence_win_max_tagged_tasks) iofence_win_max_tagged_tasks = iofence_win_tagged_tasks;
+            if (iofence_win_tagged_tasks < iofence_win_min_tagged_tasks) iofence_win_min_tagged_tasks = iofence_win_tagged_tasks;
+            if (iofence_win_tagged_pages > iofence_win_max_tagged_pages) iofence_win_max_tagged_pages = iofence_win_tagged_pages;
+            if (iofence_win_tagged_pages < iofence_win_min_tagged_pages) iofence_win_min_tagged_pages = iofence_win_tagged_pages;
+            iofence_win_sq_tasks += (double)iofence_win_admit_tasks * iofence_win_admit_tasks;
+            iofence_win_sq_pages += (double)iofence_win_new_pages * iofence_win_new_pages;
+            if (iofence_win_admit_tasks > 0) iofence_win_nonzero++;
+            if (is_first_iofence) {
+                first_iofence_win_tasks = iofence_win_admit_tasks;
+                first_iofence_win_pages = iofence_win_new_pages;
+                first_iofence_win_tagged_tasks = iofence_win_tagged_tasks;
+                first_iofence_win_tagged_pages = iofence_win_tagged_pages;
+                first_iofence_win_ns = drain_ns;
+            }
+            // 排空完成: 清挂起标志, 置完成标志, 经 do_pending_iofence 完成命令(推进 CQH)。
+            iommu_inst.iofence_wait_inflight_drain = 0;
+            iommu_inst.iofence_inflight_drain_done = 1;
+            do_pending_iofence(&iommu_inst);
+            if (iofence_exec_count <= 8 || iofence_exec_count % 128 == 0) {
+                printf("[IOFENCE_DRAIN] #%lu drain=%.1f ns inflight_now=%d cqh=%lu tagging=%d\n",
+                       (unsigned long)iofence_exec_count, drain_ns, iofence_inflight_count,
+                       (unsigned long)iommu_inst.reg_file.cqh.index, (int)iofence_tagging_active);
+                fflush(stdout);
+            }
+        }
+#endif
+
+        const double t1 = sc_time_stamp().to_seconds() * 1e9;
+        const uint64_t cqh_after = iommu_inst.reg_file.cqh.index;
+        if (cqh_after == cqh_before) {
+            // CQH 未推进: cqon/cqen 未开、cqmf/cmd_ill/cmd_to 置位或 IOFENCE 挂起。
+            // 本场景不下发 IOFENCE/ATS, 出现即配置或命令编码错误 -> 立即诊断失败,
+            // 避免线程在同一笔命令上无限空转。
+            printf("[CQ_ASYNC_FATAL] cqh not advanced: cqon=%u cqen=%u cqmf=%u cmd_ill=%u "
+                   "cmd_to=%u itag_stall=%u iofence_pending=%u cqh=%lu cqt=%lu\n",
+                   iommu_inst.reg_file.cqcsr.cqon, iommu_inst.reg_file.cqcsr.cqen,
+                   iommu_inst.reg_file.cqcsr.cqmf, iommu_inst.reg_file.cqcsr.cmd_ill,
+                   iommu_inst.reg_file.cqcsr.cmd_to, iommu_inst.command_queue_stall_for_itag,
+                   iommu_inst.iofence_wait_pending_inv,
+                   (unsigned long)cqh_before, (unsigned long)iommu_inst.reg_file.cqt.index);
+            fflush(stdout);
+            SC_REPORT_ERROR("CQ_ASYNC", "命令执行后 CQH 未推进(CQ 卡死)");
+            return;
+        }
+
+        // 记账: 单笔执行耗时(CQT 已就绪 -> CQH 推进完成)
+        const double exec_ns = t1 - t0;
+        cq_exec_ns_sum += exec_ns;
+        if (exec_ns > cq_exec_ns_max) cq_exec_ns_max = exec_ns;
+        if (exec_ns < cq_exec_ns_min) cq_exec_ns_min = exec_ns;
+        cq_completed_cmds++;
+        if (cq_first_done_ns < 0.0) cq_first_done_ns = t1;
+        cq_last_done_ns = t1;
+
+        // 释放 1 个队列槽 => 请求发送进程获得 cq_credit_per_cmd 组 NVMe 注入信用:
+        //   strict: 1 组/命令(每 4KB 页一笔精准失效);
+        //   lazy  : N 组/命令(每 N 个 4KB 页一笔全局失效, N = INVAL_LAZY_N)。
+        if (cq_credit_gate_enabled) {
+            cq_inject_credit += static_cast<int>(cq_credit_per_cmd);
+            cq_credit_earned += cq_credit_per_cmd;
+        }
+        cq_sample_occupancy();
+        cq_cqh_event.notify(SC_ZERO_TIME);
+
+        if (cq_completed_cmds <= 8 || cq_completed_cmds % 128 == 0) {
+            printf("[CQ_ASYNC_CMD] #%lu exec=%.1f ns occ=%u/%u credit=%d submitted=%lu\n",
+                   (unsigned long)cq_completed_cmds, exec_ns, cq_occ_cur, cq_usable_depth(),
+                   cq_inject_credit, (unsigned long)cq_submitted_cmds);
+            fflush(stdout);
+        }
+    }
+}
+
+// CQ 反压与注入信用统计块(测试项收尾调用)。
+void iommu_top::print_cq_async_report() const {
+    const uint32_t usable = cq_usable_depth();
+    const double win = (cq_win_start_ns >= 0.0 && cq_win_end_ns > cq_win_start_ns)
+                       ? (cq_win_end_ns - cq_win_start_ns) : 0.0;
+    // 收尾封口: 把最后一段占用/满时长计入(采样点之后的残余区间)
+    double occ_area = cq_occ_area_ns, full_area = cq_full_area_ns;
+    if (cq_occ_last_ns >= 0.0 && cq_win_end_ns > cq_occ_last_ns) {
+        const double dt = cq_win_end_ns - cq_occ_last_ns;
+        occ_area  += dt * static_cast<double>(cq_occ_cur);
+        if (cq_occ_cur >= usable) full_area += dt;
+    }
+    printf("\n========== CQ Backpressure & Injection Credit Statistics ==========\n");
+    printf("  CQ depth (entries):    %u  (usable %u, qsize %u)\n",
+           cq_depth_entries, usable, cq_qsize());
+    printf("  Cmds submitted:        %lu\n", (unsigned long)cq_submitted_cmds);
+    printf("  Cmds completed (CQH):  %lu\n", (unsigned long)cq_completed_cmds);
+    printf("  CQ occupancy peak:     %u / %u\n", cq_occ_peak, usable);
+    printf("  CQ occupancy avg:      %.2f entries (time-weighted)\n",
+           win > 0.0 ? occ_area / win : 0.0);
+    printf("  CQ full ratio:         %.2f%% of measurement window (%.1f / %.1f ns)\n",
+           win > 0.0 ? 100.0 * full_area / win : 0.0, full_area, win);
+    if (cq_completed_cmds > 0) {
+        printf("  Cmd exec (fetch->CQH): avg=%.1f ns max=%.1f ns min=%.1f ns\n",
+               cq_exec_ns_sum / cq_completed_cmds, cq_exec_ns_max, cq_exec_ns_min);
+        printf("  CQH advance interval:  avg=%.1f ns  (= 1 group inject credit)\n",
+               cq_completed_cmds > 1
+                 ? (cq_last_done_ns - cq_first_done_ns) / (double)(cq_completed_cmds - 1)
+                 : 0.0);
+        printf("  First/Last cmd done:   %.1f ns / %.1f ns\n",
+               cq_first_done_ns, cq_last_done_ns);
+        printf("  CQ busy ratio:         %.2f%% of measurement window\n",
+               win > 0.0 ? 100.0 * cq_exec_ns_sum / win : 0.0);
+    }
+    printf("  Credit gate:           %s   (%u groups per CQH advance)\n",
+           cq_credit_gate_enabled ? "ENABLED" : "DISABLED", cq_credit_per_cmd);
+    printf("  Credit earned total:   %lu groups\n", (unsigned long)cq_credit_earned);
+    printf("  Inject credit left:    %d\n", cq_inject_credit);
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [IOFENCE打标] 排空统计: iofence 命令数与“停止打标->在途请求排空”等待时长。
+    printf("  ---- IOFENCE in-flight drain (tagging) ----\n");
+    printf("  IOFENCE cmds executed: %lu\n", (unsigned long)iofence_exec_count);
+    if (iofence_exec_count > 0) {
+        printf("  Drain wait:            avg=%.1f ns max=%.1f ns\n",
+               iofence_drain_ns_sum / iofence_exec_count, iofence_drain_ns_max);
+    }
+    printf("  In-flight tagged now:  %d (tagging_active=%d)\n",
+           iofence_inflight_count, (int)iofence_tagging_active);
+    {
+        const uint64_t nw = iofence_exec_count;
+        if (nw > 0) {
+            const double avg_t  = (double)iofence_win_sum_tasks / nw;
+            const double avg_p  = (double)iofence_win_sum_pages / nw;
+            const double avg_tt = (double)iofence_win_sum_tagged_tasks / nw;
+            const double avg_tp = (double)iofence_win_sum_tagged_pages / nw;
+            double sd_t = 0.0, sd_p = 0.0;
+            if (nw > 1) {
+                sd_t = std::sqrt(iofence_win_sq_tasks / nw - avg_t * avg_t);
+                sd_p = std::sqrt(iofence_win_sq_pages / nw - avg_p * avg_p);
+            }
+            printf("  IOFENCE win per-avg:   untagged tasks=%.2f pages=%.2f | tagged tasks=%.2f pages=%.2f | windows=%lu\n",
+                   avg_t, avg_p, avg_tt, avg_tp, (unsigned long)nw);
+            printf("  IOFENCE win spread(untagged): tasks min/avg/max=%lu/%.2f/%lu sd=%.2f | pages min/avg/max=%lu/%.2f/%lu | nonzero=%lu/%lu\n",
+                   (unsigned long)iofence_win_min_tasks, avg_t, (unsigned long)iofence_win_max_tasks, sd_t,
+                   (unsigned long)iofence_win_min_pages, avg_p, (unsigned long)iofence_win_max_pages,
+                   (unsigned long)iofence_win_nonzero, (unsigned long)nw);
+            printf("  IOFENCE win spread(tagged):   tasks min/avg/max=%lu/%.2f/%lu | pages min/avg/max=%lu/%.2f/%lu\n",
+                   (unsigned long)iofence_win_min_tagged_tasks, avg_tt, (unsigned long)iofence_win_max_tagged_tasks,
+                   (unsigned long)iofence_win_min_tagged_pages, avg_tp, (unsigned long)iofence_win_max_tagged_pages);
+            printf("  First IOFENCE window:  untagged=%lu/%lu tagged=%lu/%lu drain=%.1f ns\n",
+                   (unsigned long)first_iofence_win_tasks, (unsigned long)first_iofence_win_pages,
+                   (unsigned long)first_iofence_win_tagged_tasks, (unsigned long)first_iofence_win_tagged_pages,
+                   first_iofence_win_ns);
+        }
+    }
+#endif
+    printf("===================================================================\n");
+    fflush(stdout);
+}
+#endif
 
 // ------------------------------------------------------------------
 // reset_4kb_concurrency_window - 测量 epoch 开始前重置统计窗口
@@ -396,6 +714,148 @@ void iommu_top::reset_4kb_concurrency_window() {
         kv.second.out_no_match    = 0;
         kv.second.bad_state_cnt   = 0;
     }
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [多核] 重置按 (nvme_id, 页) 的独立跟踪表与每核完成计数/事件队列,
+    //   保证测量窗口只覆盖正式 epoch(调用时 IOMMU 内部已 quiescent)。
+    cpu_inval_pages.clear();
+    cpu_inval_4kb_done_total = 0;
+    for (unsigned j = 0; j < MAX_CPU_COUNT; ++j) {
+        cpu_inval_done_pages[j].clear();
+        cpu_inval_4kb_done_per_cpu[j] = 0;
+    }
+#endif
+}
+
+// ============================================================================
+// [稳态窗口] 全量统计双快照
+//   触发点: output_delay_thread 中 iommu_total_completed 达到 steady_start_count /
+//           steady_end_count 时(即完成数的 10% / 90%), 与 MD_WINDOW 完全同口径。
+//   面积型累加器是"事件驱动"的(只在计数变化时结算上一段), 因此拍快照前必须先调用
+//   各自的 sample_before_change() 把"上次变化 -> 现在"这段尾面积补上,
+//   否则窗口边界会丢面积, 导致稳态平均值被系统性低估。
+// ============================================================================
+void iommu_top::capture_steady_snapshot(iommu_steady_snap_t& s) {
+    // ---- 1) 强制结算所有面积型累加器的尾段 ----
+    iommu_sample_concurrency_before_change();
+    ptw_sample_concurrency_before_change();
+    input_q_sample_before_change();
+    iommu::DedupBuffer* buf = cache_sub.get_pt_dedup_buffer();
+    if (buf) buf->settle_occupancy();
+    {
+        const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        kb4_accum_area(kb4_total_area_ns, kb4_total_conc(kb4_dev_stats),
+                       kb4_win_last_change_ns, now_ns);
+        for (auto& kv : kb4_dev_stats)
+            kb4_accum_area(kv.second.area_ns, kv.second.cur_conc,
+                           kv.second.last_change_ns, now_ns);
+    }
+
+    // ---- 2) 拍快照 ----
+    s = iommu_steady_snap_t();
+    s.valid = true;
+    s.t_ns  = sc_time_stamp().to_seconds() * 1e9;
+    s.completed     = iommu_total_completed;
+    s.slave_r_bytes = slave_0_total_bytes;
+    s.slave_w_bytes = slave_0w_total_bytes;
+    s.master0_bytes = master_0_total_bytes;
+    s.cache_stats   = cache_sub.stats().all_stats();
+    s.g_dc_hit   = g_dc_cache_hit_count;    s.g_dc_miss   = g_dc_cache_miss_count;
+    s.g_pc_hit   = g_pc_cache_hit_count;    s.g_pc_miss   = g_pc_cache_miss_count;
+    s.g_pt_hit   = g_pt_cache_hit_count;    s.g_pt_miss   = g_pt_cache_miss_count;
+    s.g_msipt_hit= g_msipt_cache_hit_count; s.g_msipt_miss= g_msipt_cache_miss_count;
+    s.ctrl_total   = ctrl_total_count;
+    s.ctrl_pt_hit  = ctrl_pt_cache_hit_count;
+    s.ctrl_pt_miss = ctrl_pt_cache_miss_count;
+    s.ctrl_sq = ctrl_sq_count; s.ctrl_cq = ctrl_cq_count; s.ctrl_msi = ctrl_msi_count;
+    s.conc_area_r = iommu_conc_area_read_ns;
+    s.conc_area_w = iommu_conc_area_write_ns;
+    s.conc_area_g = iommu_conc_area_global_ns;
+    s.conc_last_change_ns = iommu_conc_last_change_ns;
+    s.conc_r = iommu_read_outstanding;
+    s.conc_w = iommu_write_outstanding;
+    s.conc_g = iommu_global_outstanding;
+    s.ptw_conc_area = ptw_concurrency_area_ns;
+    s.ptw_conc_last_change_ns = ptw_concurrency_last_change_ns;
+    s.ptw_conc = (uint32_t)ptw_outstanding_task_count;
+    s.kb4_total_area = kb4_total_area_ns;
+    s.kb4_total_last_change_ns = kb4_win_last_change_ns;
+    for (const auto& kv : kb4_dev_stats) {
+        s.kb4_dev_area[kv.first] = kv.second.area_ns;
+        s.kb4_dev_conc[kv.first] = kv.second.cur_conc;
+        s.kb4_dev_last[kv.first] = kv.second.last_change_ns;
+    }
+    s.ptw_completed = ptw_total_completed;
+    s.ptw_ddr_reads = ptw_total_ddr_reads;
+    s.ptw_exec_ns   = ptw_total_exec_ns;
+    s.ptw_task_lat_count = ptw_task_latency_values.size();
+    s.ptw_ddr_dist      = ptw_ddr_reads_distribution;
+    s.ptw_main_ddr_dist = ptw_main_ddr_reads_distribution;
+    s.ptw_pf_ddr_dist   = ptw_prefetch_ddr_reads_distribution;
+    s.ptw_group_count    = ptw_group_exec_count;
+    s.ptw_group_total_ns = ptw_group_exec_total_ns;
+    if (buf) {
+        s.buf_occ_integral     = buf->get_occupancy_integral_raw();
+        s.buf_occ_last_change_ns = buf->get_occ_last_change_ns();
+        s.buf_hold_total_ns = buf->get_total_hold_ns_raw();
+        s.buf_hold_count    = buf->get_hold_count();
+        s.buf_valid         = buf->get_valid_count();
+    }
+    s.dedup_lookup_total = cache_sub.get_dedup_lookup_total();
+    s.dedup_lookup_hit   = cache_sub.get_dedup_lookup_hit();
+    s.dedup_lookup_miss  = cache_sub.get_dedup_lookup_miss();
+    s.dedup_req_total    = cache_sub.get_dedup_req_lookup_total();
+    s.dedup_req_hit      = cache_sub.get_dedup_req_lookup_hit();
+    s.dedup_hash_conflict   = cache_sub.get_dedup_hash_conflict();
+    s.dedup_conflict_bypass = cache_sub.get_dedup_conflict_bypass();
+    s.dedup_buf_full_bypass = cache_sub.get_dedup_buffer_full_bypass_count();
+    s.dedup_sample_count = cache_sub.get_dedup_valid_sample_count();
+    // 采样累加器只暴露 avg, 用 avg x count 还原 sum 以便做差
+    s.dedup_sample_valid_sum = cache_sub.get_dedup_avg_valid_lines() * (double)s.dedup_sample_count;
+    s.dedup_sample_req_sum   = cache_sub.get_dedup_avg_req_lines()   * (double)s.dedup_sample_count;
+    s.inq_area   = input_q_area_ns;
+    s.inq_r_area = input_q_r_area_ns;
+    s.inq_w_area = input_q_w_area_ns;
+    s.inq_last_ns = input_q_last_ns;
+    s.inq_count   = input_q_count;
+    s.e2e_sum   = iommu_total_e2e_latency_ns;
+    s.e2e_count = iommu_e2e_values.size();
+}
+
+void iommu_top::on_steady_window_begin() {
+    capture_steady_snapshot(steady_snap_base_);
+    // 峰值/最值/分位数类不可做差, 从窗口起点重新单独累加
+    steady_sampling_ = true;
+    g_iommu_steady_sampling = true;   // 同步给不持有 iommu_top 引用的组件(如 DedupBuffer)
+    steady_pk_kb4_total_ = kb4_total_conc(kb4_dev_stats);
+    steady_pk_kb4_dev_.clear();
+    for (const auto& kv : kb4_dev_stats) steady_pk_kb4_dev_[kv.first] = kv.second.cur_conc;
+    steady_pk_conc_r_ = iommu_read_outstanding;
+    steady_pk_conc_w_ = iommu_write_outstanding;
+    steady_pk_conc_g_ = iommu_global_outstanding;
+    steady_pk_ptw_conc_ = (uint32_t)ptw_outstanding_task_count;
+    auto* buf = cache_sub.get_pt_dedup_buffer();
+    steady_pk_buf_valid_ = buf ? buf->get_valid_count() : 0;
+    if (buf) buf->reset_steady_extremes();   // Buffer 峰值/持有最值从窗口起点重新累加
+    steady_e2e_max_ = 0.0; steady_e2e_min_ = 1e18;
+    steady_e2e_values_.clear();
+    steady_hold_max_ = 0.0; steady_hold_min_ = 1e18;
+    printf("[STEADY_WIN] BEGIN t=%.1f ns completed=%lu (base snapshot taken)\n",
+           steady_snap_base_.t_ns, (unsigned long)steady_snap_base_.completed);
+    fflush(stdout);
+}
+
+void iommu_top::on_steady_window_end() {
+    capture_steady_snapshot(steady_snap_end_);
+    steady_sampling_ = false;
+    g_iommu_steady_sampling = false;
+    steady_snap_ok_  = steady_snap_base_.valid && steady_snap_end_.valid &&
+                       steady_snap_end_.t_ns > steady_snap_base_.t_ns;
+    printf("[STEADY_WIN] END   t=%.1f ns completed=%lu window=%.1f ns (%.3f us) usable=%d\n",
+           steady_snap_end_.t_ns, (unsigned long)steady_snap_end_.completed,
+           steady_snap_end_.t_ns - steady_snap_base_.t_ns,
+           (steady_snap_end_.t_ns - steady_snap_base_.t_ns) / 1000.0,
+           steady_snap_ok_ ? 1 : 0);
+    fflush(stdout);
 }
 
 // ------------------------------------------------------------------
@@ -613,6 +1073,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
             task->no_write = ext->no_write;
             task->is_cxl_dev = 0;
             task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+#if TEST_CFG_CPU_INVAL_SCENE
+            task->nvme_id = ext->nvme_id;  // [缓存失效多核] NVMe任务组号(=CPU核id)贯穿翻译流水
+#endif
 
             if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
             else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
@@ -625,33 +1088,26 @@ tlm::tlm_sync_enum iommu_top::axi_slave_nb_transport_fw(
         md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
 #endif
 
-        // [STAT] 控制包(SQ/CQ/MSI)入口计数
-        if (task->is_ctrl) {
-            ctrl_total_count++;
-            // 基于固定IOVA区分SQ/CQ/MSI (场景13约定; 512MB测试项SQ/CQ IOVA上移至0x22000000/0x22001000)
-#ifdef TEST_CFG_S13_IOVA_512MB
-            if (task->iova == 0x22000000) {
-                ctrl_sq_count++;
-            } else if (task->iova == 0x22001000) {
-                ctrl_cq_count++;
-            } else {
-                ctrl_msi_count++;  // MSI请求
-            }
-#else
-            if (task->iova == 0x5000000) {
-                ctrl_sq_count++;
-            } else if (task->iova == 0x5001000) {
-                ctrl_cq_count++;
-            } else {
-                ctrl_msi_count++;  // MSI请求
-            }
-#endif
-        }
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数(分类规则集中在 classify_ctrl_pkt)
+        if (task->is_ctrl) classify_ctrl_pkt(task->iova);
 
         // [STAT需求1] 4KB页并发跟踪: 随 outstanding 计数前移到端口准入点打点
         //   (与端口 iommu_*_outstanding++ 同点), 统计口径 = 端口准入->reorder释放,
         //   仍严格受 640 outstanding 约束。入口队列积压另由 input_q_* 统计。
         track_4kb_page_in(task);
+#if TEST_CFG_CPU_INVAL_SCENE
+        // [IOFENCE打标] 非分离端口路径同样在准入后打标(与 R/W 端口一致)。
+        if (iofence_tagging_active) {
+            task->iofence_tagged = 1; iofence_inflight_count++;
+            const uint64_t pg = task->iova & ~0xFFFULL;   // [打标页引用计数] 维护已打标在途 distinct 页
+            if ((++iofence_tagged_page_refcnt[pg]) == 1) iofence_tagged_distinct_pages++;
+        } else if (iofence_win_active) {
+            // [窗口统计] 打标关闭(iofence执行)期间新准入 = 不打标任务; 页去重计数
+            iofence_win_admit_tasks++;
+            const uint64_t pg = task->iova & ~0xFFFULL;
+            if (iofence_win_page_seen[pg] == 0) { iofence_win_page_seen[pg] = 1; iofence_win_new_pages++; }
+        }
+#endif
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
         printf("[IOMMU_TOP] axi_slave_nb_transport_fw(%s): task_id=%u, device_id=0x%x, iova=0x%lx, at=%d -> input_pipeline_peq [t=%.1f ns]\n",
@@ -838,6 +1294,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_r_nb_transport_fw(
             task->no_write = ext->no_write;
             task->is_cxl_dev = 0;
             task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+#if TEST_CFG_CPU_INVAL_SCENE
+            task->nvme_id = ext->nvme_id;  // [缓存失效多核] NVMe任务组号(=CPU核id)贯穿翻译流水
+#endif
 
             if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
             else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
@@ -850,27 +1309,26 @@ tlm::tlm_sync_enum iommu_top::axi_slave_r_nb_transport_fw(
         md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
 #endif
 
-        // [STAT] 控制包(SQ/CQ/MSI)入口计数
-        if (task->is_ctrl) {
-            ctrl_total_count++;
-#if TEST_CFG_REAL8_TRACE_REPLAY
-            // [8盘实测回放] 本场景不合成 SQ/CQ/MSI 子类型, 16B 写控制包仅计入 CTRL 总数,
-            //   不按固定 IOVA 误判为 MSI; 旧场景按 IOVA 细分的分支原样保留。
-#else
-#ifdef TEST_CFG_S13_IOVA_512MB
-            if (task->iova == 0x22000000)      ctrl_sq_count++;
-            else if (task->iova == 0x22001000) ctrl_cq_count++;
-            else                               ctrl_msi_count++;
-#else
-            if (task->iova == 0x5000000)       ctrl_sq_count++;
-            else if (task->iova == 0x5001000)  ctrl_cq_count++;
-            else                               ctrl_msi_count++;
-#endif
-#endif
-        }
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数(分类规则集中在 classify_ctrl_pkt)
+        if (task->is_ctrl) classify_ctrl_pkt(task->iova);
 
         // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
         track_4kb_page_in(task);
+#if TEST_CFG_CPU_INVAL_SCENE
+        // [IOFENCE打标] 端口准入后对进入 iommu 内部的请求持续打标(io_bridge 语义)。
+        //   与 outstanding++ 之间无 wait, 故与 iofence 排空判定无竞态; iofence 执行期间
+        //   iofence_tagging_active=false, 此后准入的新请求不打标(iofence 不等待它们)。
+        if (iofence_tagging_active) {
+            task->iofence_tagged = 1; iofence_inflight_count++;
+            const uint64_t pg = task->iova & ~0xFFFULL;   // [打标页引用计数] 维护已打标在途 distinct 页
+            if ((++iofence_tagged_page_refcnt[pg]) == 1) iofence_tagged_distinct_pages++;
+        } else if (iofence_win_active) {
+            // [窗口统计] 打标关闭(iofence执行)期间新准入 = 不打标任务; 页去重计数
+            iofence_win_admit_tasks++;
+            const uint64_t pg = task->iova & ~0xFFFULL;
+            if (iofence_win_page_seen[pg] == 0) { iofence_win_page_seen[pg] = 1; iofence_win_new_pages++; }
+        }
+#endif
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
 #if !TEST_CFG_REAL8_TRACE_REPLAY
@@ -1032,6 +1490,9 @@ tlm::tlm_sync_enum iommu_top::axi_slave_w_nb_transport_fw(
             task->no_write = ext->no_write;
             task->is_cxl_dev = 0;
             task->is_ctrl = ext->is_ctrl;  // [场景13] 控制包标记(SQ/CQ/MSI不计入IOPS)
+#if TEST_CFG_CPU_INVAL_SCENE
+            task->nvme_id = ext->nvme_id;  // [缓存失效多核] NVMe任务组号(=CPU核id)贯穿翻译流水
+#endif
 
             if (ext->at == 0) task->at = ADDR_TYPE_UNTRANSLATED;
             else if (ext->at == 1) task->at = ADDR_TYPE_PCIE_ATS_TRANSLATION_REQUEST;
@@ -1044,26 +1505,26 @@ tlm::tlm_sync_enum iommu_top::axi_slave_w_nb_transport_fw(
         md_trace.accept(&trans, task->task_id, task->device_id, task->iova);
 #endif
 
-        // [STAT] 控制包(SQ/CQ/MSI)入口计数
-        if (task->is_ctrl) {
-            ctrl_total_count++;
-#if TEST_CFG_REAL8_TRACE_REPLAY
-            // [8盘实测回放] 同读口: 只计 CTRL 总数, 不做 SQ/CQ/MSI 推断。
-#else
-#ifdef TEST_CFG_S13_IOVA_512MB
-            if (task->iova == 0x22000000)      ctrl_sq_count++;
-            else if (task->iova == 0x22001000) ctrl_cq_count++;
-            else                               ctrl_msi_count++;
-#else
-            if (task->iova == 0x5000000)       ctrl_sq_count++;
-            else if (task->iova == 0x5001000)  ctrl_cq_count++;
-            else                               ctrl_msi_count++;
-#endif
-#endif
-        }
+        // [STAT] 控制包(SQ/CQ/MSI)入口计数(分类规则集中在 classify_ctrl_pkt)
+        if (task->is_ctrl) classify_ctrl_pkt(task->iova);
 
         // [STAT需求1] 4KB 页并发跟踪(与端口 outstanding++ 同点)
         track_4kb_page_in(task);
+#if TEST_CFG_CPU_INVAL_SCENE
+        // [IOFENCE打标] 端口准入后对进入 iommu 内部的请求持续打标(io_bridge 语义)。
+        //   与 outstanding++ 之间无 wait, 故与 iofence 排空判定无竞态; iofence 执行期间
+        //   iofence_tagging_active=false, 此后准入的新请求不打标(iofence 不等待它们)。
+        if (iofence_tagging_active) {
+            task->iofence_tagged = 1; iofence_inflight_count++;
+            const uint64_t pg = task->iova & ~0xFFFULL;   // [打标页引用计数] 维护已打标在途 distinct 页
+            if ((++iofence_tagged_page_refcnt[pg]) == 1) iofence_tagged_distinct_pages++;
+        } else if (iofence_win_active) {
+            // [窗口统计] 打标关闭(iofence执行)期间新准入 = 不打标任务; 页去重计数
+            iofence_win_admit_tasks++;
+            const uint64_t pg = task->iova & ~0xFFFULL;
+            if (iofence_win_page_seen[pg] == 0) { iofence_win_page_seen[pg] = 1; iofence_win_new_pages++; }
+        }
+#endif
 
         double ts_ns = sc_time_stamp().to_seconds() * 1e9;
 #if !TEST_CFG_REAL8_TRACE_REPLAY
@@ -1481,9 +1942,21 @@ printf("[DDR_ARBITER] Route %s request: task_id=%u, addr=0x%lx, size=%d, is_writ
             axi_master_1_to_cmn_rnd_socket->nb_transport_fw(*trans, phase, delay);
 
             // ===== Bandwidth control: master_1 port (DDR access) =====
-            // delay_ns = 1000 * length * 8 / bandwidth_mbps
+#if TEST_CFG_DDR_PORT_BEAT_ALIGN
+            // [整拍占用] 128bit@1000MHz: 1拍=1ns=16B; 不足一拍按一拍向上取整,
+            //   故 4B/8B 小事务也各占 1 拍(1ns), 24B 占 2 拍(2ns), 与真实 AXI 总线一致。
+            //   beats = ceil(size / bytes_per_beat), delay_ns = beats * (1000 / freq_mhz)
+            const uint32_t m1_bytes_per_beat = AXI_MASTER_1_WIDTH_BIT / 8;       // 16B/拍
+            const double   m1_beat_ns        = 1000.0 / AXI_MASTER_1_FREQ_MHZ;   // 1ns/拍 @1000MHz
+            uint32_t m1_beats = (req.size + m1_bytes_per_beat - 1) / m1_bytes_per_beat;
+            double master1_bw_delay_ns = m1_beats * m1_beat_ns;
+            master_1_beat_bytes += (uint64_t)m1_beats * m1_bytes_per_beat;       // [STAT] 整拍占用字节
+#else
+            // 旧行为: 仅按字节数线性计时(8B->0.5ns), 不取整到整拍
             double master1_bw_delay_ns = 1000.0 * req.size * 8 / AXI_MASTER_1_BANDWIDTH_MBPS;
-            master_1_total_bytes += req.size;  // [STAT] DDR字节计数
+            master_1_beat_bytes += (uint64_t)((req.size + 15) / 16) * 16;        // [STAT] 仍记录整拍占用供对照
+#endif
+            master_1_total_bytes += req.size;  // [STAT] DDR有效字节计数
             wait(master1_bw_delay_ns, SC_NS);
 
             // Increment outstanding counter after successful send
@@ -1832,7 +2305,8 @@ void iommu_top::print_cache_statistics() {
     // [dedup多RAM] dedup 内部在途任务(hash_in/RAM FIFO/inside预取)同样需排空
     while (cache_sub.pt_update_fifo.num_available() > 0 ||
            cache_sub.pt_ram_fifo_pending() > 0 ||
-           cache_sub.dedup_ram_fifo_pending() > 0) {
+           cache_sub.dedup_ram_fifo_pending() > 0 ||
+           cache_sub.delayed_upd_pending() > 0) {  // [去重延迟更新] 延迟FIFO残留也需排空
         sc_core::wait(sc_core::SC_ZERO_TIME);
     }
 
@@ -2467,6 +2941,14 @@ void iommu_top::print_cache_statistics() {
         printf("  master_1 (DDR):  %10lu B  avg %.3f GB/s  (peak %.0f GB/s, util %.2f%%)\n",
                (unsigned long)master_1_total_bytes, master1_bw_GBs, peak_master1_GBs,
                master1_bw_GBs / peak_master1_GBs * 100.0);
+        // [整拍占用] beat-aligned 口径: 反映 128bit 总线真实占用(含 4B/8B 小事务 padding)。
+        //   bus util = 占用字节带宽 / peak(总线真正忙碌比例); 有效字节效率 = 有效字节 / 占用字节。
+        //   注: bus util 仅在 TEST_CFG_DDR_PORT_BEAT_ALIGN=1 时为物理准确值(此时 sim_time 已含整拍等待)。
+        double master1_occ_GBs = (double)master_1_beat_bytes / sim_time_sec / 1e9;
+        printf("    [整拍占用] %10lu B  occupied %.3f GB/s  (bus util %.2f%%, 有效字节效率 %.2f%%)\n",
+               (unsigned long)master_1_beat_bytes, master1_occ_GBs,
+               master1_occ_GBs / peak_master1_GBs * 100.0,
+               master1_occ_GBs > 0.0 ? master1_bw_GBs / master1_occ_GBs * 100.0 : 0.0);
     }
     printf("============================================\n\n");
 
@@ -3224,5 +3706,320 @@ void iommu_top::print_cache_statistics() {
     }
     printf("===================================================\n\n");
     */
+
+#if TEST_CFG_CPU_INVAL_SCENE
+    // ===================== [失效] 延时失效策略(LIB/VN)统计 =====================
+    //   仅扫表类失效指令(VMA 100/101/001, GVMA GV=1)进入 LIB 走延时失效;
+    //   精准失效(VMA 010, AV=1)走立即 SCAN_RANGE, 三项计数均应为 0 ——
+    //   以此客观区分 strict(不启动延时失效) 与 lazy(启动延时失效)。
+    {
+        const uint64_t pt_drops = cache_sub.pt_lazy_inval_drops();
+        const uint64_t wk_drops = cache_sub.walker_lazy_inval_drops();
+        printf("\n========== Lazy Invalidation (LIB/VN) Statistics ==========\n");
+        printf("  Invalidation enable:   %d\n", (int)cache_sub.invalidation_enabled());
+        printf("  Lazy strategy enable:  %d\n", (int)cache_sub.lazy_enabled());
+        printf("  LIB size / VN_MAX:     %u / %u   (current VN=%u, valid entries=%u)\n",
+               cache_sub.lazy_lib_size(), cache_sub.lazy_vn_max(),
+               cache_sub.lazy_global_vn(), cache_sub.lazy_lib_valid());
+        printf("  LIB records:           %lu  (= 走延时失效策略的扫表指令笔数)\n",
+               (unsigned long)cache_sub.lazy_record_count());
+        printf("  VN wrap / batch sweep: %lu\n", (unsigned long)cache_sub.lazy_wrap_count());
+        printf("  LIB full fallback:     %lu  (LIB 满降级为立即扫表)\n",
+               (unsigned long)cache_sub.lazy_full_fallback());
+        printf("  Query-path stale drops: PT=%lu  Walker(C1+C2+C3)=%lu  total=%lu\n",
+               (unsigned long)pt_drops, (unsigned long)wk_drops,
+               (unsigned long)(pt_drops + wk_drops));
+        printf("============================================================\n");
+    }
+#endif
+    fflush(stdout);
+}
+
+// ============================================================================
+// [稳态窗口] 仅稳态口径的全量性能指标报告
+//   窗口 = [steady_snap_base_.t_ns, steady_snap_end_.t_ns] = 完成数的 10%~90%,
+//   与 MD_WINDOW / Steady IOPS / 稳态端口带宽完全同口径, 已排除预热段与收尾段。
+//   计数/求和/面积类 = (end - base); 峰值/最值/分位数类 = 窗口内单独累加值。
+//   本函数不修改也不取代任何现有全程口径报表, 两者并列输出以便交叉核对。
+//   每行以 [SW] 开头并采用 key=value 形式, 供离线提取脚本直接解析。
+// ============================================================================
+void iommu_top::print_steady_window_report() {
+    printf("\n========== [STEADY-WINDOW] 全量性能指标 (仅稳态窗口, 完成数 10%%~90%%) ==========\n");
+    if (!steady_snap_ok_) {
+        printf("  (未取到有效双快照: steady_start_count/steady_end_count 未设置或窗口无效)\n");
+        printf("============================================================\n\n");
+        fflush(stdout);
+        return;
+    }
+    const iommu_steady_snap_t& b = steady_snap_base_;
+    const iommu_steady_snap_t& e = steady_snap_end_;
+    const double W = e.t_ns - b.t_ns;                 // 窗口长度(ns)
+    const uint64_t done = e.completed - b.completed;  // 窗口内完成事务数
+    printf("[SW] WINDOW begin_ns=%.1f end_ns=%.1f len_ns=%.1f len_us=%.3f completed=%lu\n",
+           b.t_ns, e.t_ns, W, W / 1000.0, (unsigned long)done);
+
+    // 两个快照里同名 cache 的统计差值
+    auto diff_stat = [&](const char* name, uint64_t (iommu::CacheStats::* fld)) -> uint64_t {
+        auto ib = b.cache_stats.find(name);
+        auto ie = e.cache_stats.find(name);
+        const uint64_t vb = (ib == b.cache_stats.end()) ? 0ULL : ib->second.*fld;
+        const uint64_t ve = (ie == e.cache_stats.end()) ? 0ULL : ie->second.*fld;
+        return ve - vb;
+    };
+    auto diff_dbl = [&](const char* name, double (iommu::CacheStats::* fld)) -> double {
+        auto ib = b.cache_stats.find(name);
+        auto ie = e.cache_stats.find(name);
+        const double vb = (ib == b.cache_stats.end()) ? 0.0 : ib->second.*fld;
+        const double ve = (ie == e.cache_stats.end()) ? 0.0 : ie->second.*fld;
+        return ve - vb;
+    };
+    auto pct = [](uint64_t hit, uint64_t tot) {
+        return tot ? 100.0 * (double)hit / (double)tot : 0.0;
+    };
+    auto pctl = [](std::vector<double> v, double f) -> double {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        size_t i = (size_t)std::ceil(f * (double)v.size());
+        if (i == 0) i = 1;
+        return v[std::min(i - 1, v.size() - 1)];
+    };
+
+    // ---------- 1. 吞吐与带宽 ----------
+    printf("--- 1. 吞吐与带宽 ---\n");
+    printf("[SW] IOPS_Mps=%.3f\n", W > 0 ? (double)done / W * 1000.0 : 0.0);
+    const uint64_t br = e.slave_r_bytes - b.slave_r_bytes;
+    const uint64_t bw = e.slave_w_bytes - b.slave_w_bytes;
+    const uint64_t bo = e.master0_bytes - b.master0_bytes;
+    if (W > 0) {
+        printf("[SW] BW_in_read_GBps=%.3f util_pct=%.2f\n", (double)br / W, 100.0 * ((double)br / W) / 64.0);
+        printf("[SW] BW_in_write_GBps=%.3f util_pct=%.2f\n", (double)bw / W, 100.0 * ((double)bw / W) / 64.0);
+        printf("[SW] BW_in_total_GBps=%.3f util_pct=%.2f\n",
+               (double)(br + bw) / W, 100.0 * ((double)(br + bw) / W) / 128.0);
+        printf("[SW] BW_out_master0_GBps=%.3f\n", (double)bo / W);
+    }
+    printf("[SW] BYTES in_r=%lu in_w=%lu out=%lu\n",
+           (unsigned long)br, (unsigned long)bw, (unsigned long)bo);
+
+    // ---------- 2. 并发(时间加权面积法) ----------
+    printf("--- 2. IOMMU 内部实际并发 (面积差 / 窗口长) ---\n");
+    if (W > 0) {
+        const double ar = (e.conc_area_r - b.conc_area_r) / W;
+        const double aw = (e.conc_area_w - b.conc_area_w) / W;
+        const double ag = (e.conc_area_g - b.conc_area_g) / W;
+        printf("[SW] CONC_read avg=%.2f peak=%u cap=%d util_pct=%.2f\n",
+               ar, steady_pk_conc_r_, (int)IOMMU_READ_MAX_OUTSTANDING,
+               100.0 * ar / (double)IOMMU_READ_MAX_OUTSTANDING);
+        printf("[SW] CONC_write avg=%.2f peak=%u cap=%d util_pct=%.2f\n",
+               aw, steady_pk_conc_w_, (int)IOMMU_WRITE_MAX_OUTSTANDING,
+               100.0 * aw / (double)IOMMU_WRITE_MAX_OUTSTANDING);
+        printf("[SW] CONC_global avg=%.2f peak=%u cap=%d util_pct=%.2f\n",
+               ag, steady_pk_conc_g_, (int)IOMMU_GLOBAL_MAX_OUTSTANDING,
+               100.0 * ag / (double)IOMMU_GLOBAL_MAX_OUTSTANDING);
+        const double ap = (e.ptw_conc_area - b.ptw_conc_area) / W;
+        printf("[SW] CONC_ptw avg=%.3f peak=%u cap=%d util_pct=%.2f\n",
+               ap, steady_pk_ptw_conc_, (int)PTW_MAX_OUTSTANDING_TASKS,
+               100.0 * ap / (double)PTW_MAX_OUTSTANDING_TASKS);
+    }
+
+    // ---------- 3. 4KB 页并发 ----------
+    printf("--- 3. 4KB 页并发 (面积差 / 窗口长) ---\n");
+    if (W > 0) {
+        const double tot = (e.kb4_total_area - b.kb4_total_area) / W;
+        uint64_t in_tasks = 0;
+        for (const auto& kv : kb4_dev_stats) in_tasks += kv.second.in_tasks;
+        printf("[SW] KB4_total avg=%.3f peak=%u in_tasks_cum=%lu\n",
+               tot, steady_pk_kb4_total_, (unsigned long)in_tasks);
+        for (const auto& kv : e.kb4_dev_area) {
+            auto ib = b.kb4_dev_area.find(kv.first);
+            const double db = (ib == b.kb4_dev_area.end()) ? 0.0 : ib->second;
+            auto ip = steady_pk_kb4_dev_.find(kv.first);
+            printf("[SW] KB4_dev did=%u avg=%.3f peak=%u\n", kv.first,
+                   (kv.second - db) / W, (ip == steady_pk_kb4_dev_.end()) ? 0u : ip->second);
+        }
+        printf("[SW] KB4_dedup_cap_ratio_pct=%.2f\n",
+               100.0 * ((e.kb4_total_area - b.kb4_total_area) / W) /
+               (double)cache_sub.get_dedup_total_lines());
+    }
+
+    // ---------- 4. Cache 命中率 ----------
+    printf("--- 4. Cache 命中率 (窗口内增量) ---\n");
+    {
+        struct { const char* name; const char* tag; } tabs[] = {
+            {"dc_cache", "dc"}, {"pc_cache", "pc"}, {"pt_cache", "pt"},
+            {"msipt_cache", "msipt"}, {"walker_ptw_c1", "walker_c1"},
+            {"walker_ptw_c2", "walker_c2"}, {"walker_ptw_c3", "walker_c3"}
+        };
+        for (auto& t : tabs) {
+            const uint64_t acc = diff_stat(t.name, &iommu::CacheStats::total_accesses);
+            const uint64_t hit = diff_stat(t.name, &iommu::CacheStats::hits);
+            const uint64_t mis = diff_stat(t.name, &iommu::CacheStats::misses);
+            const uint64_t ev  = diff_stat(t.name, &iommu::CacheStats::evictions);
+            printf("[SW] HIT %s accesses=%lu hits=%lu misses=%lu evicts=%lu rate_pct=%.4f\n",
+                   t.tag, (unsigned long)acc, (unsigned long)hit, (unsigned long)mis,
+                   (unsigned long)ev, pct(hit, acc));
+        }
+        // PT Cache 拆分: 512B 数据 vs SQ/CQ/MSI 控制
+        const uint64_t pt_acc = diff_stat("pt_cache", &iommu::CacheStats::total_accesses);
+        const uint64_t pt_hit = diff_stat("pt_cache", &iommu::CacheStats::hits);
+        const uint64_t ct = e.ctrl_total - b.ctrl_total;
+        const uint64_t ch = e.ctrl_pt_hit - b.ctrl_pt_hit;
+        const uint64_t cm = e.ctrl_pt_miss - b.ctrl_pt_miss;
+        // [边界效应] ctrl_total 在端口准入时计数, ctrl_pt_hit 在 PT 响应时计数;
+        //   窗口起点前准入、窗口内才响应的包会使 ch 比 ct 多几个(实测 ~0.2%)。
+        //   此处 clamp 到分母, 并把偏差量单独报出以便审计。
+        const uint64_t ch_c = std::min<uint64_t>(ch, ct);
+        const int64_t  ch_skew = (int64_t)ch - (int64_t)ct;
+        printf("[SW] HIT pt_512B_data accesses=%lu hits=%lu rate_pct=%.4f\n",
+               (unsigned long)(pt_acc > ct ? pt_acc - ct : 0),
+               (unsigned long)(pt_hit > ch_c ? pt_hit - ch_c : 0),
+               pct(pt_hit > ch_c ? pt_hit - ch_c : 0, pt_acc > ct ? pt_acc - ct : 0));
+        printf("[SW] HIT pt_ctrl accesses=%lu hits=%lu misses=%lu rate_pct=%.4f admit_resp_skew=%ld\n",
+               (unsigned long)ct, (unsigned long)ch_c, (unsigned long)cm, pct(ch_c, ct),
+               (long)ch_skew);
+        printf("[SW] CTRL sq=%lu cq=%lu msi=%lu total=%lu\n",
+               (unsigned long)(e.ctrl_sq - b.ctrl_sq), (unsigned long)(e.ctrl_cq - b.ctrl_cq),
+               (unsigned long)(e.ctrl_msi - b.ctrl_msi), (unsigned long)ct);
+        // 去重 Cache
+        const uint64_t dl = e.dedup_lookup_total - b.dedup_lookup_total;
+        const uint64_t dh = e.dedup_lookup_hit - b.dedup_lookup_hit;
+        const uint64_t dr = e.dedup_req_total - b.dedup_req_total;
+        const uint64_t drh = e.dedup_req_hit - b.dedup_req_hit;
+        printf("[SW] HIT dedup_all lookups=%lu hits=%lu rate_pct=%.4f\n",
+               (unsigned long)dl, (unsigned long)dh, pct(dh, dl));
+        printf("[SW] HIT dedup_main_req lookups=%lu hits=%lu rate_pct=%.4f\n",
+               (unsigned long)dr, (unsigned long)drh, pct(drh, dr));
+        printf("[SW] DEDUP hash_conflict=%lu conflict_bypass=%lu buf_full_bypass=%lu conflict_pct=%.4f\n",
+               (unsigned long)(e.dedup_hash_conflict - b.dedup_hash_conflict),
+               (unsigned long)(e.dedup_conflict_bypass - b.dedup_conflict_bypass),
+               (unsigned long)(e.dedup_buf_full_bypass - b.dedup_buf_full_bypass),
+               pct(e.dedup_hash_conflict - b.dedup_hash_conflict, dl));
+        const uint64_t sc = e.dedup_sample_count - b.dedup_sample_count;
+        const double vs = e.dedup_sample_valid_sum - b.dedup_sample_valid_sum;
+        const double rs = e.dedup_sample_req_sum - b.dedup_sample_req_sum;
+        printf("[SW] DEDUP valid_lines_avg=%.2f req_lines_avg=%.2f cap=%u samples=%lu\n",
+               sc ? vs / (double)sc : 0.0, sc ? rs / (double)sc : 0.0,
+               cache_sub.get_dedup_total_lines(), (unsigned long)sc);
+        // PT Cache 阶段延时(RAM 口径)
+        const double rl = diff_dbl("pt_cache", &iommu::CacheStats::req_total_latency_ns);
+        const uint64_t rn = diff_stat("pt_cache", &iommu::CacheStats::req_latency_samples);
+        const double ul = diff_dbl("pt_cache", &iommu::CacheStats::upd_total_latency_ns);
+        const uint64_t un = diff_stat("pt_cache", &iommu::CacheStats::upd_latency_samples);
+        printf("[SW] PT_LAT req_avg_ns=%.4f n=%lu upd_avg_ns=%.4f n=%lu\n",
+               rn ? rl / (double)rn : 0.0, (unsigned long)rn,
+               un ? ul / (double)un : 0.0, (unsigned long)un);
+    }
+
+    // ---------- 5. 去重 Buffer ----------
+    printf("--- 5. 去重 Buffer ---\n");
+    {
+        iommu::DedupBuffer* buf = cache_sub.get_pt_dedup_buffer();
+        const uint64_t hc = e.buf_hold_count - b.buf_hold_count;
+        const double ht = e.buf_hold_total_ns - b.buf_hold_total_ns;
+        if (W > 0) {
+            const double occ = (e.buf_occ_integral - b.buf_occ_integral) / W;
+            printf("[SW] BUF avg_occ=%.2f peak=%u cap=%u util_pct=%.2f\n",
+                   occ, buf ? buf->get_steady_peak_valid_count() : 0,
+                   (unsigned)PT_DEDUP_BUFFER_SIZE, 100.0 * occ / (double)PT_DEDUP_BUFFER_SIZE);
+        }
+        printf("[SW] BUF hold_avg_ns=%.1f hold_max_ns=%.1f hold_min_ns=%.1f samples=%lu\n",
+               hc ? ht / (double)hc : 0.0,
+               buf ? buf->get_steady_max_hold_ns() : 0.0,
+               buf ? buf->get_steady_min_hold_ns() : 0.0, (unsigned long)hc);
+    }
+
+    // ---------- 6. 入口队列 backlog ----------
+    printf("--- 6. 入口队列 backlog (input_delay_queue) ---\n");
+    if (W > 0) {
+        printf("[SW] INQ avg=%.2f read_avg=%.2f write_avg=%.2f peak=%u\n",
+               (e.inq_area - b.inq_area) / W,
+               (e.inq_r_area - b.inq_r_area) / W,
+               (e.inq_w_area - b.inq_w_area) / W, input_q_peak);
+    }
+
+    // ---------- 7. 端到端延时 ----------
+    printf("--- 7. 端到端延时 (pop->response) ---\n");
+    {
+        const uint64_t n = e.e2e_count - b.e2e_count;
+        const double sum = e.e2e_sum - b.e2e_sum;
+        printf("[SW] E2E avg_ns=%.2f n=%lu min_ns=%.1f p50_ns=%.1f p90_ns=%.1f p99_ns=%.1f max_ns=%.1f\n",
+               n ? sum / (double)n : 0.0, (unsigned long)n,
+               steady_e2e_values_.empty() ? 0.0 : steady_e2e_min_,
+               pctl(steady_e2e_values_, 0.50), pctl(steady_e2e_values_, 0.90),
+               pctl(steady_e2e_values_, 0.99), steady_e2e_max_);
+    }
+
+    // ---------- 8. PTW ----------
+    printf("--- 8. PTW ---\n");
+    {
+        const uint64_t tk = e.ptw_completed - b.ptw_completed;
+        const uint64_t dr = e.ptw_ddr_reads - b.ptw_ddr_reads;
+        const double ex = e.ptw_exec_ns - b.ptw_exec_ns;
+        const uint64_t gc = e.ptw_group_count - b.ptw_group_count;
+        const double gt = e.ptw_group_total_ns - b.ptw_group_total_ns;
+        printf("[SW] PTW tasks=%lu ddr_reads=%lu avg_ddr=%.3f exec_avg_ns=%.2f\n",
+               (unsigned long)tk, (unsigned long)dr, tk ? (double)dr / (double)tk : 0.0,
+               tk ? ex / (double)tk : 0.0);
+        printf("[SW] PTW group_n=%lu group_avg_ns=%.2f IOPS_Mps=%.3f\n",
+               (unsigned long)gc, gc ? gt / (double)gc : 0.0,
+               W > 0 ? (double)tk / W * 1000.0 : 0.0);
+        // DDR 访问次数分布(主任务 / 预取任务)
+        std::map<uint32_t, uint64_t> dm, dp;
+        for (const auto& kv : e.ptw_main_ddr_dist) {
+            auto ib = b.ptw_main_ddr_dist.find(kv.first);
+            const uint64_t vb = (ib == b.ptw_main_ddr_dist.end()) ? 0ULL : ib->second;
+            if (kv.second > vb) dm[kv.first] = kv.second - vb;
+        }
+        for (const auto& kv : e.ptw_pf_ddr_dist) {
+            auto ib = b.ptw_pf_ddr_dist.find(kv.first);
+            const uint64_t vb = (ib == b.ptw_pf_ddr_dist.end()) ? 0ULL : ib->second;
+            if (kv.second > vb) dp[kv.first] = kv.second - vb;
+        }
+        std::string sm, sp;
+        char tmp[64];
+        for (const auto& kv : dm) { snprintf(tmp, sizeof(tmp), "%u:%lu ", kv.first, (unsigned long)kv.second); sm += tmp; }
+        for (const auto& kv : dp) { snprintf(tmp, sizeof(tmp), "%u:%lu ", kv.first, (unsigned long)kv.second); sp += tmp; }
+        printf("[SW] PTW_ddr_dist_main %s\n", sm.c_str());
+        printf("[SW] PTW_ddr_dist_prefetch %s\n", sp.c_str());
+        // 从窗口内的分布反推主/预取各自的任务数与平均 DDR 次数
+        //   (与全程口径报表的 "MAIN tasks / PREFETCH tasks / Avg DDR reads" 同义)
+        uint64_t mt = 0, md = 0, pt = 0, pd = 0;
+        for (const auto& kv : dm) { mt += kv.second; md += (uint64_t)kv.first * kv.second; }
+        for (const auto& kv : dp) { pt += kv.second; pd += (uint64_t)kv.first * kv.second; }
+        printf("[SW] PTW_main tasks=%lu avg_ddr=%.3f\n",
+               (unsigned long)mt, mt ? (double)md / (double)mt : 0.0);
+        printf("[SW] PTW_prefetch tasks=%lu avg_ddr=%.3f\n",
+               (unsigned long)pt, pt ? (double)pd / (double)pt : 0.0);
+    }
+
+    // ---------- 9. 端口注入/输出间隔(用已有的 end_ns 向量筛选窗口) ----------
+    printf("--- 9. 端口任务间隔 ---\n");
+    {
+        auto slice = [&](const std::vector<double>& val, const std::vector<double>& endns,
+                         double& avg, double& mx, uint64_t& n) {
+            double sum = 0.0; mx = 0.0; n = 0;
+            const size_t m = std::min(val.size(), endns.size());
+            for (size_t i = 0; i < m; ++i) {
+                if (endns[i] > b.t_ns && endns[i] <= e.t_ns) {
+                    sum += val[i]; n++;
+                    if (val[i] > mx) mx = val[i];
+                }
+            }
+            avg = n ? sum / (double)n : 0.0;
+        };
+        double a, m;
+        uint64_t n;
+        slice(iommu_in_r_interval_values, iommu_in_r_interval_end_ns, a, m, n);
+        printf("[SW] IN_INTERVAL_read avg_ns=%.3f max_ns=%.2f n=%lu\n", a, m, (unsigned long)n);
+        slice(iommu_in_w_interval_values, iommu_in_w_interval_end_ns, a, m, n);
+        printf("[SW] IN_INTERVAL_write avg_ns=%.3f max_ns=%.2f n=%lu\n", a, m, (unsigned long)n);
+        slice(iommu_out_interval_values, iommu_out_interval_end_ns, a, m, n);
+        printf("[SW] OUT_INTERVAL avg_ns=%.3f max_ns=%.2f n=%lu\n", a, m, (unsigned long)n);
+    }
+
+    // ---------- 10. 设备公平性(窗口内完成数) ----------
+    printf("--- 10. 备注 ---\n");
+    printf("[SW] NOTE window_excludes=warmup_and_drain steady_start_count=%lu steady_end_count=%lu\n",
+           (unsigned long)steady_start_count, (unsigned long)steady_end_count);
+    printf("============================================================\n\n");
     fflush(stdout);
 }

@@ -68,6 +68,19 @@ constexpr double NO_PROGRESS_LIMIT_NS = 5000000.0;    // 单次无进展上限 5
 constexpr double TOTAL_LIMIT_NS = 2000000000.0;       // 总时限 2s 兜底(仅诊断)
 constexpr uint64_t PAGE_POOL_SEED = 20260421ULL;      // IOVA 页池排列种子(固定并记录)
 
+// ------------------------------ [预热 20261105] ------------------------------
+// 背景: 原实现注释为"冷启动: 无哨兵/预热, 直接进入正式回放", 与场景2/3/4(哨兵16包
+//   + 预热128包 = 144 包, 之后 reset 统计)不同构: 实测回放的前 ~10us 是
+//   "2.1us 灌满 640 额度 -> 3us 端口停摆 -> 8us 爬坡"的过冲-停顿形态, 会把全程口径的
+//   e2e 抬高 3.1%、PT Cache 命中率拉低。本改动取 trace 前 WARMUP_ROWS_PER_DIR 行作为
+//   预热(epoch=2, 不进正式统计), 预热包全部响应且 IOMMU 静默后才切到测量段,
+//   与合成场景 run_epoch(2) 结束后同点。预热包数 2x72=144 与合成场景完全一致。
+#ifndef TEST_CFG_REAL8_WARMUP_ROWS
+#define TEST_CFG_REAL8_WARMUP_ROWS 72
+#endif
+constexpr unsigned WARMUP_ROWS_PER_DIR = TEST_CFG_REAL8_WARMUP_ROWS;   // 每方向预热行数
+constexpr unsigned WARMUP_EPOCH = 2;                                   // 与合成场景 run_epoch(2) 同值
+
 uint64_t spa_offset(unsigned d) { return SPA_BASE + uint64_t(d) * SPA_STRIDE; }
 
 // ------------------------------ 输入记录 ------------------------------
@@ -154,6 +167,19 @@ public:
     double start_ns = 0.0;
     uint64_t timeout_diag = 0;
     uint64_t cursor[2] = {0, 0};    // 当前发送行号(超时诊断用)
+
+    // ---- [预热] 预热段同步与计数 ----
+    // 预热包数 = 两方向各取 trace 前 WARMUP_ROWS_PER_DIR 行(不足则取全部)。
+    // warm_sent_done[dir] : 该方向预热行已全部送入端口
+    // warm_open           : run() 侧已确认预热段排空并完成统计 reset, 放行测量段
+    // warm_responded      : 预热包已收到的响应数(== warm_total 且 IOMMU 静默时才放行)
+    bool     warm_sent_done[2] = {false, false};
+    bool     warm_open = false;
+    uint64_t warm_total = 0;
+    uint64_t warm_responded = 0;
+    uint64_t warm_rows[2] = {0, 0};
+    uint64_t done_before_meas = 0;   // 预热结束时 IOMMU 内部已完成数(算稳态阈值用)
+    sc_event warm_gate;
 
     explicit Real8TraceScenario(RP_Module& r)
         : rp(r), top(*r.iommu_ptr) {}
@@ -405,7 +431,9 @@ public:
 
         iommu_md::Request record;
         record.device = rec.did;
-        record.epoch = iommu_md::MEASUREMENT_EPOCH;
+        // [预热] trace 前 WARMUP_ROWS_PER_DIR 行 标为预热 epoch(不进 md_trace 正式统计);
+        //   其余行仍为测量 epoch。与合成场景的 epoch=2/3 划分同构。
+        record.epoch = (idx < warm_rows[dir]) ? WARMUP_EPOCH : iommu_md::MEASUREMENT_EPOCH;
         record.sequence = idx;
         record.group = gen->gen_id;            // 配对代编号
         record.type = rec.is_ctrl ? 1u : 0u;   // 0=DATA(任意长度) 1=CTRL
@@ -484,7 +512,24 @@ public:
 
     void sender(unsigned dir) {
         const size_t total = recs[dir].size();
-        for (size_t i = 0; i < total; ++i) {
+        const size_t warm_end = std::min<size_t>((size_t)warm_rows[dir], total);
+        // ---- [预热] 第一段: trace 前 warm_rows[dir] 行, epoch=2, 不进正式统计 ----
+        for (size_t i = 0; i < warm_end; ++i) {
+            if (stopped) return;
+            cursor[dir] = i;
+            emit(dir, i);
+        }
+        warm_sent_done[dir] = true;
+        top.md_trace.progress();
+        std::cout << "[REAL8_WARM_SENT] dir=" << (dir == 1 ? "W" : "R")
+                  << " rows=" << warm_end << " t=" << iommu_md::now_ns() << '\n';
+        fflush(stdout);
+        // 等 run() 侧确认"预热包全部响应 + IOMMU 静默 + 统计已 reset"后才放行测量段。
+        //   等待期间持续 progress, 避免 watchdog 把正常屏障误判为无进展。
+        while (!warm_open && !stopped) { wait(1, SC_NS); top.md_trace.progress(); }
+        if (stopped) return;
+        // ---- 第二段: 测量 epoch ----
+        for (size_t i = warm_end; i < total; ++i) {
             if (stopped) return;
             cursor[dir] = i;
             emit(dir, i);
@@ -506,7 +551,10 @@ public:
         trans.get_extension(ext);
         require(ext && ext->requester_id < N, "响应缺少有效设备ID");
         auto& r = top.md_trace.request(&trans);
-        require(r.epoch == iommu_md::MEASUREMENT_EPOCH, "收到非测量期的响应");
+        // [预热] 预热段(epoch=2)的响应同样要校验与计数, 只是不计入正式统计
+        require(r.epoch == iommu_md::MEASUREMENT_EPOCH || r.epoch == WARMUP_EPOCH,
+                "收到未知 epoch 的响应");
+        if (r.epoch == WARMUP_EPOCH) ++warm_responded;
         require(static_cast<uint32_t>(trans.get_data_length()) == r.bytes,
                 "响应长度与请求不一致 seq=" + std::to_string(r.sequence));
         require(trans.get_response_status() == tlm::TLM_OK_RESPONSE,
@@ -639,16 +687,16 @@ public:
         *remap_out << "dir,excel_row,did,bytes,is_ctrl,source_page_no,offset,gen_id,"
                       "mapped_page_no,gpa_page_base,expected_spa\n";
 
-        // 冷启动: 无哨兵/预热, 直接进入正式回放; 统计窗口在此重置。
-        top.reset_4kb_concurrency_window();
-        top.cache_sub.reset_dedup_valid_line_stats();
-        // [计划] RP以同一实际N设置模型内稳态阈值(#floor(N*10%)~#floor(N*90%)),
-        //   供模型稳态窗口统计(Steady IOPS/带宽/端口稳态间隔)与离线 W 逐项对账。
-        top.steady_start_count = (uint64_t)total_requests * 10 / 100;
-        top.steady_end_count   = (uint64_t)total_requests * 90 / 100;
-        std::cout << "[REAL8_STAT_WINDOW] N=" << total_requests
-                  << " steady_start_count=" << top.steady_start_count
-                  << " steady_end_count=" << top.steady_end_count << '\n';
+        // [预热] 预热段行数: 两方向各取 trace 前 WARMUP_ROWS_PER_DIR 行(不足则全取)
+        warm_rows[0] = std::min<uint64_t>(WARMUP_ROWS_PER_DIR, recs[0].size());
+        warm_rows[1] = std::min<uint64_t>(WARMUP_ROWS_PER_DIR, recs[1].size());
+        warm_total   = warm_rows[0] + warm_rows[1];
+        const uint64_t meas_requests = total_requests - warm_total;
+        require(meas_requests > 0, "预热行数不得大于等于总行数");
+        std::cout << "[REAL8_WARMUP] rows_r=" << warm_rows[0] << " rows_w=" << warm_rows[1]
+                  << " warm_pkts=" << warm_total << " meas_pkts=" << meas_requests
+                  << " epoch=" << WARMUP_EPOCH
+                  << " (与场景2/3/4 的 16哨兵+128预热=144 包同构)\n";
         top.open_real8_dedup_occupancy_trace("real8_dedup_occupancy.csv");
         top.open_real8_ptw_occupancy_trace("real8_ptw_occupancy.csv");
         top.md_trace.set_operations_path("real8_operations_raw.csv");
@@ -656,6 +704,34 @@ public:
         sc_spawn([this]() { sender(0); });
         sc_spawn([this]() { sender(1); });
         sc_spawn([this]() { watchdog(); });
+
+        // [预热屏障] 等预热包全部响应且 IOMMU 内部静默 —— 与合成场景
+        //   "run_epoch(2) 结束后、run_epoch(3) 开始前"完全同点。
+        while (true) {
+            if (warm_sent_done[0] && warm_sent_done[1] &&
+                warm_responded == warm_total && top.md_quiescent()) {
+                break;
+            }
+            wait(1, SC_NS);
+            top.md_trace.progress();
+        }
+        // 统计窗口在"预热已排空"这一点重置(原实现是在冷启动点重置, 故含预热污染)。
+        //   预热段的 cache 内容/去重行/页表均已建好, 测量段不再含冷启动 miss。
+        done_before_meas = top.iommu_total_completed;
+        top.reset_4kb_concurrency_window();
+        top.cache_sub.reset_dedup_valid_line_stats();
+        // [稳态阈值] 与合成场景同式: 已完成数(预热) + 测量包数的 10% / 90%
+        top.steady_start_count = done_before_meas + meas_requests * 10 / 100;
+        top.steady_end_count   = done_before_meas + meas_requests * 90 / 100;
+        std::cout << "[REAL8_STAT_WINDOW] warm_done=" << done_before_meas
+                  << " meas=" << meas_requests
+                  << " steady_start_count=" << top.steady_start_count
+                  << " steady_end_count=" << top.steady_end_count
+                  << " warm_end_t=" << iommu_md::now_ns() << '\n';
+        fflush(stdout);
+        // 放行测量段
+        warm_open = true;
+        warm_gate.notify(SC_ZERO_TIME);
 
         while (true) {
             if (send_done[0] && send_done[1] && total_responded == total_requests &&
@@ -738,6 +814,8 @@ public:
         }
         top.print_cache_statistics();
         top.print_4kb_concurrency_report();
+        // [稳态窗口] 输出"仅稳态窗口"口径的全量指标(与上面全程口径并列)
+        top.print_steady_window_report();
 
         std::cout << "[REAL8_RESULT] PASS expected=" << total_requests
                   << " completed=" << total_responded

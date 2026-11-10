@@ -21,6 +21,14 @@
 #define TEST_CFG_REAL8_TRACE_REPLAY 0
 #endif
 
+// [CPU缓存失效场景] 新场景独立宏: 默认 0 = 完全关闭。
+//   仅在 TEST=rand4k_msi_mix_multichan_inval_strict/lazy 时由 Makefile 置 1;
+//   开启后 iommu_top 在 4KB 页全部 512B 任务完成时刻(track_4kb_page_out)
+//   记录完成事件供 RP 侧 CPU 失效进程消费; 关闭时零成员零代码, 基线不变。
+#ifndef TEST_CFG_CPU_INVAL_SCENE
+#define TEST_CFG_CPU_INVAL_SCENE 0
+#endif
+
 // ===================== FIFO深度参数 =====================
 // Parser输出
 static const uint32_t FIFO_DEPTH_PARSER_TO_COLLECTOR = 4;
@@ -67,6 +75,149 @@ static const uint32_t FIFO_DEPTH_CTRL_PATH_REQ_DDR = 32;
 
 // 入站缓冲
 static const uint32_t FIFO_DEPTH_INBOUND = 4;
+
+// [防死锁] CacheSubsystem::pt_update_fifo 深度(agg_flush -> PT Cache 回填通路)。
+//   【默认值于 20261109 由 32 改为 1024】原因见下。
+//
+//   环形等待(本 FIFO 是环上唯一可切的充分边):
+//     agg_flush 阻塞于 pt_update_fifo.write
+//       -> pt_hash_thread 阻塞于 pt_ram_fifo.write
+//       -> pt_ram_worker 阻塞于 dedup_request_fifo.write(PT MISS 转发)
+//       -> dedup_scheduler 被 Buffer 满的准入控制抑制, 不出队 request
+//       -> Buffer 释放只能靠 dedup_update, 而其唯一生产者 agg_flush 正阻塞在环首
+//
+//   【为何 32 不够 / 旧结论被证伪】旧注释称"默认32与历史场景逐位一致, 不得改"。
+//   但 32 只是"历史上恰好没被耗尽", 不是安全边界: 实测健康场景(8盘4通道/16盘4通道)
+//   的 pt_update_fifo Peak 已经是 32/32 = 100%, dedup_request_fifo 也是 64/64 = 100%,
+//   即这条环一直在贴满载运行。当并发开页数继续上升(8盘8通道: 4KB页并发 134,
+//   去重Buffer 真实需求 586 > 320), 准入长时间关闭, 环即闭合:
+//     8盘8通道 / 16盘8通道 分别在 t=21005ns / 29160ns 停摆, watchdog 50us 无推进后 abort;
+//     现场 buffer=320(满) ptw=0 groups=0 output=0, 在途=sent-responded=640=Global额度上限;
+//     已调度进 agg_flush_peq 174 组, 只走完 61 组, 积压 113 组(=watchdog aggregate=113);
+//     主占位 147 创建 / 38 释放 => 112 条链头成为永久孤儿。
+//
+//   【为何 TEST_CFG_AGG_FLUSH_RELEASE_FIRST=1 挡不住】它只调整**同一组内**两条通路的
+//   写出顺序。agg_flush 是单线程、一次一个组: 卡在第 N 组的回填上, 就永远回不到
+//   循环头去取第 N+1 组 => 第 N+1..N+174 组的释放消息永远生产不出来。
+//   故 iommu_perf_ptw.cc 里"不再阻断本组**及其后组**的释放"那句注释的后半句不成立。
+//
+//   【为何 1024 是有原则的尺寸, 不是魔数】回填消息数以上界为"在途组数 x 每组iova数",
+//   而在途任务总数受 IOMMU_GLOBAL_MAX_OUTSTANDING(640) 约束; 与本文件既有约定同源:
+//     FIFO_DEPTH_PT_CACHE_TO_FWD = 1024  // [防死锁] dedup flush回调整链写入, 需容纳全部在途任务
+//   取 1024 使 agg_flush 的回填写入在物理上不可能被顶住 => 释放生产者永不阻塞
+//   => 环不闭合, 系统退化为"准入控制拦一下放一行"的正常降速。
+//
+//   【实测验证】8盘8通道, Buffer=320 / D=3 / ADM=1 全部保持原值, 仅本深度 32->1024:
+//     [NVRR_RESULT] PASS expected=20000 completed=20000
+//     稳态 IOPS ALL=255.963 Mreq/s, DATA=205.522, Jain=0.99999
+//     主占位 创建/释放 = 2319/2319 (完全对账, 零孤儿)
+//     Admission stall = 555 次 / 4817.3 ns  <- 准入控制在正常降速, 而非死锁
+//
+//   【副作用, 必须知晓】本值参与时序, 改动后**所有**场景的绝对吞吐都会漂移,
+//   历史基线(286.965 Mreq/s / 249.93 Mreq/s 等)不再逐位可复现。如需复现旧基线,
+//   显式传 -DTEST_CFG_PT_UPDATE_FIFO_DEPTH=32 即可(宏覆盖通道保留)。
+//   注意: 这是**治标**——它靠"余量不可耗尽"避免闭环, 环形依赖本身仍在。
+//   治本需解开环上那条唯一的充分边: pt_ram_worker 向 dedup_request_fifo 的阻塞写
+//   (cache_subsystem.cpp 的 PT MISS 转发), 或让 agg_flush 的回填写入改为非阻塞+spill。
+#ifndef TEST_CFG_PT_UPDATE_FIFO_DEPTH
+#define TEST_CFG_PT_UPDATE_FIFO_DEPTH 1024
+#endif
+static const uint32_t PT_UPDATE_FIFO_DEPTH = TEST_CFG_PT_UPDATE_FIFO_DEPTH;
+
+// [释放优先] agg_flush_process_thread 内两条通路的写出顺序开关。
+//   1(默认): 整组先写完 dedup_update_fifo(刷 Buffer + 清占位, 释放通路),
+//            再写 pt_update_fifo(填 PT Cache 常规 CL, 回填通路)。
+//   0: 旧行为, 按 iova 交替写(释放→回填), 此时回填反压会连带阻断本组及其后
+//      组的释放消息, 与 "PT Hash -> RAM FIFO -> dedup_request_fifo -> Buffer满
+//      -> 准入停止 -> 释放停" 构成环形等待(16设备×250组实测死锁)。
+//   仅改变同一线程内两条 FIFO 的写出顺序; 不改延时、容量、仲裁或消息内容。
+#ifndef TEST_CFG_AGG_FLUSH_RELEASE_FIRST
+#define TEST_CFG_AGG_FLUSH_RELEASE_FIRST 1
+#endif
+static_assert(TEST_CFG_AGG_FLUSH_RELEASE_FIRST == 0 || TEST_CFG_AGG_FLUSH_RELEASE_FIRST == 1,
+              "AGG_FLUSH_RELEASE_FIRST 必须为 0 或 1");
+
+// [去重释放优先通道 20261109] dedup 通路的 UPDATE(释放)是否与 REQUEST 物理分离。
+//   背景(为何需要): 旧结构下 UPDATE 与 REQUEST/inside 共用 **单线程 scheduler**
+//     + **深度1** 的 dedup_hash_in_fifo + **单 hash 线程** + 每 RAM 一条 dedup_ram_fifo_。
+//     任一 RAM 的 request FIFO 满 -> hash 线程阻塞写 -> 顶住深度1 出口
+//     -> scheduler 卡在 dedup_hash_in_fifo.write() -> 连 UPDATE 也取不出来
+//     -> free_entry 停摆 -> Buffer 永不释放 -> dedup_admission_ok() 恒 false
+//     -> 新主任务进不了 PTW -> 无新组可完成 -> 环形等待死锁。
+//     即: 准入控制(DEDUP_ADMISSION_CTRL=1) 只挡住了 request 的**出队决策**,
+//     并未保证释放通路畅通; 上面 L329 那句"释放路径全程畅通"只在
+//     hash->RAM 段不持续反压时成立。
+//   实测证据(fixed_total, Buffer=320, D=3, ADM=1):
+//     8盘8通道 / 16盘8通道 分别在 t=21005ns / 29160ns 停摆, watchdog 50us 无推进后 abort;
+//     现场 buffer=320(满) ptw=0 groups=0 output=0, 在途=sent-responded=640=Global额度上限;
+//     主占位创建147/释放38(109 条链头永不释放), 255/53(202 条),
+//     与 watchdog aggregate=113/249 吻合 => 释放消息已产生, 是送不出去;
+//     DEDUP_ADM_ERR=0(准入预留未失效), SKIP foreign update=0(非孤儿链);
+//     [DEDUP_HASH_BP] 绝大多数集中在 RAM0(队头阻塞特征)。
+//   1: 新增 dedup_upd_hash_in_fifo(深度1) + 每 RAM 的 dedup_ram_upd_fifo_,
+//      scheduler 按消息类型分流出口, 且 REQUEST 类改为"出口有空位才出队"(不阻塞),
+//      hash 线程与 RAM worker 两侧均对 UPDATE 严格优先。
+//      —— 对齐本仓库已有的 walker_ram_upd_fifo_ 范式
+//      (walker_ram_worker_thread 注释: "update高优先: 保证Walker更新不被积压的lookup延迟")。
+//   0(默认): 旧行为, 代码路径逐位不变, 历史基线(286.965 / 249.93 Mreq/s 等)不受影响。
+//   注: 只改仲裁与通道拓扑, **不改任何延时、容量、缓存几何或消息内容**。
+//   残留风险: RAM worker 在 push_fifo(pt_hit/pt_miss_response_fifo, 各深度32, 阻塞写)
+//     上仍可能阻塞; 若某 RAM 的 worker 正卡在此处, 该 RAM 的 update 仍需等它出来。
+//     彻底消除需再改响应通道(会动 collector 侧语义), 本开关不包含。
+#ifndef TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#define TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE 0
+#endif
+static_assert(TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE == 0 || TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE == 1,
+              "DEDUP_UPDATE_PRIORITY_LANE 必须为 0 或 1");
+
+// [4KB 页并发口径统一 20261109] 强制实测回放倒按"仅 512B 数据包"计入 4KB 页并发。
+//   背景: iommu_top.cc 的 track_4kb_page_in/out 本身就有两套口径:
+//     #if TEST_CFG_REAL8_TRACE_REPLAY -> 只排除 is_ctrl(因而把 1962 笔 64B 读也计入页并发)
+//     #else                          -> 排除 is_ctrl 且要求 length==KB4_DATA_LEN(512B)
+//   后果: real8 的 AvgConc(75.194, in_tasks=17848=15886+1962) 与合成场景的
+//     AvgConc(65.289, in_tasks=16000) 是两个不同仪器的读数, 不能直接对照。
+//   1: 回放倒也走 512B 硬门控 => 与合成倒同一口径、可直接横向比较。
+//   0(默认): 保持现有行为, 历史回放报告逐位不变。
+//   注意: 本开关**只改统计计数的进入条件**, 不改任何延时/容量/仲裁/路由;
+//     它不会把 64B 读改成控制包(is_ctrl 不变), 因此也不改变其翻译与缓存行为。
+#ifndef TEST_CFG_KB4_GATE_STRICT_512
+#define TEST_CFG_KB4_GATE_STRICT_512 0
+#endif
+static_assert(TEST_CFG_KB4_GATE_STRICT_512 == 0 || TEST_CFG_KB4_GATE_STRICT_512 == 1,
+              "KB4_GATE_STRICT_512 必须为 0 或 1");
+
+// [去重延迟更新] 小包场景(MPS/MRRS=128B)去重Cache更新优化总开关。
+//   1: PTW 组完成(1+D)后 dedup_update 先写入 dedup_delayed_update_fifo(带每条目
+//      定时器), 延时后再转入 dedup_update_fifo, 延迟清除去重Cache占位, 覆盖
+//      "PT Cache 已判 miss 但尚未进入去重Cache" 的 outstanding 兄弟包, 避免其
+//      查询去重Cache时占位已被清除而被二次派发PTW。
+//   0(默认): 旧方案, PTW 直接写 dedup_update_fifo, 其余场景行为逐位不变。
+//   仅 Makefile mps128 测试项传 -DTEST_CFG_DEDUP_DELAYED_UPDATE=1 开启。
+#ifndef TEST_CFG_DEDUP_DELAYED_UPDATE
+#define TEST_CFG_DEDUP_DELAYED_UPDATE 0
+#endif
+static_assert(TEST_CFG_DEDUP_DELAYED_UPDATE == 0 || TEST_CFG_DEDUP_DELAYED_UPDATE == 1,
+              "DEDUP_DELAYED_UPDATE 必须为 0 或 1");
+
+// [去重延迟更新] dedup_delayed_update_fifo 硬深度(条目数), 后期可调。
+//   每组"主任务+D预取"占用 D+1=4 个条目; 默认24=6组。
+#ifndef TEST_CFG_DEDUP_DELAYED_FIFO_DEPTH
+#define TEST_CFG_DEDUP_DELAYED_FIFO_DEPTH 24
+#endif
+static const uint32_t DEDUP_DELAYED_UPDATE_FIFO_DEPTH = TEST_CFG_DEDUP_DELAYED_FIFO_DEPTH;
+
+// [去重延迟更新] 每条目定时器时长(ns): 条目入队即起表, 到期后输出到 dedup_update_fifo。
+#ifndef TEST_CFG_DEDUP_DELAYED_UPDATE_TIMER_NS
+#define TEST_CFG_DEDUP_DELAYED_UPDATE_TIMER_NS 200
+#endif
+static const uint32_t DEDUP_DELAYED_UPDATE_TIMER_NS = TEST_CFG_DEDUP_DELAYED_UPDATE_TIMER_NS;
+
+// [去重延迟更新] 压力冗余值: 占用超过(深度-margin)即异步排出一组(D+1笔),
+//   预留缓冲空间尽量不反压 PTW 写入。默认4 => 阈值 24-4=20。
+#ifndef TEST_CFG_DEDUP_DELAYED_PRESSURE_MARGIN
+#define TEST_CFG_DEDUP_DELAYED_PRESSURE_MARGIN 4
+#endif
+static const uint32_t DEDUP_DELAYED_PRESSURE_MARGIN = TEST_CFG_DEDUP_DELAYED_PRESSURE_MARGIN;
 
 // ===================== 缓存参数 =====================
 // DC Cache (Device Context Cache)
@@ -151,6 +302,16 @@ static const uint32_t AXI_MASTER_0_BANDWIDTH_MBPS = AXI_MASTER_0_FREQ_MHZ * AXI_
 static const uint32_t AXI_MASTER_1_FREQ_MHZ = 1000;   // axi_master_1_to_cmn_rnd 频率(MHz)
 static const uint32_t AXI_MASTER_1_WIDTH_BIT = 128;    // axi_master_1_to_cmn_rnd 数据位宽(bit)
 static const uint32_t AXI_MASTER_1_BANDWIDTH_MBPS = AXI_MASTER_1_FREQ_MHZ * AXI_MASTER_1_WIDTH_BIT;  // 128000 Mbps = 16GB/s
+
+// [整拍占用] DDR 页表口(master_1)带宽计时是否按 128bit 整拍向上取整:
+//   1 = 每拍 = AXI_MASTER_1_WIDTH_BIT/8 = 16B, 不足一拍按一拍计
+//       (4B/8B 事务各占 1 拍=1ns, 24B 占 2 拍=2ns), 贴近真实 AXI 总线:
+//       一笔 64bit 传输也占用一个 128bit 数据拍, 半拍字节槽被浪费;
+//   0 = 旧行为, 仅按字节数线性计时(8B->0.5ns), 会低估小事务的端口占用。
+//   默认开启。如需复现旧基线数值, 编译时传 -DTEST_CFG_DDR_PORT_BEAT_ALIGN=0。
+#ifndef TEST_CFG_DDR_PORT_BEAT_ALIGN
+#define TEST_CFG_DDR_PORT_BEAT_ALIGN 1
+#endif
 
 // ===================== IO 数据包粒度 (PCIe MPS/MRRS) =====================
 // [统计口径] 仅用于"理论峰值 IOPS / 效率"的换算, 不参与任何时序计算:

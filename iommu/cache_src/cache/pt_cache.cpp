@@ -167,10 +167,14 @@ bool PTCache::lookup_pt_ram(gscid_t gscid, pscid_t pscid, iova_t iova,
                 stats_.record_lookup(cache_name_);
                 stats_.record_phase_lookup(cache_name_, phase_tracker_);
                 stats_.record_latency(cache_name_, op_latency_ns);
-                printf("[PT_CACHE_LAZY_INVAL] stale CL dropped on lookup (gscid=%u, pscid=%u, iova=0x%lx, CL.VN=%u < LIB.VN=%u)\n",
-                       tag.gscid, tag.pscid, (unsigned long)tag.iova,
-                       cl_vn, lib_vn);
-                fflush(stdout);
+                // [降噪] 延迟失效在 lazy 场景下逐笔命中即丢弃, 全量打印会淹没日志
+                //   并显著拖慢仿真; 保留前16笔 + 之后每256笔, 计数以 lazy_inval_drops_ 为准。
+                if (lazy_inval_drops_ <= 16 || (lazy_inval_drops_ % 256) == 0) {
+                    printf("[PT_CACHE_LAZY_INVAL] #%lu stale CL dropped on lookup (gscid=%u, pscid=%u, iova=0x%lx, CL.VN=%u < LIB.VN=%u)\n",
+                           (unsigned long)lazy_inval_drops_, tag.gscid, tag.pscid,
+                           (unsigned long)tag.iova, cl_vn, lib_vn);
+                    fflush(stdout);
+                }
                 return false;
             }
         }

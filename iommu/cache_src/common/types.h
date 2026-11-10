@@ -509,6 +509,11 @@ struct CacheMessage {
     // 通用元信息：任务标记、输入/输出共用
     uint64_t        task_id = 0;
 
+    // [STAT] 控制包标记(来自 iommu_task_t::is_ctrl)。
+    //   true  = SQ/CQ/MSI 等控制包; false = 普通数据包。
+    //   仅用于 PT/Walker 多RAM 数据-only 分布统计, 不影响功能语义。
+    bool            is_ctrl_pkt = false;
+
     // 路由键：不同 cache 按需使用其中一部分字段做查找/更新/失效定位。 查找/更新/失效输入
     device_id_t     device_id = 0;
     process_id_t    process_id = 0;

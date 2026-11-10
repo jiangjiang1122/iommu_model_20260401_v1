@@ -8,6 +8,11 @@
 // Forward declaration for iommu_task_t (defined in global namespace)
 struct iommu_task_t;
 
+// [稳态窗口] 全局门控标志(定义于 iommu_top.cc): true 表示当前仿真时刻落在稳态
+//   窗口(完成数 10%~90%)内。峰值/最值类统计无法用"双快照做差"得到窗口值,
+//   故在此按标志单独累加一份"仅窗口内"的副本。
+extern bool g_iommu_steady_sampling;
+
 namespace iommu {
 
 /**
@@ -84,6 +89,10 @@ struct DedupBuffer {
     double           occupancy_integral_ = 0.0;  // 单位 entry·ns
     double           last_change_ns_ = -1.0;     // 上次valid_count变化时刻
     double           first_change_ns_ = -1.0;    // 首次valid_count变化时刻
+    // [稳态窗口] 仅窗口内累加的峰值/最值(这类量无法由双快照做差得到)
+    uint16_t         steady_peak_valid_count = 0;
+    double           steady_max_hold_ns = 0.0;
+    double           steady_min_hold_ns = 1e18;
 
     // [STAT需求] 结算时间加权占用积分(在valid_count变化前调用, 用旧值×Δt)
     void settle_occupancy() {
@@ -112,6 +121,9 @@ struct DedupBuffer {
                 settle_occupancy();  // [STAT需求] 结算占用积分(变化前)
                 valid_count++;
                 if (valid_count > peak_valid_count) peak_valid_count = valid_count;
+                // [稳态窗口] 峰值不可做差, 单独累加一份仅窗口内的峰值
+                if (g_iommu_steady_sampling && valid_count > steady_peak_valid_count)
+                    steady_peak_valid_count = valid_count;
                 return static_cast<uint16_t>(i);  // 返回索引（0, 1, 2, ...顺序）
             }
         }
@@ -134,6 +146,11 @@ struct DedupBuffer {
                 hold_count++;
                 if (hold_ns > max_hold_ns) max_hold_ns = hold_ns;
                 if (hold_ns < min_hold_ns) min_hold_ns = hold_ns;
+                // [稳态窗口] 最值不可做差, 单独累加仅窗口内的最值
+                if (g_iommu_steady_sampling) {
+                    if (hold_ns > steady_max_hold_ns) steady_max_hold_ns = hold_ns;
+                    if (hold_ns < steady_min_hold_ns) steady_min_hold_ns = hold_ns;
+                }
             }
             entries[idx].clear();
             settle_occupancy();  // [STAT需求] 结算占用积分(变化前)
@@ -166,6 +183,20 @@ struct DedupBuffer {
     double   get_avg_occupancy_pct() const { return get_avg_occupancy() / PT_DEDUP_BUFFER_SIZE * 100.0; }
     double   get_occupancy_window_ns() const {
         return (first_change_ns_ >= 0.0 && last_change_ns_ > first_change_ns_) ? (last_change_ns_ - first_change_ns_) : 0.0;
+    }
+    // [稳态窗口] 原始积分/时刻透传: 供稳态窗口双快照做差(不能直接用 avg, 否则窗口不可切)
+    double   get_occupancy_integral_raw() const { return occupancy_integral_; }
+    double   get_occ_last_change_ns() const { return last_change_ns_; }
+    double   get_occ_first_change_ns() const { return first_change_ns_; }
+    double   get_total_hold_ns_raw() const { return total_hold_ns; }
+    // [稳态窗口] 仅窗口内累加的峰值/最值
+    uint16_t get_steady_peak_valid_count() const { return steady_peak_valid_count; }
+    double   get_steady_max_hold_ns() const { return steady_max_hold_ns; }
+    double   get_steady_min_hold_ns() const { return steady_min_hold_ns < 1e17 ? steady_min_hold_ns : 0.0; }
+    void     reset_steady_extremes() {
+        steady_peak_valid_count = valid_count;
+        steady_max_hold_ns = 0.0;
+        steady_min_hold_ns = 1e18;
     }
     
     /**

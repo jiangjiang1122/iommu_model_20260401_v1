@@ -28,11 +28,16 @@ constexpr uint64_t MSI_PATTERN = 0x3000, MSI_IOVA_BASE = 0x2000000;
 constexpr uint64_t SQ_IOVA = 0x5000000, CQ_IOVA = 0x5001000, CTRL_GPA = 0x4000000;
 #endif
 constexpr unsigned RANGE_PAGES = RANGE_MB * 256;
+// [边界安全] independent 全局唯一选页上界: 预留 PT_DEDUP_PREFETCH_DEPTH 个页, 使任何被选页的
+//   预取邻居 page+k(k<=D) 都 < RANGE_PAGES, 与 RP 建表 mapped 集合完全一致, 杜绝边界无效 PTE。
+constexpr unsigned PAGE_PICK_RANGE = RANGE_PAGES - PT_DEDUP_PREFETCH_DEPTH;
 constexpr uint64_t PROBE_IOVA = SQ_IOVA + 0x10000;
 constexpr uint64_t HUGE = 0x200000ULL;
 static_assert(N >= 1 && N <= 16, "设备数必须为1..16");
 static_assert(QUEUE_DEPTH > 0 && QUEUE_DEPTH <= 1048576, "就绪队列深度非法");
 static_assert(GROUPS > 0 && GROUPS <= RANGE_PAGES, "组数超过候选页数");
+static_assert(!TEST_CFG_MD_INDEPENDENT || uint64_t(GROUPS) * N <= PAGE_PICK_RANGE,
+              "independent 全局唯一模式要求 N*GROUPS 不超过可选页数(PAGE_PICK_RANGE)");
 static_assert(PT_DEDUP_PREFETCH_DEPTH <= 16, "预取深度超过结果槽容量");
 static_assert(TEST_CFG_MD_RR_START >= 0 && TEST_CFG_MD_RR_START < N, "轮询起点非法");
 static_assert(!FIXED_TOTAL || N == 1 || N == 2 || N == 4 || N == 8 || N == 16,
@@ -100,11 +105,18 @@ class MultiDeviceScenario {
         require(rp.enable_iommu(&top,DDT_1LVL)>=0,"启用IOMMU失败");
         std::vector<unsigned> shared_pages;
         if(FIXED_TOTAL) shared_pages=choose(1440,RANGE_PAGES,2024,123);
+        // [全局唯一独立页] independent 模式: 一次性从整个 IOVA 范围抽取 N*GROUPS 个互不重复的页号,
+        //   再按设备等分为 N 份 -> 每设备 GROUPS 个页, 且 N 个设备的页集合两两不相交,
+        //   满足"GROUPS*N 个 4KB 页全不重复"(overlap 模式 16 设备复用同一批页, 此处不再复用)。
+        //   选页上界用 PAGE_PICK_RANGE 预留预取余量, 保证所有预取邻居均被映射, 不出现无效页。
+        else if(TEST_CFG_MD_INDEPENDENT) shared_pages=choose(N*GROUPS,PAGE_PICK_RANGE,2024,123);
         for(unsigned d=0;d<N;++d) {
             auto& dev=devices[d];
             const unsigned seed_delta=(!FIXED_TOTAL && TEST_CFG_MD_INDEPENDENT) ? d : 0;
-            dev.pages=FIXED_TOTAL ? std::vector<unsigned>(shared_pages.begin()+d*GROUPS,shared_pages.begin()+(d+1)*GROUPS)
-                                 : choose(GROUPS,RANGE_PAGES,2024+seed_delta,123+seed_delta);
+            if(FIXED_TOTAL || TEST_CFG_MD_INDEPENDENT)
+                dev.pages.assign(shared_pages.begin()+d*GROUPS,shared_pages.begin()+(d+1)*GROUPS);
+            else
+                dev.pages=choose(GROUPS,RANGE_PAGES,2024+seed_delta,123+seed_delta);
             dev.msi_pages=choose(256,1024,777+seed_delta,777+seed_delta);
             dev.msi_iova=MSI_IOVA_BASE+uint64_t(dev.msi_pages[0])*4096+0x40;
             dev.probe_gpa=0x100000ULL+uint64_t(d)*4096;
@@ -166,6 +178,18 @@ class MultiDeviceScenario {
                       << " sequence_hash=" << digest << " root=" << dev.dc.iohgatp.PPN
                       << " free_ppn=" << next_free_page << '\n';
             top.md_trace.progress();
+        }
+        // [全局唯一校验] independent 模式: 汇总所有设备页号, 断言两两不重复且总数=N*GROUPS。
+        if(TEST_CFG_MD_INDEPENDENT && !FIXED_TOTAL) {
+            std::set<unsigned> all_pages; unsigned total=0;
+            for(unsigned d=0;d<N;++d) {
+                all_pages.insert(devices[d].pages.begin(),devices[d].pages.end());
+                total+=devices[d].pages.size();
+            }
+            require(all_pages.size()==total && total==N*GROUPS,
+                    "independent 全局唯一页校验失败: 存在跨设备重复页");
+            std::cout << "[MD_UNIQUE_OK] devices=" << N << " pages/device=" << GROUPS
+                      << " total_unique=" << all_pages.size() << " expected=" << N*GROUPS << '\n';
         }
     }
     void invalidate_all() {
@@ -352,6 +376,10 @@ public:
         run_epoch(1); // 同IOVA、不同S1/S2结果的哨兵。
         invalidate_all();
         run_epoch(2); // 预热不进入正式统计。
+        // [STAT需求1/2] 两项新指标只统计测量 epoch(与 md_trace.report 同窗口):
+        //   预热结束后 IOMMU 内部 quiescent, 此处重置 4KB 并发窗口与去重 Cache 有效行采样累加器。
+        top.reset_4kb_concurrency_window();
+        top.cache_sub.reset_dedup_valid_line_stats();
         const uint64_t ptw_before=top.ptw_total_completed, ddr_before=top.axi_master_1_read_req_total;
         run_epoch(iommu_md::MEASUREMENT_EPOCH);
         top.md_trace.report("multidev_n"+std::to_string(N)+"_"+std::to_string(RANGE_MB)+"mb");

@@ -48,6 +48,9 @@ public:
         if (size_ > kMaxEntries) size_ = kMaxEntries;
         vn_max_ = (vn_bits >= 8) ? 255u : ((1u << vn_bits) - 1u);
         if (vn_max_ == 0) vn_max_ = 15u;
+        record_count_ = 0;
+        wrap_count_ = 0;
+        full_fallback_count_ = 0;
         clear();
     }
 
@@ -58,10 +61,29 @@ public:
     // 热路径快速判定: LIB 为空时查询侧无需做任何旁路比对
     bool empty() const { return valid_count_ == 0; }
 
+    // ---- [失效] 延时失效策略量化计数(累计值, clear() 不复位) ----
+    uint64_t record_count()       const { return record_count_; }        // LIB 记录笔数
+    uint64_t wrap_count()         const { return wrap_count_; }          // VN 回绕(触发批量扫表)次数
+    uint64_t full_fallback_count()const { return full_fallback_count_; } // LIB 满降级为立即扫表次数
+
     void clear() {
         for (uint32_t i = 0; i < kMaxEntries; ++i) entries_[i] = LibEntry{};
         valid_count_ = 0;
         global_vn_ = 0;
+    }
+
+    // [FIX] VN 回绕批量扫表完成后的 LIB 重定基。
+    //   record() 在 global_vn_ 达到 VN_MAX 时把全局 VN 复位为 0, 但 LIB entry 的
+    //   vn 仍停留在 VN_MAX。若不重定基, 扫表后新填入的行 vn = 0, 查询旁路比对
+    //   cl_vn(0) < lib_vn(VN_MAX) 成立 -> 新行被误判为 stale 并丢弃, 直到下一笔
+    //   失效命令为止都会产生人为 miss 风暴。
+    //   批量扫表已把"扫表前"的行全部失效(或重置为 new_vn=0), 故扫表完成后把所有
+    //   entry 的 vn 对齐到当前全局 VN, 使比较语义恢复一致。
+    //   调用时机: 必须在下发给 PT 与 Walker 的 sweep 子任务**全部完成之后**。
+    void rebase_after_sweep() {
+        for (uint32_t i = 0; i < size_; ++i) {
+            if (entries_[i].valid) entries_[i].vn = global_vn_;
+        }
     }
 
     // 记录一笔扫表失效指令。
@@ -89,6 +111,7 @@ public:
                 // 回滚以保持 CL.VN/LIB.VN 的比较语义一致。
                 global_vn_ = static_cast<uint8_t>(global_vn_ - 1);
                 out_full = true;
+                full_fallback_count_++;
                 return false;
             }
             entries_[free_idx].valid = true;
@@ -98,9 +121,11 @@ public:
             entries_[free_idx].vn = global_vn_;
             valid_count_++;
         }
+        record_count_++;
 
         if (global_vn_ >= vn_max_) {
             global_vn_ = 0;
+            wrap_count_++;
             return true;   // 触发批量扫表
         }
         return false;
@@ -154,6 +179,10 @@ private:
     uint32_t vn_max_ = 15;
     uint32_t valid_count_ = 0;
     uint8_t  global_vn_ = 0;
+    // [失效] 延时失效策略量化计数(累计值)
+    uint64_t record_count_        = 0;
+    uint64_t wrap_count_          = 0;
+    uint64_t full_fallback_count_ = 0;
 };
 
 } // namespace iommu

@@ -1,6 +1,7 @@
 #include "subsystem/cache_subsystem.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -117,7 +118,13 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       dedup_request_fifo(64),
       dedup_update_fifo(64),
       dedup_inside_request_fifo(32),
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+      delayed_upd_timer_eq_("delayed_upd_timer_eq"),
+#endif
       dedup_hash_in_fifo(1),
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+      dedup_upd_hash_in_fifo(1),   // [释放优先通道] UPDATE 专用出口, 同深度1
+#endif
       dc_response_fifo(16),
       pc_response_fifo(16),
       pt_hit_response_fifo(32),
@@ -126,7 +133,7 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       msi_response_fifo(1024),
       dc_update_fifo(1),
       pc_update_fifo(1),
-      pt_update_fifo(32),
+      pt_update_fifo(PT_UPDATE_FIFO_DEPTH),   // [防死锁] 深度可经 TEST_CFG_PT_UPDATE_FIFO_DEPTH 覆盖(默认32, 基线不变)
       walker_update_fifo(1024),
       msi_update_fifo(1),
       dc_invalidate_fifo(1),
@@ -185,6 +192,10 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     SC_THREAD(pt_hash_thread);
     // [dedup多RAM] 去重Cache多RAM改造: Scheduler + Hash单元 + 每组RAM独立worker(sc_spawn)
     SC_THREAD(dedup_scheduler_thread);
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+    // [去重延迟更新] 延迟FIFO排空线程: 三条件(定时器/压力/Buffer满)转入dedup_update_fifo
+    SC_THREAD(dedup_delayed_update_drain_thread);
+#endif
     SC_THREAD(dedup_hash_process_thread);
     // [walker多RAM] Walker Cache 多RAM改造: Hash线程 + 每子表x每RAM组独立worker + Join线程
     // 物理拓扑: C1/C2/C3三子表各自独立 num_rams 组RAM, 共 3*num_rams 个worker,
@@ -233,15 +244,24 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
             snprintf(fname, sizeof(fname), "dedup_ram_fifo_%u", i);
             dedup_ram_fifo_.emplace_back(
                 std::make_unique<sc_fifo<CacheMessage>>(fname, fifo_depth));
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+            // [释放优先通道] 每 RAM 一条 UPDATE 专用前置 FIFO(深度与 request 通道同值,
+            //   不引入新容量参数); 对齐 walker_ram_upd_fifo_ 的命名与建法。
+            char uname[40];
+            snprintf(uname, sizeof(uname), "dedup_ram_upd_fifo_%u", i);
+            dedup_ram_upd_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(uname, fifo_depth));
+#endif
         }
         for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
             sc_spawn(sc_bind(&CacheSubsystem::dedup_ram_worker_thread, this,
                              static_cast<int>(i)));
         }
     }
-    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u)\n",
+    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u, upd_prio_lane=%d)\n",
            cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways,
-           dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth);
+           dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth,
+           static_cast<int>(TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE));
     fflush(stdout);
 
     // [失效] 配置并注入共享 LIB: PT 与 Walker 共用同一个 LIB 与全局 VN
@@ -271,6 +291,11 @@ bool CacheSubsystem::md_quiescent() const {
         &walker_invalidate_response_fifo,&msi_invalidate_response_fifo,&invalidation_request_fifo,
         &invalidation_response_fifo,&walker_join_fifo,&walker_serial_fifo};
     for(auto* f:fifos) if(f->num_available()) return false;
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+    // [释放优先通道] 新增通道也必须排空, 否则会在释放消息未刷完时就判定静止。
+    if (dedup_upd_hash_in_fifo.num_available()) return false;
+    for (const auto& f : dedup_ram_upd_fifo_) if (f->num_available()) return false;
+#endif
     for(const auto* banks:{&pt_ram_fifo_,&dedup_ram_fifo_,&walker_ram_fifo_,&walker_ram_upd_fifo_})
         for(const auto& f:*banks) if(f->num_available()) return false;
     return true;
@@ -825,6 +850,13 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
 
             // [STAT] 本RAM统计
             pt_ram_lookup_count_[ram_id]++;
+            // [STAT] 仅数据包计数(SQ/CQ/MSI 控制包不计入)
+            if (!req.is_ctrl_pkt) pt_ram_data_lookup_count_[ram_id]++;
+            // [STAT] per-RAM 真实命中计数(全量 + 仅数据包)
+            if (resp.hit) {
+                pt_ram_lookup_hit_count_[ram_id]++;
+                if (!req.is_ctrl_pkt) pt_ram_data_lookup_hit_count_[ram_id]++;
+            }
         } else {
             // =============================================================
             // 处理 UPDATE (FILL)
@@ -873,6 +905,8 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
 
             // [STAT] 本RAM统计
             pt_ram_update_count_[ram_id]++;
+            // [STAT] 仅数据包计数(SQ/CQ/MSI 控制包不计入)
+            if (!req.is_ctrl_pkt) pt_ram_data_update_count_[ram_id]++;
         }
 
         // [STAT] 本RAM公共统计
@@ -911,6 +945,10 @@ void CacheSubsystem::dedup_scheduler_thread() {
 #if TEST_CFG_DEDUP_ADMISSION_CTRL
         if (has_req && !dedup_admission_ok()) {
             has_req = false;  // 仲裁视角本轮request不可用(跳过)
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+            // [去重延迟更新] 条件3: Buffer满, 通知排空线程加速转出延迟FIFO释放Buffer
+            dedup_buffer_full_notify_ev_.notify();
+#endif
         }
 #endif
 
@@ -938,11 +976,52 @@ void CacheSubsystem::dedup_scheduler_thread() {
         // 乒乓仲裁: REQUEST类(request+inside) vs UPDATE
         bool any_request = has_req || has_ins;
         bool do_request;
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // ============================================================
+        // [释放优先通道 20261109] 出口按类型分流 + "先验空位, 再出队"
+        //   旧行为: 无论选中哪一类, 都阻塞写同一个深度1的 dedup_hash_in_fifo。
+        //     一旦 hash 线程被某个 RAM 的 request FIFO 顶住, scheduler 就卡死在这次
+        //     写上, 连 UPDATE 也取不出来 => free_entry 停摆 => Buffer 永不释放
+        //     => 准入永久关闭 => 环形等待死锁(8盘8通道/16盘8通道实测)。
+        //   新行为: UPDATE 走 dedup_upd_hash_in_fifo(独立深度1), REQUEST 走原出口;
+        //     且先确认目标出口有空位再从源 FIFO 出队 => 出口满时本轮不下发、
+        //     不阻塞, 回到仲裁重选。因为两个出口都**只由本线程写入**, 且
+        //     num_free() 与 write() 之间无任何 wait, 故 write() 结构上不会阻塞
+        //     => "深度1出口绝不能被堵住" 得到保证。
+        //   仲裁优先级与准入前置条件保持原语义, 不改延时/容量/消息内容。
+        // ============================================================
+        const bool can_req = any_request && (dedup_hash_in_fifo.num_free() > 0);
+        const bool can_upd = has_upd     && (dedup_upd_hash_in_fifo.num_free() > 0);
+        if (!can_req && !can_upd) {
+            // 有消息但两侧出口均满 => 等任一出口腾出空位或任一源写入(纯事件等待,
+            //   无忙轮询)。注: 三个入口 FIFO 均仅由本线程消费, 不会被他人抢走。
+            wait(dedup_hash_in_fifo.data_read_event() |
+                 dedup_upd_hash_in_fifo.data_read_event() |
+                 dedup_request_fifo.data_written_event() |
+                 dedup_inside_request_fifo.data_written_event() |
+                 dedup_update_fifo.data_written_event());
+            continue;
+        }
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+        // UPDATE 严格优先(与旧开关语义一致, 仅把"可用"换成"可下发")
+        do_request = can_req && !can_upd;
+#else
+        if (can_req && can_upd) do_request = dedup_sched_next_is_request_;  // 两类都能发: 乒乓
+        else                    do_request = can_req;                      // 只一类能发: 发它
+#endif
+#else   // !TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+        // [去重延迟更新] UPDATE严格优先于REQUEST类(释放路径先行, 与延迟FIFO
+        //   配合加速Buffer释放); REQUEST类内inside优先不变。开关off保持乒乓。
+        do_request = any_request && !has_upd;
+#else
         if (any_request && has_upd) {
             do_request = dedup_sched_next_is_request_;  // 两类都有, 按乒乓选择
         } else {
             do_request = any_request;  // 只有一类可用, 处理它
         }
+#endif
+#endif  // TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
 
         CacheMessage msg;
         if (do_request) {
@@ -965,22 +1044,158 @@ void CacheSubsystem::dedup_scheduler_thread() {
             dedup_sched_next_is_request_ = true;
         }
 
-        // 下发Hash单元: 阻塞写 = hash忙时scheduler阻塞(反压上游)
+        // 下发Hash单元
 #if TEST_CFG_MULTI_DEVICE_SCENE
         iommu_md::BusyGuard md_busy(md_active_);
 #endif
-        dedup_hash_in_fifo.write(msg);
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // 分流: UPDATE 走独立释放出口。上面已验过空位, 两个 write 均不会阻塞。
+        if (do_request) dedup_hash_in_fifo.write(msg);
+        else            dedup_upd_hash_in_fifo.write(msg);
+#else
+        dedup_hash_in_fifo.write(msg);   // 阻塞写 = hash忙时scheduler阻塞(反压上游)
+#endif
     }
 }
+
+// ============================================================
+// [去重延迟更新] 统一入队封装 dedup_update_enqueue
+//   开关off: 直写 dedup_update_fifo(旧方案, 逐位不变)。
+//   开关on : 写入带每条目定时器的延迟FIFO(deque), 由排空线程按三条件转出:
+//     c1 每条目定时器到期(入队即起表, DEDUP_DELAYED_UPDATE_TIMER_NS);
+//     c2 入队后占用 > (深度-margin): 置压力标志异步排出一组(D+1)笔;
+//     c3 去重Buffer满(scheduler/worker通知, 排空线程唤醒后复核)。
+//   硬满(=深度)时push端等space_ev(极端反压, 计数观测), 尽量不反压PTW写入。
+// ============================================================
+void CacheSubsystem::dedup_update_enqueue(CacheMessage& msg) {
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    // 极端反压: 硬满且排空线程尚未让位, 等待space_ev
+    if (delayed_upd_deque_.size() >= DEDUP_DELAYED_UPDATE_FIFO_DEPTH) {
+        delayed_upd_push_block_cnt_++;
+        const double t0 = now_ns;
+        while (delayed_upd_deque_.size() >= DEDUP_DELAYED_UPDATE_FIFO_DEPTH)
+            wait(delayed_upd_space_ev_);
+        const double blk = sc_time_stamp().to_seconds() * 1e9 - t0;
+        if (blk > delayed_upd_push_block_max_ns_) delayed_upd_push_block_max_ns_ = blk;
+    }
+    delayed_upd_sample_occ();  // 结算入队前占用积分段
+    DelayedUpdEntry e;
+    e.msg      = msg;
+    e.enq_ns   = now_ns;
+    e.deadline = sc_time_stamp() + sc_time(DEDUP_DELAYED_UPDATE_TIMER_NS, SC_NS);
+    delayed_upd_deque_.push_back(e);
+    delayed_upd_enq_total_++;
+    if (delayed_upd_first_enq_ns_ < 0.0) delayed_upd_first_enq_ns_ = now_ns;
+    if ((int)delayed_upd_deque_.size() > delayed_upd_occ_peak_)
+        delayed_upd_occ_peak_ = (int)delayed_upd_deque_.size();
+    // c1: 每笔入队同步起表(PEQ式有序定时事件, 到期触发排空线程复核队头deadline)
+    delayed_upd_timer_eq_.notify(sc_time(DEDUP_DELAYED_UPDATE_TIMER_NS, SC_NS));
+    // c2: 占用超过(深度-margin)阈值, 置压力标志并唤醒排空线程排出一组
+    if (delayed_upd_deque_.size() >
+        (DEDUP_DELAYED_UPDATE_FIFO_DEPTH - DEDUP_DELAYED_PRESSURE_MARGIN)) {
+        delayed_pressure_pending_ = true;
+        delayed_upd_pressure_ev_.notify();
+    }
+#else
+    dedup_update_fifo.write(msg);  // 旧方案: PTW 直写 dedup_update_fifo
+#endif
+}
+
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+// ============================================================
+// [去重延迟更新] 排空线程: dedup_delayed_update_fifo -> dedup_update_fifo
+// 单OR等待同时兼顾三条件(回答"PEQ定时器如何兼顾条件2/3"):
+//   定时器事件(sc_event_queue每笔入队notify一次) | 压力事件 | Buffer满事件。
+//   唤醒后按 c2 -> c3 -> c1 顺序处理:
+//     c2 消费压力标志, 排出一组(D+1)笔;
+//     c3 复核 !dedup_admission_ok()(防事件残留误排空), 排出一组;
+//     c1 队头优先, 排出全部已到期条目(过期空醒时deadline复核天然幂等)。
+// 死锁自检: 本线程只等自有事件; 写dedup_update_fifo虽阻塞但消费者是独立
+//   scheduler线程; push端只等space_ev(由本线程notify)。无循环等待。
+// ============================================================
+void CacheSubsystem::dedup_delayed_update_drain_thread() {
+    const uint32_t grp = PT_DEDUP_PREFETCH_DEPTH + 1;  // 主任务+D预取=4
+    while (true) {
+        wait(delayed_upd_timer_eq_.default_event() |
+             delayed_upd_pressure_ev_ |
+             dedup_buffer_full_notify_ev_);
+        // c2: 压力阈值(入队端置标志)
+        if (delayed_pressure_pending_) {
+            delayed_pressure_pending_ = false;
+            if (!delayed_upd_deque_.empty()) {
+                const uint32_t sz = (uint32_t)delayed_upd_deque_.size();
+                delayed_upd_drain_group(grp < sz ? grp : sz, 2);
+                continue;
+            }
+        }
+        // c3: Buffer满(唤醒时复核)
+        if (!delayed_upd_deque_.empty() && !dedup_admission_ok()) {
+            const uint32_t sz = (uint32_t)delayed_upd_deque_.size();
+            delayed_upd_drain_group(grp < sz ? grp : sz, 3);
+            continue;
+        }
+        // c1: 队头优先, 排出全部到期条目
+        while (!delayed_upd_deque_.empty() &&
+               sc_time_stamp() >= delayed_upd_deque_.front().deadline) {
+            delayed_upd_drain_group(1, 1);
+        }
+    }
+}
+
+// [去重延迟更新] 从队头弹出n笔转入dedup_update_fifo(阻塞写: 消费者scheduler独立);
+//   每弹一笔notify space_ev给硬满push端让位; 统计出队条件分类与条目驻留时长。
+void CacheSubsystem::delayed_upd_drain_group(uint32_t n, int cond) {
+    delayed_upd_sample_occ();  // 结算弹出前占用积分段
+    for (uint32_t i = 0; i < n && !delayed_upd_deque_.empty(); i++) {
+        DelayedUpdEntry e = delayed_upd_deque_.front();
+        delayed_upd_deque_.pop_front();
+        const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        const double resid  = now_ns - e.enq_ns;
+        delayed_upd_residency_total_ns_ += resid;
+        if (resid > delayed_upd_residency_max_ns_) delayed_upd_residency_max_ns_ = resid;
+        if (cond == 1)      delayed_upd_drain_c1_++;
+        else if (cond == 2) delayed_upd_drain_c2_++;
+        else                delayed_upd_drain_c3_++;
+        dedup_update_fifo.write(e.msg);
+        delayed_upd_space_ev_.notify();
+    }
+    if (cond != 1) delayed_upd_group_cnt_++;
+}
+
+// [去重延迟更新] 占用时间加权积分: 每次size变化前结算上一段(旧size x 时长)
+void CacheSubsystem::delayed_upd_sample_occ() {
+    const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+    if (delayed_upd_occ_last_ns_ >= 0.0)
+        delayed_upd_occ_weighted_ns_ +=
+            (double)delayed_upd_deque_.size() * (now_ns - delayed_upd_occ_last_ns_);
+    delayed_upd_occ_last_ns_ = now_ns;
+}
+#endif // TEST_CFG_DEDUP_DELAYED_UPDATE
 
 // ============================================================
 // [dedup多RAM] dedup_hash_process_thread - 去重 Cache Hash 单元线程
 // 读 dedup_hash_in_fifo -> wait(hash 1拍) -> ram_id = org_hash & (num_rams-1)
 //   -> 写 dedup_ram_fifo_[ram_id] (满则阻塞, Hash保持忙, 反压scheduler)
+// [释放优先通道] 开关on时额外服务 dedup_upd_hash_in_fifo(UPDATE 严格优先),
+//   并按消息类型投递到 dedup_ram_upd_fifo_[ram_id] => UPDATE 不会排在某个
+//   已满的 request RAM FIFO 之后(消除共享单 hash 线程带来的队头阻塞)。
 // ============================================================
 void CacheSubsystem::dedup_hash_process_thread() {
     while (true) {
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // UPDATE 严格优先(对齐 walker_ram_worker_thread 的 nb_read + 组合事件写法);
+        //   两侧都空则等任一写入。本线程是两条 hash_in 的唯一消费者。
+        CacheMessage msg;
+        bool is_upd = dedup_upd_hash_in_fifo.nb_read(msg);
+        if (!is_upd && !dedup_hash_in_fifo.nb_read(msg)) {
+            wait(dedup_upd_hash_in_fifo.data_written_event() |
+                 dedup_hash_in_fifo.data_written_event());
+            continue;
+        }
+#else
         CacheMessage msg = dedup_hash_in_fifo.read();
+#endif
 #if TEST_CFG_MULTI_DEVICE_SCENE
         iommu_md::BusyGuard md_busy(md_active_);
 #endif
@@ -991,6 +1206,30 @@ void CacheSubsystem::dedup_hash_process_thread() {
 
         uint32_t ram_id = dedup_cache_->compute_ram_id(msg.gscid, msg.pscid, msg.iova);
 
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // 按通道类型选目标 FIFO: update 有自己的 per-RAM FIFO, 不与 request 争位。
+        sc_fifo<CacheMessage>& target =
+            is_upd ? *dedup_ram_upd_fifo_[ram_id] : *dedup_ram_fifo_[ram_id];
+        // 写目标 RAM FIFO: 满则阻塞(Hash保持忙, 反压上游)
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (target.num_free() == 0) {
+            dedup_hash_backpressure_cnt_++;
+            printf("[DEDUP_HASH_BP] task_id=%u -> RAM%u %sFIFO full, hash unit blocked\n",
+                   (unsigned)msg.task_id, ram_id, is_upd ? "UPD " : "");
+            fflush(stdout);
+        }
+        target.write(msg);  // 阻塞写 = 反压
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_hash_backpressure_ns_ += (wr_end_ns - wr_start_ns);
+
+        // [STAT] FIFO占用峰值与Hash单元统计(峰值只统计 request 通道, 与旧口径一致)
+        if (!is_upd) {
+            int occ = dedup_ram_fifo_[ram_id]->num_available();
+            if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
+        }
+        dedup_hash_task_count_++;
+        dedup_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
+#else
         // 写目标 RAM FIFO: 满则阻塞(Hash保持忙, 反压上游)
         const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
         if (dedup_ram_fifo_[ram_id]->num_free() == 0) {
@@ -1008,6 +1247,7 @@ void CacheSubsystem::dedup_hash_process_thread() {
         if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
         dedup_hash_task_count_++;
         dedup_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
+#endif
     }
 }
 
@@ -1024,8 +1264,22 @@ void CacheSubsystem::dedup_hash_process_thread() {
 // ============================================================
 void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
     sc_fifo<CacheMessage>& my_fifo = *dedup_ram_fifo_[ram_id];
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+    sc_fifo<CacheMessage>& my_upd_fifo = *dedup_ram_upd_fifo_[ram_id];
+#endif
     while (true) {
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // [释放优先通道] update 高优先(对齐 walker_ram_worker_thread 的同名机制:
+        //   "保证Walker更新不被积压的lookup延迟") => Buffer 刷新/清占位不会被
+        //   积压的 lookup 拖死, 释放通路在单个 RAM 内部也得到保障。
+        CacheMessage msg;
+        if (!my_upd_fifo.nb_read(msg) && !my_fifo.nb_read(msg)) {
+            wait(my_upd_fifo.data_written_event() | my_fifo.data_written_event());
+            continue;
+        }
+#else
         CacheMessage msg = my_fifo.read();
+#endif
 #if TEST_CFG_MULTI_DEVICE_SCENE
         iommu_md::BusyGuard md_busy(md_active_);
 #endif
@@ -1459,7 +1713,7 @@ void CacheSubsystem::sample_fifo_occ(FifoOccStat& s, int occ, double now, double
 void CacheSubsystem::fifo_util_sampler_thread() {
     // 深度取自构造初始化列表值(sc_fifo::size() 为 protected, 不可直接读)
     fifo_stat_pt_req_    = FifoOccStat{"pt_request_fifo",    16,   0, 0.0, -1.0, -1.0};
-    fifo_stat_pt_upd_    = FifoOccStat{"pt_update_fifo",     32,   0, 0.0, -1.0, -1.0};
+    fifo_stat_pt_upd_    = FifoOccStat{"pt_update_fifo",     (int)PT_UPDATE_FIFO_DEPTH, 0, 0.0, -1.0, -1.0};
     fifo_stat_dedup_req_ = FifoOccStat{"dedup_request_fifo", 64,   0, 0.0, -1.0, -1.0};
     fifo_stat_dedup_upd_ = FifoOccStat{"dedup_update_fifo",  64,   0, 0.0, -1.0, -1.0};
     fifo_stat_pt_hit_rsp_  = FifoOccStat{"pt_hit_response_fifo",  32, 0, 0.0, -1.0, -1.0};
@@ -1593,6 +1847,130 @@ void CacheSubsystem::print_serial_stage_budget_report() const {
                                   ? 100.0 * pt_same_ram_streak_cnt_ / pt_hash_task_count_ : 0.0;
     printf("    Same-RAM-as-previous-task: %lu / %lu (%.2f%%), uniform ideal=25.00%%\n",
            (unsigned long)pt_same_ram_streak_cnt_, (unsigned long)pt_hash_task_count_, same_ratio);
+
+    // ---- [DATA-ONLY] PT Cache 仅数据包的 4 组 RAM 分布均衡度 ----
+    // 仅统计 is_ctrl_pkt=false 的任务(排除 SQ/CQ/MSI 控制包);
+    // 评估 hash(gscid,pscid,iova)>>低位 在数据流量上是否均匀分桶。
+    // 均衡度指标:
+    //   - Share%   : 各 RAM 占数据总访问的百分比(理想 25.00%)
+    //   - Max/Min  : 最热 RAM / 最冷 RAM 的比值(1.00=完全均衡)
+    //   - Imbalance: (max-min)/avg × 100%(0=完全均衡)
+    //   - Chi^2    : 卡方统计量, 自由度=3; >7.81 则 p<0.05 显著不均衡
+    {
+        uint64_t data_lu[PT_MAX_RAMS] = {0}, data_up[PT_MAX_RAMS] = {0};
+        uint64_t total_lu = 0, total_up = 0;
+        for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+            data_lu[i] = pt_ram_data_lookup_count_[i];
+            data_up[i] = pt_ram_data_update_count_[i];
+            total_lu += data_lu[i];
+            total_up += data_up[i];
+        }
+        const uint64_t total_all = total_lu + total_up;
+        printf("  [PT RAM Distribution - DATA ONLY (is_ctrl_pkt=false)]\n");
+        printf("    Total data accesses: %lu (lookup=%lu, update=%lu)\n",
+               (unsigned long)total_all, (unsigned long)total_lu, (unsigned long)total_up);
+        printf("    %-4s %12s %10s %12s %10s %12s %10s\n",
+               "RAM", "DataLookups", "Share%", "DataUpdates", "Share%",
+               "DataTotal", "Share%");
+        uint64_t dmin = UINT64_MAX, dmax = 0;
+        double chi2 = 0.0;
+        const double expected = (pt_num_rams_ > 0) ? (double)total_all / pt_num_rams_ : 0.0;
+        for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+            const uint64_t n_lu = data_lu[i];
+            const uint64_t n_up = data_up[i];
+            const uint64_t n_all = n_lu + n_up;
+            const double sh_lu = (total_lu > 0) ? 100.0 * n_lu / total_lu : 0.0;
+            const double sh_up = (total_up > 0) ? 100.0 * n_up / total_up : 0.0;
+            const double sh_all = (total_all > 0) ? 100.0 * n_all / total_all : 0.0;
+            printf("    %-4u %12lu %9.2f%% %12lu %9.2f%% %12lu %9.2f%%\n",
+                   i, (unsigned long)n_lu, sh_lu,
+                   (unsigned long)n_up, sh_up,
+                   (unsigned long)n_all, sh_all);
+            if (n_all < dmin) dmin = n_all;
+            if (n_all > dmax) dmax = n_all;
+            if (expected > 0.0) {
+                const double d = (double)n_all - expected;
+                chi2 += d * d / expected;
+            }
+        }
+        if (total_all > 0 && pt_num_rams_ > 0) {
+            const double avg = (double)total_all / pt_num_rams_;
+            const double imbalance = (avg > 0) ? 100.0 * (dmax - dmin) / avg : 0.0;
+            const double mm = (dmin > 0) ? (double)dmax / dmin : 0.0;
+            printf("    Evenness: Max=%lu, Min=%lu, Avg=%.1f, Max/Min=%.3f, Imbalance=%.2f%%, Chi2=%.2f (df=%u, p<0.05 threshold=7.81)\n",
+                   (unsigned long)dmax, (unsigned long)dmin, avg, mm, imbalance,
+                   chi2, pt_num_rams_ - 1);
+            if (chi2 > 7.81) {
+                printf("    Verdict: NOT BALANCED (chi2 > 7.81, p<0.05)\n");
+            } else {
+                printf("    Verdict: BALANCED (chi2 <= 7.81, p>=0.05)\n");
+            }
+        } else {
+            printf("    No data-packet accesses recorded.\n");
+        }
+        // [Q2] 仅数据包 per-RAM 真实命中率 = data_lookup_hits / data_lookups
+        printf("    [Data-only per-RAM TRUE Hit Rate] (HitRate = DataHits / DataLookups)\n");
+        printf("    %-4s %12s %12s %10s\n", "RAM", "DataLookups", "DataHits", "HitRate%");
+        {
+            uint64_t agg_lu = 0, agg_hit = 0;
+            double hr_min = 1e9, hr_max = -1e9;
+            for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+                const uint64_t lu = pt_ram_data_lookup_count_[i];
+                const uint64_t ht = pt_ram_data_lookup_hit_count_[i];
+                const double hr = (lu > 0) ? 100.0 * ht / lu : 0.0;
+                printf("    %-4u %12lu %12lu %9.2f%%\n", i,
+                       (unsigned long)lu, (unsigned long)ht, hr);
+                agg_lu += lu; agg_hit += ht;
+                if (lu > 0) { if (hr < hr_min) hr_min = hr; if (hr > hr_max) hr_max = hr; }
+            }
+            const double agg_hr = (agg_lu > 0) ? 100.0 * agg_hit / agg_lu : 0.0;
+            printf("    %-4s %12lu %12lu %9.2f%%  (aggregate; per-RAM spread max-min=%.2f pp)\n",
+                   "ALL", (unsigned long)agg_lu, (unsigned long)agg_hit, agg_hr,
+                   (hr_max >= hr_min) ? (hr_max - hr_min) : 0.0);
+        }
+    }
+
+    // ---- [ALL PACKETS] PT Cache 每RAM 真实命中率(控制包+数据包) ----
+    // [Q3] 含 SQ/CQ/MSI 控制包; 控制包 IOVA 固定(集中落 RAM0/1), 合并后看每RAM总命中率。
+    printf("  [PT RAM TRUE Hit Rate - ALL PACKETS (ctrl+data)]\n");
+    printf("    %-4s %12s %12s %10s\n", "RAM", "Lookups", "Hits", "HitRate%");
+    {
+        uint64_t agg_lu = 0, agg_hit = 0;
+        for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+            const uint64_t lu = pt_ram_lookup_count_[i];
+            const uint64_t ht = pt_ram_lookup_hit_count_[i];
+            const double hr = (lu > 0) ? 100.0 * ht / lu : 0.0;
+            printf("    %-4u %12lu %12lu %9.2f%%\n", i,
+                   (unsigned long)lu, (unsigned long)ht, hr);
+            agg_lu += lu; agg_hit += ht;
+        }
+        const double agg_hr = (agg_lu > 0) ? 100.0 * agg_hit / agg_lu : 0.0;
+        printf("    %-4s %12lu %12lu %9.2f%%  (aggregate)\n",
+               "ALL", (unsigned long)agg_lu, (unsigned long)agg_hit, agg_hr);
+    }
+
+    // ---- [PT RAM Lookup/Update 数目与占比] DATA-ONLY 与 ALL 两种口径 ----
+    //   每 RAM 分别给出 lookup 数目+占比、update 数目+占比(占比=本RAM/四RAM合计)。
+    printf("  [PT RAM Lookup/Update Count & Share]\n");
+    for (int mode = 0; mode < 2; ++mode) {
+        const bool data_only = (mode == 0);
+        uint64_t tl = 0, tu = 0;
+        for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+            tl += data_only ? pt_ram_data_lookup_count_[i] : pt_ram_lookup_count_[i];
+            tu += data_only ? pt_ram_data_update_count_[i] : pt_ram_update_count_[i];
+        }
+        printf("    -- %s : total lookup=%lu, total update=%lu --\n",
+               data_only ? "DATA ONLY (is_ctrl_pkt=false)" : "ALL PACKETS (ctrl+data)",
+               (unsigned long)tl, (unsigned long)tu);
+        printf("    %-4s %10s %9s %10s %9s\n", "RAM", "Lookups", "Share%", "Updates", "Share%");
+        for (uint32_t i = 0; i < pt_num_rams_ && i < PT_MAX_RAMS; ++i) {
+            const uint64_t lu = data_only ? pt_ram_data_lookup_count_[i] : pt_ram_lookup_count_[i];
+            const uint64_t up = data_only ? pt_ram_data_update_count_[i] : pt_ram_update_count_[i];
+            printf("    %-4u %10lu %8.2f%% %10lu %8.2f%%\n", i,
+                   (unsigned long)lu, (tl > 0) ? 100.0 * lu / tl : 0.0,
+                   (unsigned long)up, (tu > 0) ? 100.0 * up / tu : 0.0);
+        }
+    }
     printf("==============================================================\n\n");
 }
 
@@ -1693,6 +2071,36 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
         printf("    Final valid lines:  %u\n", get_dedup_valid_line_count());
     }
 
+    // [去重延迟更新] Delayed Update FIFO 报告: 入队/三条件出队/占用/驻留/反压
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+    {
+        const uint64_t drained = delayed_upd_drain_c1_ + delayed_upd_drain_c2_ + delayed_upd_drain_c3_;
+        const double now_ns = sc_time_stamp().to_seconds() * 1e9;
+        double integral = delayed_upd_occ_weighted_ns_;
+        if (delayed_upd_occ_last_ns_ >= 0.0)
+            integral += (double)delayed_upd_deque_.size() * (now_ns - delayed_upd_occ_last_ns_);
+        const double span = (delayed_upd_first_enq_ns_ >= 0.0 && now_ns > delayed_upd_first_enq_ns_)
+                          ? (now_ns - delayed_upd_first_enq_ns_) : 0.0;
+        printf("  [Delayed Update FIFO Report] (depth=%u, timer=%uns, margin=%u, threshold=%u)\n",
+               DEDUP_DELAYED_UPDATE_FIFO_DEPTH, DEDUP_DELAYED_UPDATE_TIMER_NS,
+               DEDUP_DELAYED_PRESSURE_MARGIN,
+               DEDUP_DELAYED_UPDATE_FIFO_DEPTH - DEDUP_DELAYED_PRESSURE_MARGIN);
+        printf("    Enqueued:               %lu\n", (unsigned long)delayed_upd_enq_total_);
+        printf("    Drained c1 (timer):     %lu\n", (unsigned long)delayed_upd_drain_c1_);
+        printf("    Drained c2 (pressure):  %lu\n", (unsigned long)delayed_upd_drain_c2_);
+        printf("    Drained c3 (bufferfull):%lu\n", (unsigned long)delayed_upd_drain_c3_);
+        printf("    Group drains (c2/c3):   %lu\n", (unsigned long)delayed_upd_group_cnt_);
+        printf("    Pending at report:      %u\n", (unsigned)delayed_upd_deque_.size());
+        printf("    Occ peak:               %d / %u\n", delayed_upd_occ_peak_, DEDUP_DELAYED_UPDATE_FIFO_DEPTH);
+        printf("    Occ avg (enq->report):  %.2f\n", span > 0.0 ? integral / span : 0.0);
+        printf("    Push hard-full blocks:  %lu (max %.1f ns)\n",
+               (unsigned long)delayed_upd_push_block_cnt_, delayed_upd_push_block_max_ns_);
+        printf("    Residency avg/max:      %.1f / %.1f ns\n",
+               drained > 0 ? delayed_upd_residency_total_ns_ / (double)drained : 0.0,
+               delayed_upd_residency_max_ns_);
+    }
+#endif
+
     // 并发吞吐
     if (window_ns > 0) {
         printf("  [Throughput]\n");
@@ -1755,6 +2163,110 @@ void CacheSubsystem::print_walker_multi_ram_report() const {
                (double)total_tasks / window_ns);
         printf("    Aggregate busy/win:  %.2f  (>1 means cross-RAM concurrency)\n",
                total_busy / window_ns);
+    }
+
+    // ---- [DATA-ONLY] Walker Cache C1/C2/C3 各级 4 组 RAM 分布均衡度 ----
+    // 仅统计 is_ctrl_pkt=false 的子操作(排除 SQ/CQ/MSI 控制包);
+    // 评估各级子表的 hash(va_segment, gscid, pscid)>>低位 在数据流量上是否均匀分桶。
+    // 均衡度指标:
+    //   - Share%   : 各 RAM 占本级数据总访问的百分比(理想 25.00%)
+    //   - Max/Min  : 最热 RAM / 最冷 RAM 的比值(1.00=完全均衡)
+    //   - Imbalance: (max-min)/avg × 100%(0=完全均衡)
+    //   - Chi^2    : 卡方统计量, 自由度=3; >7.81 则 p<0.05 显著不均衡
+    printf("  [Walker RAM Distribution - DATA ONLY (is_ctrl_pkt=false)]\n");
+    for (uint32_t lv = 1; lv <= WALKER_LEVELS; ++lv) {
+        uint64_t data_lu[WALKER_MAX_RAMS] = {0}, data_up[WALKER_MAX_RAMS] = {0};
+        uint64_t total_lu = 0, total_up = 0;
+        for (uint32_t r = 0; r < walker_num_rams_ && r < WALKER_MAX_RAMS; ++r) {
+            const uint32_t w = (lv - 1) * walker_num_rams_ + r;
+            data_lu[r] = walker_ram_data_lookup_count_[w];
+            data_up[r] = walker_ram_data_update_count_[w];
+            total_lu += data_lu[r];
+            total_up += data_up[r];
+        }
+        const uint64_t total_all = total_lu + total_up;
+        printf("    [C%u] Total data accesses: %lu (lookup=%lu, update=%lu)\n",
+               lv, (unsigned long)total_all, (unsigned long)total_lu, (unsigned long)total_up);
+        printf("      %-4s %12s %10s %12s %10s %12s %10s\n",
+               "RAM", "DataLookups", "Share%", "DataUpdates", "Share%",
+               "DataTotal", "Share%");
+        uint64_t dmin = UINT64_MAX, dmax = 0;
+        double chi2 = 0.0;
+        const double expected = (walker_num_rams_ > 0) ? (double)total_all / walker_num_rams_ : 0.0;
+        for (uint32_t r = 0; r < walker_num_rams_ && r < WALKER_MAX_RAMS; ++r) {
+            const uint64_t n_lu = data_lu[r];
+            const uint64_t n_up = data_up[r];
+            const uint64_t n_all = n_lu + n_up;
+            const double sh_lu = (total_lu > 0) ? 100.0 * n_lu / total_lu : 0.0;
+            const double sh_up = (total_up > 0) ? 100.0 * n_up / total_up : 0.0;
+            const double sh_all = (total_all > 0) ? 100.0 * n_all / total_all : 0.0;
+            printf("      %-4u %12lu %9.2f%% %12lu %9.2f%% %12lu %9.2f%%\n",
+                   r, (unsigned long)n_lu, sh_lu,
+                   (unsigned long)n_up, sh_up,
+                   (unsigned long)n_all, sh_all);
+            if (n_all < dmin) dmin = n_all;
+            if (n_all > dmax) dmax = n_all;
+            if (expected > 0.0) {
+                const double d = (double)n_all - expected;
+                chi2 += d * d / expected;
+            }
+        }
+        if (total_all > 0 && walker_num_rams_ > 0) {
+            const double avg = (double)total_all / walker_num_rams_;
+            const double imbalance = (avg > 0) ? 100.0 * (dmax - dmin) / avg : 0.0;
+            const double mm = (dmin > 0) ? (double)dmax / dmin : 0.0;
+            printf("      Evenness: Max=%lu, Min=%lu, Avg=%.1f, Max/Min=%.3f, Imbalance=%.2f%%, Chi2=%.2f (df=%u, p<0.05 threshold=7.81)\n",
+                   (unsigned long)dmax, (unsigned long)dmin, avg, mm, imbalance,
+                   chi2, walker_num_rams_ - 1);
+            if (chi2 > 7.81) {
+                printf("      Verdict: NOT BALANCED (chi2 > 7.81, p<0.05)\n");
+            } else {
+                printf("      Verdict: BALANCED (chi2 <= 7.81, p>=0.05)\n");
+            }
+        } else {
+            printf("      No data-packet accesses recorded.\n");
+        }
+        // [Q2] 本级(C%u) 仅数据包 per-RAM 真实命中率 = data_lookup_hits / data_lookups
+        printf("      [C%u Data-only per-RAM TRUE Hit Rate] (HitRate = DataHits / DataLookups)\n", lv);
+        printf("      %-4s %12s %12s %10s\n", "RAM", "DataLookups", "DataHits", "HitRate%");
+        {
+            uint64_t agg_lu = 0, agg_hit = 0;
+            for (uint32_t r = 0; r < walker_num_rams_ && r < WALKER_MAX_RAMS; ++r) {
+                const uint32_t w = (lv - 1) * walker_num_rams_ + r;
+                const uint64_t lu = walker_ram_data_lookup_count_[w];
+                const uint64_t ht = walker_ram_data_lookup_hit_count_[w];
+                const double hr = (lu > 0) ? 100.0 * ht / lu : 0.0;
+                printf("      %-4u %12lu %12lu %9.2f%%\n", r,
+                       (unsigned long)lu, (unsigned long)ht, hr);
+                agg_lu += lu; agg_hit += ht;
+            }
+            const double agg_hr = (agg_lu > 0) ? 100.0 * agg_hit / agg_lu : 0.0;
+            printf("      %-4s %12lu %12lu %9.2f%%  (C%u aggregate)\n",
+                   "ALL", (unsigned long)agg_lu, (unsigned long)agg_hit, agg_hr, lv);
+        }
+    }
+
+    // ---- [Walker RAM Lookup/Update 数目与占比 - DATA ONLY] ----
+    //   C1/C2/C3 每子表分别给出 4 RAM 的 lookup 数目+占比、update 数目+占比(仅数据包)。
+    printf("  [Walker RAM Lookup/Update Count & Share - DATA ONLY]\n");
+    for (uint32_t lv = 1; lv <= WALKER_LEVELS; ++lv) {
+        uint64_t tl = 0, tu = 0;
+        for (uint32_t r = 0; r < walker_num_rams_ && r < WALKER_MAX_RAMS; ++r) {
+            const uint32_t w = (lv - 1) * walker_num_rams_ + r;
+            tl += walker_ram_data_lookup_count_[w];
+            tu += walker_ram_data_update_count_[w];
+        }
+        printf("    -- C%u : total lookup=%lu, total update=%lu --\n",
+               lv, (unsigned long)tl, (unsigned long)tu);
+        printf("    %-4s %10s %9s %10s %9s\n", "RAM", "Lookups", "Share%", "Updates", "Share%");
+        for (uint32_t r = 0; r < walker_num_rams_ && r < WALKER_MAX_RAMS; ++r) {
+            const uint32_t w = (lv - 1) * walker_num_rams_ + r;
+            const uint64_t lu = walker_ram_data_lookup_count_[w];
+            const uint64_t up = walker_ram_data_update_count_[w];
+            printf("    %-4u %10lu %8.2f%% %10lu %8.2f%%\n", r,
+                   (unsigned long)lu, (tl > 0) ? 100.0 * lu / tl : 0.0,
+                   (unsigned long)up, (tu > 0) ? 100.0 * up / tu : 0.0);
+        }
     }
     printf("===================================================\n\n");
 }
@@ -2042,6 +2554,13 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
             jr.latency = ram_latency;
             walker_join_fifo.write(jr);
             walker_ram_lookup_count_[ram_id]++;
+            // [STAT] 仅数据包计数(SQ/CQ/MSI 控制包不计入)
+            if (!sub.is_ctrl_pkt) walker_ram_data_lookup_count_[ram_id]++;
+            // [STAT] per-(level x RAM) 真实命中计数(全量 + 仅数据包)
+            if (hit) {
+                walker_ram_lookup_hit_count_[ram_id]++;
+                if (!sub.is_ctrl_pkt) walker_ram_data_lookup_hit_count_[ram_id]++;
+            }
         } else {
             // WALKER_UPDATE 子更新: 按级选择payload
             const WalkerData& d =
@@ -2055,6 +2574,8 @@ void CacheSubsystem::walker_ram_worker_thread(int ram_id) {
             md_record(sub, "walker_vs_ram", "update", start_ns, false, ram_id, sub.walker_sub_level);
 #endif
             walker_ram_update_count_[ram_id]++;
+            // [STAT] 仅数据包计数(SQ/CQ/MSI 控制包不计入)
+            if (!sub.is_ctrl_pkt) walker_ram_data_update_count_[ram_id]++;
         }
 
         const double end_ns = sc_time_stamp().to_seconds() * 1e9;
@@ -2535,6 +3056,10 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (MISS, valid=%u reserved=%u)\n",
                    (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
             fflush(stdout);
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+            // [去重延迟更新] 条件3: Buffer满, 通知排空线程加速转出延迟FIFO
+            dedup_buffer_full_notify_ev_.notify();
+#endif
             while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
             head_idx = dedup_buffer_->allocate_entry();
         }
@@ -2939,6 +3464,12 @@ CacheMessage CacheSubsystem::execute_invalidation_pipeline(const CacheMessage& m
             // VN 回绕: 批量扫表 PT + Walker
             drive_pt(msg, CacheInvalidateMode::SCAN, true);
             drive_walker(msg, CacheInvalidateMode::SCAN, true);
+            // [FIX] 扫表完成后必须把 LIB entry 的 VN 重定基到回绕后的全局 VN(0)。
+            //   否则 entry.vn 停留在 VN_MAX, 而扫表后新填入的行 vn=0, 查询旁路
+            //   比对 0 < VN_MAX 成立 -> 新行被误判为 stale 并丢弃(人为 miss 风暴),
+            //   直到下一笔失效命令到来才恢复。两个 drive_* 均为阻塞等待, 此处
+            //   PT 与 Walker 的 sweep 子任务都已 join 完成, 重定基时序安全。
+            lib_.rebase_after_sweep();
         }
         // else: 已记录到 LIB, 真正延迟失效(不下发, 查询旁路时生效)
     };

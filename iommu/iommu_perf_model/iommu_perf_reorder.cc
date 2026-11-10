@@ -310,6 +310,21 @@ void iommu_top::reorder_output_thread() {
             // [STAT需求1] 4KB页并发跟踪-出口: 与 iommu_global_outstanding-- 同点(reorder 释放),
             //   与入口打点配对, 保证并发页数严格≤outstanding上限。
             track_4kb_page_out(task);
+#if TEST_CFG_CPU_INVAL_SCENE
+            // [IOFENCE打标] tag 释放时撤销打标: 与端口准入的 iofence_inflight_count++ 配对。
+            //   计数归零时唤醒可能正在排空等待的 iofence 命令(cq_async_process_thread)。
+            if (task->iofence_tagged) {
+                task->iofence_tagged = 0;
+                iofence_inflight_count--;
+                const uint64_t pg = task->iova & ~0xFFFULL;   // [打标页引用计数] 释放
+                auto rit = iofence_tagged_page_refcnt.find(pg);
+                if (rit != iofence_tagged_page_refcnt.end() && (--rit->second) == 0) {
+                    iofence_tagged_page_refcnt.erase(rit);
+                    iofence_tagged_distinct_pages--;
+                }
+                iofence_drain_event.notify(SC_ZERO_TIME);
+            }
+#endif
             iommu_global_outstanding_freed_event.notify(SC_ZERO_TIME);
             if (task_is_write) {
                 iommu_write_outstanding_freed_event.notify(SC_ZERO_TIME);
@@ -368,6 +383,12 @@ void iommu_top::output_delay_thread() {
         if (e2e_ns > iommu_e2e_max_ns) iommu_e2e_max_ns = e2e_ns;
         if (e2e_ns < iommu_e2e_min_ns) iommu_e2e_min_ns = e2e_ns;
         iommu_e2e_values.push_back(e2e_ns);
+        // [稳态窗口] 最值/分位数不可做差, 仅在窗口内单独累加一份
+        if (steady_sampling_) {
+            if (e2e_ns > steady_e2e_max_) steady_e2e_max_ = e2e_ns;
+            if (e2e_ns < steady_e2e_min_) steady_e2e_min_ = e2e_ns;
+            steady_e2e_values_.push_back(e2e_ns);
+        }
 
         // [STAT] IOMMU输出端口任务间隔采样
         {
@@ -395,6 +416,8 @@ void iommu_top::output_delay_thread() {
             steady_start_slave_w_bytes  = slave_0w_total_bytes;
             steady_start_master0_bytes  = master_0_total_bytes;
 #endif
+            // [稳态窗口] 拍 base 快照并开启窗口内峰值/分位数累加
+            on_steady_window_begin();
         }
         if (steady_end_ns == 0.0 && steady_end_count > 0 &&
             iommu_total_completed >= steady_end_count) {
@@ -405,6 +428,8 @@ void iommu_top::output_delay_thread() {
             steady_end_slave_w_bytes  = slave_0w_total_bytes;
             steady_end_master0_bytes  = master_0_total_bytes;
 #endif
+            // [稳态窗口] 拍 end 快照并关闭窗口(此后所有统计只进全程口径, 不进稳态口径)
+            on_steady_window_end();
         }
 
 #if TEST_CFG_MULTI_DEVICE_SCENE

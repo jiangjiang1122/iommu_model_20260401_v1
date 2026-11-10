@@ -51,6 +51,15 @@
 #ifndef TEST_CFG_NUM_PAGES
 #define TEST_CFG_NUM_PAGES 909
 #endif
+#ifndef TEST_CFG_MC_RW_QUEUE_DEPTH       // [读写端口分离] 读/写发送队列深度(近乎无界)
+#define TEST_CFG_MC_RW_QUEUE_DEPTH 65536
+#endif
+#ifndef TEST_CFG_MD_DATA_ONLY           // [纯数据负载] 1=测量仅 8x512B 读写数据, 不发 SQ/CQ/MSI 控制包
+#define TEST_CFG_MD_DATA_ONLY 0
+#endif
+#ifndef TEST_CFG_MD_NVME10              // 仅新测试项启用：8数据+SQ64B+CQ16B，不发送MSI。
+#define TEST_CFG_MD_NVME10 0
+#endif
 
 // 复用多设备追踪(md_trace/md_response_handler), 必须同时开启 MULTI_DEVICE_SCENE。
 #if TEST_CFG_MULTIDEV_MC_SCENE && !TEST_CFG_MULTI_DEVICE_SCENE
@@ -64,8 +73,14 @@ constexpr unsigned N = TEST_CFG_NUM_DEVICES;                 // 设备数
 constexpr unsigned C = TEST_CFG_MD_CHAN_PER_DEV;             // 每设备通道数
 constexpr unsigned S = N * C;                                // 总流数(=producer数)
 constexpr unsigned QUEUE_DEPTH = TEST_CFG_MD_QUEUE_DEPTH;
+constexpr uint64_t RWQ_DEPTH = TEST_CFG_MC_RW_QUEUE_DEPTH;   // [读写端口分离] 发送队列深度上限(近乎无界, 仅记录峰值)
 constexpr unsigned RR_START = TEST_CFG_MD_RR_START;
 constexpr unsigned GROUPS = TEST_CFG_NUM_PAGES;              // 每设备总组数(fixed_total)
+constexpr bool NVME10 = TEST_CFG_MD_NVME10 != 0;
+constexpr unsigned GROUP_PACKETS = NVME10 ? 10u : 11u;
+constexpr unsigned SQ_BYTES = NVME10 ? 64u : 32u;
+static_assert(TEST_CFG_MD_NVME10 == 0 || TEST_CFG_MD_NVME10 == 1, "NVME10必须为0或1");
+static_assert(!NVME10 || !TEST_CFG_MD_DATA_ONLY, "十包组与纯数据模式互斥");
 // fixed_total: 每设备 GROUPS 组均分到 C 个通道, 余数分给前 GROUPS_REM 个通道。
 constexpr unsigned GROUPS_BASE = GROUPS / C;
 constexpr unsigned GROUPS_REM  = GROUPS % C;
@@ -102,13 +117,15 @@ constexpr unsigned dev_of(unsigned i)  { return i % N; }
 constexpr unsigned chan_of(unsigned i) { return i / N; }
 // 每通道组数/tail数: 前 GROUPS_REM 个通道各多1组; tail MSI 仅通道0, 使每设备精确 GROUPS*11+1。
 constexpr unsigned chan_groups(unsigned c) { return GROUPS_BASE + (c < GROUPS_REM ? 1u : 0u); }
-constexpr unsigned chan_tails(unsigned c)  { return c == 0u ? 1u : 0u; }
+constexpr unsigned chan_tails(unsigned c)  { return !NVME10 && c == 0u ? 1u : 0u; }
 // 每流各 epoch 的包数: 预热/哨兵只由每设备通道0发起(设备级共享 dc/SQ/CQ/MSI/probe)。
 constexpr uint64_t stream_count(unsigned i, unsigned e) {
     const unsigned c = chan_of(i);
     if (e == 1) return c == 0u ? 2u : 0u;    // 哨兵: 打通翻译/响应路由。
+    if (TEST_CFG_MD_DATA_ONLY)               // [纯数据负载] 无控制包预热; 测量每设备=组数x8个512B数据包
+        return (e == 2) ? 0u : uint64_t(chan_groups(c)) * 8u;
     if (e == 2) return c == 0u ? 16u : 0u;   // 预热: MSI(x8)+SQ/CQ 交替。
-    return uint64_t(chan_groups(c)) * 11 + chan_tails(c);
+    return uint64_t(chan_groups(c)) * GROUP_PACKETS + chan_tails(c);
 }
 constexpr uint64_t total_count(unsigned e) {
     uint64_t s = 0;
@@ -133,7 +150,7 @@ struct Stream {
     std::deque<iommu_md::Request> queue;
     sc_event space_event;
     bool ready = false, done = false;
-    uint64_t injected = 0, peak_queue = 0, full_waits = 0;
+    uint64_t injected = 0, scheduled = 0, peak_queue = 0, full_waits = 0;
     double full_wait_ns = 0;
 };
 
@@ -151,6 +168,26 @@ class MultiDeviceMcScenario {
     double start_ns = 0;
     uint64_t last_progress = 0;
     double last_progress_ns = 0;
+
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] scheduler 按 RR 选出的请求按方向压入读/写发送队列, 由 sender_r/sender_w
+    //   各自调用对应端口 socket 的 nb_transport_fw 发送。回调内的带宽延时+并发门控自然阻塞
+    //   本方向发送进程, 读写互不影响; 写方向单一 FIFO 天然保持每设备写注入顺序(写保序)。
+    struct SendItem {
+        tlm_generic_payload* ptr;      // 已 register_request 的 payload
+        iommu_md::Request    record;   // 请求副本(用于发送后打印/计数)
+        Stream*              strm;     // 所属流(++injected)
+    };
+    std::deque<SendItem> rw_queue_r, rw_queue_w;
+    sc_event rw_event_r, rw_event_w;
+    bool sender_busy_r = false, sender_busy_w = false;   // sender 正在 nb_transport_fw 内阻塞
+    uint64_t rw_peak_r = 0, rw_peak_w = 0;               // 两队列峰值占用(报告用)
+    // [供给验证] 发送侧饥饿统计: sender 因本方向队列为空而等待的次数/时长。
+    uint64_t starve_cnt_r = 0, starve_cnt_w = 0;
+    double   starve_ns_r = 0.0, starve_ns_w = 0.0;
+    double   last_send_ns_r = 0.0, last_send_ns_w = 0.0;  // 各口最后一次送出请求的时刻
+    bool senders_idle() const { return !sender_busy_r && !sender_busy_w; }
+#endif
 
     static std::vector<unsigned> choose(unsigned count, unsigned range, unsigned seed, unsigned shuffle_seed) {
         std::mt19937 rng(seed), permutation(shuffle_seed);
@@ -196,8 +233,15 @@ class MultiDeviceMcScenario {
             dev.msi_iova=MSI_IOVA_BASE+uint64_t(dev.msi_pages[0])*4096+0x40;
             dev.probe_gpa=0x100000ULL+uint64_t(d)*4096;
             next_free_gpage[d+1]=0x10000;
+#if TEST_CFG_MD_NVME10
+            // [建表统一 20261103] 与 real8 同构: MSIPTP_Off(nvme10 模式不合成 MSI),
+            //   消除 MSI 表页与 G-stage 页表页的分配交叠嫌疑(回归门: hugepage LEAF>0)。
+            dev.dc_address=rp.add_device(&top,d,d+1,0,0,0,0,0,1,1,0,0,0,
+                                        IOHGATP_Sv48x4,IOSATP_Sv48,PDTP_Bare,MSIPTP_Off,0,0,0);
+#else
             dev.dc_address=rp.add_device(&top,d,d+1,0,0,0,0,0,1,1,0,0,0,
                                         IOHGATP_Sv48x4,IOSATP_Sv48,PDTP_Bare,MSIPTP_Flat,1,0xFF,MSI_PATTERN);
+#endif
             require(dev.dc_address!=uint64_t(-1),"添加设备失败");
             rp.read_memory_test_rp(dev.dc_address,sizeof(dev.dc),reinterpret_cast<char*>(&dev.dc));
             dev.dc.ta.PSCID=0;
@@ -206,6 +250,7 @@ class MultiDeviceMcScenario {
             rp.read_memory_test_rp(dev.dc_address,sizeof(readback),reinterpret_cast<char*>(&readback));
             require(readback.iohgatp.GSCID==d+1 && readback.ta.PSCID==0 && readback.tc.PDTV==0,
                     "DC读回上下文不匹配");
+#if !TEST_CFG_MD_NVME10
             for(unsigned h=0;h<HUGE_COUNT;++h) map_g(dev,uint64_t(h)*HUGE,uint64_t(h)*HUGE+spa_offset(d),1);
             for(unsigned v=0;v<256;++v) {
                 msipte_t mp{};
@@ -213,6 +258,7 @@ class MultiDeviceMcScenario {
                 rp.write_memory_test_rp(reinterpret_cast<char*>(&mp),dev.dc.msiptp.PPN*4096+v*16,16);
                 map_vs(dev,MSI_IOVA_BASE+uint64_t(dev.msi_pages[v])*4096,(MSI_PATTERN<<12)+uint64_t(v)*4096);
             }
+#endif
             dev.gpas.resize(RANGE_PAGES);
             std::mt19937 mapping(42+d);
             std::array<unsigned,HUGE_COUNT> slots{};
@@ -225,9 +271,14 @@ class MultiDeviceMcScenario {
                 } else slot=mapping()%512;
                 dev.gpas[i]=uint64_t(h)*HUGE+uint64_t(slot)*4096;
             }
-            // VS 数据映射 = 本设备 GROUPS 页 ∪ 各自 D 个预取相邻页(8 通道共享同设备页表)。
+#if TEST_CFG_MD_NVME10
+            // [建表统一 20261103] 与 real8 同序: gpas -> GS 50×2MiB 大页叶 -> VS。
+            for(unsigned h=0;h<HUGE_COUNT;++h) map_g(dev,uint64_t(h)*HUGE,uint64_t(h)*HUGE+spa_offset(d),1);
+#endif
+            // VS 数据映射: nvme10 统一为全范围预建(与 real8 同构, 覆盖全部预取邻居);
+            // 其他模式保持在用页 ∪ D 邻居。
             std::set<unsigned> mapped;
-            if(RANGE_MB==16) for(unsigned i=0;i<RANGE_PAGES;++i) mapped.insert(i);
+            if(RANGE_MB==16 || TEST_CFG_MD_NVME10) for(unsigned i=0;i<RANGE_PAGES;++i) mapped.insert(i);
             else for(unsigned page:dev.pages) {
                 unsigned vpn0=((IOVA_BASE>>12)+page)&511;
                 unsigned depth=std::min<unsigned>(PT_DEDUP_PREFETCH_DEPTH,511-vpn0);
@@ -278,6 +329,12 @@ class MultiDeviceMcScenario {
                       << " streams=" << S << " groups/dev=" << GROUPS
                       << " total_unique=" << uniq.size() << " expected=" << N*GROUPS << '\n';
         }
+#if TEST_CFG_MD_NVME10
+        // [建表统一 20261103] 与 real8 同构: 建表完成后统一全局失效一次 + 页表指纹。
+        invalidate_all();
+        std::cout << "[MDMC_TB_FINGERPRINT] msiptp=Off huge_leaves=" << (unsigned)HUGE_COUNT * N
+                  << " vs_policy=full_range order=gpas->GS_huge->VS->ctrl/probe->inval" << '\n';
+#endif
     }
     void invalidate_all() {
         iommu::CacheMessage cmd;
@@ -300,23 +357,75 @@ class MultiDeviceMcScenario {
             return r;
         }
         unsigned type;
-        if(e==2) type=seq<8 ? 3 : (seq%2 ? 2 : 1);   // 预热: MSI(x8)+SQ/CQ 交替。
+        if(e==2 && NVME10) type=seq%2 ? 2 : 1;      // 十包模式只预热SQ/CQ，不发送MSI。
+        else if(e==2) type=seq<8 ? 3 : (seq%2 ? 2 : 1);   // 预热: MSI(x8)+SQ/CQ 交替。
+        else if(TEST_CFG_MD_DATA_ONLY) {             // [纯数据负载] 每组仅 8x512B 数据, 读写按组号奇读偶写交替
+            r.group=seq/8;
+            unsigned offset=seq%8;
+            type=0;
+            unsigned page=strm.pages[r.group];
+            r.iova=IOVA_BASE+uint64_t(page)*4096+offset*512;
+            r.expected_pa=dev.gpas[page]+spa_offset(d)+offset*512;
+            r.bytes=512; r.write=(r.group%2)!=0;
+        }
         else {
-            r.group=seq/11;
-            unsigned offset=seq%11;
-            type=seq>=uint64_t(chan_groups(c))*11 ? 3 : offset<8 ? 0 : offset-7;
+            unsigned g_local=seq/GROUP_PACKETS;
+            // [组号通道唯一 20261103] C>1 时同设备不同通道的局部组号在 (did,group)
+            //   统计键上冲突; record.group 改用通道唯一编号 c*GROUPS+g_local
+            //   (C=1 时退化为原值); 页取址与读写奇偶仍用通道内局部组号, 激励不变。
+            r.group=uint64_t(c)*GROUPS+g_local;
+            unsigned offset=seq%GROUP_PACKETS;
+            type=seq>=uint64_t(chan_groups(c))*GROUP_PACKETS ? 3 : offset<8 ? 0 : offset-7;
             if(type==0) {
-                unsigned page=strm.pages[r.group];
+                unsigned page=strm.pages[g_local];
                 r.iova=IOVA_BASE+uint64_t(page)*4096+offset*512;
                 r.expected_pa=dev.gpas[page]+spa_offset(d)+offset*512;
-                r.bytes=512; r.write=(r.group%2)!=0;   // 奇读偶写交替(组号%2)。
+                r.bytes=512; r.write=(g_local%2)!=0;   // 奇读偶写交替(通道内组号%2)。
             }
         }
         r.type=type;
-        if(type==1) { r.iova=SQ_IOVA; r.expected_pa=CTRL_GPA+spa_offset(d); r.bytes=32; }
+        if(type==1) { r.iova=SQ_IOVA; r.expected_pa=CTRL_GPA+spa_offset(d); r.bytes=SQ_BYTES; }
         if(type==2) { r.iova=CQ_IOVA; r.expected_pa=CTRL_GPA+4096+spa_offset(d); r.bytes=16; r.write=true; }
         if(type==3) { r.iova=dev.msi_iova; r.expected_pa=msi_pa(d,0); r.bytes=4; r.write=true; }
         return r;
+    }
+    // 只校验描述符，不访问端口、不推进仿真时间；旧模式完全跳过。
+    void validate_nvme10() {
+        if (!NVME10) return;
+        uint64_t bytes=0, data=0, sq=0, cq=0;
+        for (unsigned i=0; i<S; ++i) {
+            require(stream_count(i,3)==uint64_t(chan_groups(chan_of(i)))*10,
+                    "十包模式出现额外尾包");
+            for (unsigned g=0; g<chan_groups(chan_of(i)); ++g) {
+                uint64_t page=0;
+                for (unsigned k=0; k<10; ++k) {
+                    auto r=descriptor(i,3,uint64_t(g)*10+k);
+                    require(r.device==dev_of(i) && r.group==uint64_t(chan_of(i))*GROUPS+g, "十包组设备/组号错误");
+                    require(r.type==(k<8 ? 0u : k-7), "十包组包型或顺序错误");
+                    require(r.bytes==(k<8 ? 512u : k==8 ? 64u : 16u), "十包组长度错误");
+                    if (k<8) {
+                        if (k==0) page=r.iova;
+                        require(r.iova==page+k*512 && (page&4095)==0,
+                                "数据组不是同一4KB页内的连续8个512B");
+                        require(r.write==((g%2)!=0), "数据组读写方向错误");
+                        ++data;
+                    } else if (k==8) {
+                        require(!r.write, "SQ必须为读请求"); ++sq;
+                    } else {
+                        require(r.write, "CQ必须为写请求"); ++cq;
+                    }
+                    bytes+=r.bytes;
+                }
+            }
+            for (uint64_t s=0; s<stream_count(i,2); ++s)
+                require(descriptor(i,2,s).type!=3, "预热阶段禁止发送MSI");
+        }
+        require(data==uint64_t(N)*GROUPS*8 && sq==uint64_t(N)*GROUPS && cq==sq,
+                "十包组包数不闭合");
+        require(bytes==uint64_t(N)*GROUPS*4176, "十包组字节总数不闭合");
+        std::cout << "[NVME10_PATTERN_OK] data512=" << data << " sq64=" << sq
+                  << " cq16=" << cq << " msi=0 tail=0 bytes=" << bytes
+                  << " avg_bytes=417.6 order=DATA8,SQ,CQ msiptp=Flat\n";
     }
     void producer(unsigned i) {
         unsigned previous=0;
@@ -370,7 +479,8 @@ class MultiDeviceMcScenario {
                 auto& strm=streams[i];
                 auto record=strm.queue.front(); strm.queue.pop_front();
                 strm.space_event.notify(SC_ZERO_TIME);
-                require(record.epoch==current && record.sequence==strm.injected,"队列内请求顺序错误");
+                require(record.epoch==current && record.sequence==strm.scheduled,"队列内请求顺序错误");
+                ++strm.scheduled;
                 record.grant_ns=iommu_md::now_ns();
                 auto trans=std::make_unique<tlm_generic_payload>();
                 trans->set_address(record.iova);
@@ -387,18 +497,90 @@ class MultiDeviceMcScenario {
                 auto* ptr=trans.get();
                 payloads.push_back(std::move(trans));
                 top.md_trace.register_request(ptr,record);
+                next=(i+1)%S;   // 顺序 i=c*N+d: 设备内层快变、通道外层慢变。
+#if TEST_CFG_SPLIT_RW_PORTS
+                // [读写端口分离] scheduler 不再直接 nb_transport_fw: 按方向压入读/写发送队列,
+                //   由 sender_r/sender_w 发送。grant_ns 由 sender 在真正调用端口前置为发送时刻。
+                if(record.write) {
+                    rw_queue_w.push_back(SendItem{ptr,record,&strm});
+                    rw_peak_w=std::max<uint64_t>(rw_peak_w,rw_queue_w.size());
+                    rw_event_w.notify(SC_ZERO_TIME);
+                } else {
+                    rw_queue_r.push_back(SendItem{ptr,record,&strm});
+                    rw_peak_r=std::max<uint64_t>(rw_peak_r,rw_queue_r.size());
+                    rw_event_r.notify(SC_ZERO_TIME);
+                }
+#else
                 sc_time delay=SC_ZERO_TIME; tlm_phase phase=BEGIN_REQ;
                 auto status=rp.axi_master_to_pcie_noc_0_socket->nb_transport_fw(*ptr,phase,delay);
                 require(status==TLM_UPDATED && phase==END_REQ,"入口握手异常，禁止重发");
                 ++strm.injected;
-                next=(i+1)%S;   // 顺序 i=c*N+d: 设备内层快变、通道外层慢变。
                 std::cout << "[MDMC_GRANT] epoch=" << current << " i=" << i << " dev=" << strm.dev
                           << " chan=" << strm.chan << " seq=" << record.sequence << " type=" << record.type
                           << " grant=" << record.grant_ns << " accept=" << iommu_md::now_ns() << '\n';
+#endif
             }
+#if TEST_CFG_SPLIT_RW_PORTS
+            // [读写端口分离] 置 sent 前等待两个 rw 队列排空且 sender 全部发完,
+            //   避免 epoch 1/2 残留请求串入测量 epoch。
+            while(!stopped && !(rw_queue_r.empty() && rw_queue_w.empty() && senders_idle()))
+                wait(1,SC_NS);
+            if(stopped) return;
+            // 全部请求已送达端口 => 注入结束: 关闭 IOMMU 侧"注入并发窗口"。
+            //   (窗口仅在测量 epoch 前被打开, epoch 1/2 时此调用为 no-op)
+            top.conc_window_close();
+            if(current==iommu_md::MEASUREMENT_EPOCH)
+                std::cout << "[MDMC_INJECT_END] epoch=" << current
+                          << " t=" << iommu_md::now_ns()
+                          << " last_send_r=" << last_send_ns_r
+                          << " last_send_w=" << last_send_ns_w << '\n';
+#endif
             previous=current; sent=true;
         }
     }
+#if TEST_CFG_SPLIT_RW_PORTS
+    // [读写端口分离] 方向发送进程: 从对应 rw 队列取出请求, 置 grant_ns 后调用对应端口 socket
+    //   的 nb_transport_fw(回调内带宽延时+并发门控自然阻塞本方向, 读写互不影响)。
+    //   写方向单一 FIFO 队列天然保持每设备写注入顺序(写保序)。
+    void sender(bool is_write) {
+        auto& q   = is_write ? rw_queue_w : rw_queue_r;
+        auto& evt = is_write ? rw_event_w : rw_event_r;
+        bool& busy= is_write ? sender_busy_w : sender_busy_r;
+        uint64_t& scnt = is_write ? starve_cnt_w : starve_cnt_r;
+        double&   sns  = is_write ? starve_ns_w  : starve_ns_r;
+        double&   last = is_write ? last_send_ns_w : last_send_ns_r;
+        while(!stopped) {
+            if(q.empty()) {
+                // 供给侧饥饿: 本方向无请求可发(只应发生在注入开始前/全部注入结束后)
+                const double t0=iommu_md::now_ns();
+                ++scnt;
+                wait(evt);
+                sns+=iommu_md::now_ns()-t0;
+                continue;
+            }
+            SendItem item=q.front(); q.pop_front();
+            busy=true;
+            const double g=iommu_md::now_ns();
+            top.md_trace.request(item.ptr).grant_ns=g;   // 更新报告用权威 grant 时刻(端口发送点)
+            sc_time delay=SC_ZERO_TIME; tlm_phase phase=BEGIN_REQ;
+            // [读写端口分离] 读口 socket -> axi_slave_r_nb_transport_fw,
+            //   写口 socket -> axi_slave_w_nb_transport_fw(两个独立注册函数)。
+            auto status = is_write
+                ? rp.axi_master_to_pcie_noc_0w_socket->nb_transport_fw(*item.ptr,phase,delay)
+                : rp.axi_master_to_pcie_noc_0_socket->nb_transport_fw(*item.ptr,phase,delay);
+            require(status==TLM_UPDATED && phase==END_REQ,"入口握手异常，禁止重发");
+            ++item.strm->injected;
+            busy=false;
+            last=iommu_md::now_ns();
+            const unsigned i=static_cast<unsigned>(item.strm-&streams[0]);
+            std::cout << "[MDMC_GRANT] epoch=" << item.record.epoch << " i=" << i
+                      << " dev=" << item.strm->dev << " chan=" << item.strm->chan
+                      << " seq=" << item.record.sequence << " type=" << item.record.type
+                      << " dir=" << (is_write?"W":"R") << " grant=" << g
+                      << " accept=" << iommu_md::now_ns() << '\n';
+        }
+    }
+#endif
     void watchdog() {
         while(!stopped) {
             wait(1000,SC_NS);
@@ -413,6 +595,11 @@ class MultiDeviceMcScenario {
                 std::cerr << "[MDMC_STATE] responded=" << total_responded
                           << " buffer=" << top.cache_sub.get_pt_dedup_buffer()->get_valid_count()
                           << " groups=" << top.prefetch_groups.size() << " ptw=" << top.ptw_active_walks.size() << '\n';
+#if TEST_CFG_SPLIT_RW_PORTS
+                std::cerr << "[MDMC_RWQ_STATE] rw_queue_r=" << rw_queue_r.size()
+                          << " rw_queue_w=" << rw_queue_w.size()
+                          << " busy_r=" << sender_busy_r << " busy_w=" << sender_busy_w << '\n';
+#endif
                 require(false,"多设备多通道测试超时，未释放在途payload");
             }
         }
@@ -420,8 +607,16 @@ class MultiDeviceMcScenario {
     void run_epoch(unsigned e) {
         for(auto& s:streams) {
             require(s.queue.empty(),"切换epoch时队列非空");
-            s.ready=s.done=false; s.injected=s.peak_queue=s.full_waits=0; s.full_wait_ns=0;
+            s.ready=s.done=false; s.injected=s.scheduled=s.peak_queue=s.full_waits=0; s.full_wait_ns=0;
         }
+#if TEST_CFG_SPLIT_RW_PORTS
+        require(rw_queue_r.empty() && rw_queue_w.empty(),"切换epoch时读写发送队列非空");
+        rw_peak_r=rw_peak_w=0;
+        // 每 epoch 重新统计供给侧饥饿与末次发送时刻(测量 epoch 的值才用于结论)
+        starve_cnt_r=starve_cnt_w=0;
+        starve_ns_r=starve_ns_w=0.0;
+        last_send_ns_r=last_send_ns_w=0.0;
+#endif
         total_responded=0; epoch=e; sent=false; top.md_trace.progress();
         phase_event.notify(SC_ZERO_TIME);
         while(true) {
@@ -472,8 +667,13 @@ public:
                   << " rr_start=" << RR_START << " load_mode=fixed_total"
                   << " total_meas_pkts=" << total_count(iommu_md::MEASUREMENT_EPOCH) << '\n';
         setup();
+        validate_nvme10();
         for(unsigned i=0;i<S;++i) sc_spawn([this,i](){ producer(i); });
         sc_spawn([this](){ scheduler(); });
+#if TEST_CFG_SPLIT_RW_PORTS
+        sc_spawn([this](){ sender(false); });   // sender_r: 读口发送进程(常驻, 每 epoch 不重复 spawn)
+        sc_spawn([this](){ sender(true); });    // sender_w: 写口发送进程
+#endif
         sc_spawn([this](){ watchdog(); });
         invalidate_all();
         run_epoch(1); // 同IOVA、不同S1/S2结果的哨兵。
@@ -483,9 +683,43 @@ public:
         //   此处重置 4KB 并发窗口与去重 Cache 有效行采样累加器。
         top.reset_4kb_concurrency_window();
         top.cache_sub.reset_dedup_valid_line_stats();
+        // [STAT] 打开 IOMMU 侧稳态窗口(Steady IOPS/Theory peak/Efficiency、稳态端口带宽、
+        //   稳态端口注入间隔), 与单设备8通道基线(rand4k_msi_mix_multichan)及 mps128/inval
+        //   项完全同口径; 窗口按"已完成数(哨兵+预热 epoch) + 正式 epoch 的 10%~90%"精确对齐。
+        //   steady_*_count 仅为统计阈值(在 reorder 中锁存时刻与字节快照), 无任何时序影响。
+        //   [A/B 已验证] 该改动对 N16C8 既有死锁无因果关系: 移除本块后 N16C8 仍以 RC=134
+        //   在同一时刻(75020 ns, responded=284)中止, 日志仅少 [MDMC_STAT_WINDOW] 一行。
+        {
+            const uint64_t done_before=top.iommu_total_completed;
+            const uint64_t meas=total_count(iommu_md::MEASUREMENT_EPOCH);
+            top.steady_start_count=done_before+meas*STEADY_STATE_START_PERCENT/100;
+            top.steady_end_count  =done_before+meas*STEADY_STATE_END_PERCENT/100;
+            std::cout << "[MDMC_STAT_WINDOW] done_before=" << done_before
+                      << " meas=" << meas
+                      << " steady_start_count=" << top.steady_start_count
+                      << " steady_end_count=" << top.steady_end_count << '\n';
+        }
         const uint64_t ptw_before=top.ptw_total_completed, ddr_before=top.axi_master_1_read_req_total;
         run_epoch(iommu_md::MEASUREMENT_EPOCH);
+#if TEST_CFG_SPLIT_RW_PORTS
+        std::cout << "[MDMC_RWQ] depth=" << RWQ_DEPTH << " peak_read=" << rw_peak_r
+                  << " peak_write=" << rw_peak_w << '\n';
+        // [供给验证] 注入期内读/写发送进程的饥饿次数与时长:
+        //   starve_ns 越接近 0 => RP 侧请求越充足(端口从不因缺请求而空等)。
+        std::cout << "[MDMC_SUPPLY] R starve_cnt=" << starve_cnt_r
+                  << " starve_ns=" << starve_ns_r << " last_send=" << last_send_ns_r
+                  << " | W starve_cnt=" << starve_cnt_w
+                  << " starve_ns=" << starve_ns_w << " last_send=" << last_send_ns_w << '\n';
+        // 报告前缀带 rwsplit, 与既有基线 CSV(multidev_mc_n16_c8_512mb_*)完全隔离, 不覆盖基线。
+        std::string pfx = std::string("multidev_mc_")
+            + (TEST_CFG_SPLIT_RW_PORTS ? "rwsplit_" : "")
+            + (TEST_CFG_MD_DATA_ONLY ? "data_" : "")
+            + (NVME10 ? "nvme10_" : "")
+            + "n" + std::to_string(N) + "_c" + std::to_string(C) + "_" + std::to_string(RANGE_MB) + "mb";
+        top.md_trace.report(pfx);
+#else
         top.md_trace.report("multidev_mc_n"+std::to_string(N)+"_c"+std::to_string(C)+"_"+std::to_string(RANGE_MB)+"mb");
+#endif
         std::cout << "[MDMC_DELTA] PTW=" << top.ptw_total_completed-ptw_before
                   << " DDR_reads=" << top.axi_master_1_read_req_total-ddr_before << '\n';
         // 与单设备基线同口径的IOMMU侧统计，便于横向对比。

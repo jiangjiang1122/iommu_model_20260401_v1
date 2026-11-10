@@ -35,6 +35,9 @@ struct BusyGuard {
 enum class Point : unsigned { ACCEPT, POP, ADMIT, READY_OUT, OUT_LAUNCH, RESPONSE, RELEASE, COUNT };
 struct Request {
     unsigned device = 0, epoch = 0, type = 0, bytes = 0;
+#if TEST_CFG_CPU_INVAL_SCENE
+    unsigned nvme_id = 0;   // [缓存失效多核] NVMe任务组号(=CPU核id), 供离线按核核对(仅失效场景编译, 保基线结构大小不变)
+#endif
     uint64_t sequence = 0, group = 0, iova = 0, expected_pa = 0, result_pa = 0;
     uint32_t task_id = 0;
     bool write = false, rp_done = false, ok = false;
@@ -236,7 +239,11 @@ public:
         require(all_responded(), "尚有未完成请求，不能导出成功报告");
         std::ofstream out(prefix + "_requests.csv");
         require(out.good(), "无法创建请求CSV");
-        out << "epoch,did,gscid,seq,group,type,write,bytes,task_id,iova,expected_pa,actual_pa,ok,ready_ns,grant_ns,accept_ns,pop_ns,admit_ns,ready_out_ns,out_launch_ns,response_ns,release_ns,rp_response_ns\n";
+        out << "epoch,did,gscid,seq,group,type,write,bytes,task_id,iova,expected_pa,actual_pa,ok,ready_ns,grant_ns,accept_ns,pop_ns,admit_ns,ready_out_ns,out_launch_ns,response_ns,release_ns,rp_response_ns";
+#if TEST_CFG_CPU_INVAL_SCENE
+        out << ",nvme_id";
+#endif
+        out << "\n";
         out << std::fixed << std::setprecision(3);
         std::vector<const Request*> measured;
         for (const auto& pair : requests) {
@@ -246,7 +253,11 @@ public:
                 << ',' << r.iova << ',' << r.expected_pa << ',' << r.result_pa << ',' << r.ok
                 << ',' << r.ready_ns << ',' << r.grant_ns;
             for (double t : r.time) out << ',' << t;
-            out << ',' << r.rp_response_ns << '\n';
+            out << ',' << r.rp_response_ns;
+#if TEST_CFG_CPU_INVAL_SCENE
+            out << ',' << r.nvme_id;
+#endif
+            out << '\n';
             if (r.epoch == MEASUREMENT_EPOCH) measured.push_back(&r);
         }
         require(!measured.empty(), "正式请求为空");

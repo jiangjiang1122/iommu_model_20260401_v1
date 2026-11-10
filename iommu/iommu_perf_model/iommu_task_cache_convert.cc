@@ -144,6 +144,7 @@ iommu::CacheMessage task_to_pt_request(iommu_task_t* task) {
     
     req.msg_type   = iommu::CacheMsgType::PT_LOOKUP;
     req.task_id    = task->task_id;
+    req.is_ctrl_pkt = task->is_ctrl;   // [STAT] 多RAM data-only 分布统计
     req.gscid      = task->GSCID;
     req.pscid      = task->PSCID;
     req.iova       = task->iova;
@@ -333,6 +334,7 @@ iommu::CacheMessage task_to_walker_request(iommu_task_t* task) {
     
     req.msg_type           = iommu::CacheMsgType::WALKER_LOOKUP;
     req.task_id            = task->task_id;
+    req.is_ctrl_pkt        = task->is_ctrl;   // [STAT] 多RAM data-only 分布统计
     
     // 从 task 解析路由键
     req.gscid              = task->GSCID;
@@ -471,6 +473,7 @@ iommu::CacheMessage task_to_walker_update(iommu_task_t* task) {
     
     req.msg_type           = iommu::CacheMsgType::WALKER_UPDATE;
     req.task_id            = task->task_id;
+    req.is_ctrl_pkt        = task->is_ctrl;   // [STAT] 多RAM data-only 分布统计
     req.gscid              = task->GSCID;
     req.pscid              = task->PSCID;
     req.iova               = task->iova;
@@ -639,6 +642,7 @@ iommu::CacheMessage task_to_s2_walker_request(iommu_task_t* task, uint64_t gpa) 
 
     req.msg_type            = iommu::CacheMsgType::WALKER_LOOKUP;
     req.task_id             = task->task_id;
+    req.is_ctrl_pkt         = task->is_ctrl;   // [STAT] 多RAM data-only 分布统计
     req.gscid               = task->GSCID;
     req.pscid               = task->PSCID;
     req.iova                = gpa;   // [S2] 使用GPA而非IOVA
@@ -667,6 +671,7 @@ iommu::CacheMessage task_to_s2_walker_update(iommu_task_t* task, uint64_t gpa) {
 
     req.msg_type            = iommu::CacheMsgType::WALKER_UPDATE;
     req.task_id             = task->task_id;
+    req.is_ctrl_pkt         = task->is_ctrl;   // [STAT] 多RAM data-only 分布统计
     req.gscid               = task->GSCID;
     req.pscid               = task->PSCID;
     req.iova                = gpa;   // [S2] 使用GPA

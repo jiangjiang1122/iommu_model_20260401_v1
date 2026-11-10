@@ -469,6 +469,35 @@ def main():
     # ---------------- 日志全期统计(模型内报告) ----------------
     logstats = parse_log(args.log)
 
+    # [4KB页并发] 把模型侧逐设备报告挂到指标11, 与W窗口离线重算互为交叉验证
+    kb4m = logstats.get("kb4_model") or {}
+    if kb4m.get("rows"):
+        m["11"]["model_side"] = kb4m
+        # 交叉校验: 模型侧 Σ每设备avg 应等于其 TOTAL.avg; 残差/失配必须为0
+        _rows = kb4m["rows"]
+        _sum = sum(r["avg_conc"] for r in _rows.values())
+        _tot = (kb4m.get("total") or {}).get("avg_conc")
+        m["11"]["model_side_check"] = {
+            "sum_per_device_avg": round(_sum, 3),
+            "reported_total_avg": _tot,
+            "reported_cross_check": kb4m.get("sum_avg"),
+            "abs_diff": (None if _tot is None else round(abs(_sum - _tot), 3)),
+            "residual_total": sum(r["residual"] for r in _rows.values()),
+            "no_match_total": sum(r["no_match"] for r in _rows.values()),
+            "in_tasks_total": sum(r["in_tasks"] for r in _rows.values()),
+            "out_tasks_total": sum(r["out_tasks"] for r in _rows.values()),
+            "distinct_pages_sum": sum(r["distinct_pages"] for r in _rows.values()),
+        }
+        assert m["11"]["model_side_check"]["residual_total"] == 0, \
+            "模型侧 4KB 页跟踪表存在未清零残项"
+        assert m["11"]["model_side_check"]["no_match_total"] == 0, \
+            "模型侧 4KB 页出口存在查不到表项的异常"
+        assert m["11"]["model_side_check"]["in_tasks_total"] == \
+            m["11"]["model_side_check"]["out_tasks_total"], \
+            "模型侧 4KB 页入口/出口任务数不闭合"
+        print("[analyze] 4KB页并发模型侧逐设备表已采集: %d 设备" % len(_rows),
+              flush=True)
+
     # ---------------- 指标14-25: Cache命中率 ----------------
     def rate_block(c, name, note=""):
         return {"name": name, "w_hits": c.w_hits, "w_queries": c.w_queries,
@@ -744,6 +773,11 @@ def parse_log(path):
         "dedup_hit": {"queries": None, "hits": None, "misses": None},
         "hold": {},
         "exit_bw": None,
+        # [4KB页并发-模型侧] print_4kb_concurrency_report 的逐设备表(全采样窗口口径),
+        #   与本脚本按 W 窗口离线重算的 per_device 互为交叉验证。
+        "kb4_model": {"window_ns": None, "n_devices": None, "rows": {},
+                      "total": {}, "sum_avg": None, "max_dev_peak": None,
+                      "dedup_lines": None, "avg_pct": None, "peak_pct": None},
     }
     import re
     try:
@@ -825,8 +859,82 @@ def parse_log(path):
                            r"\(W1=\s*([\d.]+) W2=\s*([\d.]+) W3=\s*([\d.]+)\)"),
     }
 
+    # ---- [4KB页并发-模型侧] 块状态机 ----
+    #   表头: DID AvgConc(pages) PeakConc InTasks OutTasks DistinctPg Residual NoMatch
+    P_KB4 = {
+        "head": re.compile(r"IOMMU 4KB Page Concurrency Statistics"),
+        "end": re.compile(r"Input-queue backlog"),
+        "win": re.compile(r"Sampling window:\s*([\d.]+) ns"),
+        "ndev": re.compile(r"Tracked devices:\s*(\d+)"),
+        "row": re.compile(r"^\s*(\d+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+"
+                          r"(\d+)\s+(\d+)\s+(\d+)\s*$"),
+        "tot": re.compile(r"^\s*TOTAL\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+"
+                          r"(\d+)\s+(\d+)\s+(\d+)\s*$"),
+        "sumavg": re.compile(r"Cross-check \(Σ per-device avg\):\s*([\d.]+)"),
+        "maxdev": re.compile(r"Max single-device peak:\s*(\d+)"),
+        "cap": re.compile(r"Dedup Cache capacity:\s*(\d+) cachelines"),
+        "avgpct": re.compile(r"AvgConc / Dedup capacity:\s*([\d.]+)%"),
+        "peakpct": re.compile(r"PeakConc / Dedup capacity:\s*([\d.]+)%"),
+    }
+    KB4_FIELDS = ("did", "avg_conc", "peak_conc", "in_tasks", "out_tasks",
+                  "distinct_pages", "residual", "no_match")
+    kb4_active = False
+
     with f:
         for line in f:
+            # ---- [4KB页并发-模型侧] 逐设备表采集(块头激活, 遇 backlog 行关闭) ----
+            if kb4_active:
+                K = out["kb4_model"]
+                if P_KB4["end"].search(line):
+                    kb4_active = False
+                else:
+                    mt = P_KB4["row"].match(line)
+                    if mt:
+                        did = int(mt.group(1))
+                        # 同一日志内该报告可能被打印两次(取值一致), 首次为准
+                        if did not in K["rows"]:
+                            K["rows"][did] = {
+                                f: (float(mt.group(i + 2)) if f == "avg_conc"
+                                    else int(mt.group(i + 2)))
+                                for i, f in enumerate(KB4_FIELDS[1:])}
+                            K["rows"][did]["did"] = did
+                    else:
+                        mt = P_KB4["tot"].match(line)
+                        if mt and not K["total"]:
+                            K["total"] = {
+                                f: (float(mt.group(i + 1)) if f == "avg_conc"
+                                    else int(mt.group(i + 1)))
+                                for i, f in enumerate(KB4_FIELDS[1:])}
+                        elif K["window_ns"] is None:
+                            mt = P_KB4["win"].search(line)
+                            if mt:
+                                K["window_ns"] = float(mt.group(1))
+                        elif K["n_devices"] is None:
+                            mt = P_KB4["ndev"].search(line)
+                            if mt:
+                                K["n_devices"] = int(mt.group(1))
+                        elif K["sum_avg"] is None:
+                            mt = P_KB4["sumavg"].search(line)
+                            if mt:
+                                K["sum_avg"] = float(mt.group(1))
+                        elif K["max_dev_peak"] is None:
+                            mt = P_KB4["maxdev"].search(line)
+                            if mt:
+                                K["max_dev_peak"] = int(mt.group(1))
+                        elif K["dedup_lines"] is None:
+                            mt = P_KB4["cap"].search(line)
+                            if mt:
+                                K["dedup_lines"] = int(mt.group(1))
+                        elif K["avg_pct"] is None:
+                            mt = P_KB4["avgpct"].search(line)
+                            if mt:
+                                K["avg_pct"] = float(mt.group(1))
+                        elif K["peak_pct"] is None:
+                            mt = P_KB4["peakpct"].search(line)
+                            if mt:
+                                K["peak_pct"] = float(mt.group(1))
+            elif P_KB4["head"].search(line) and not out["kb4_model"]["rows"]:
+                kb4_active = True
             # ---- 块激活与激活块的逐行匹配 ----
             for bk in NEEDLE:
                 if bk not in active and NEEDLE[bk] in line:
@@ -989,7 +1097,8 @@ def emit(args, m, man, win3, logstats, counts):
              (fs(o["avg"]), fs(o["peak"], 0), fs(o["read"]["avg"]), fs(o["write"]["avg"])),
              "含CTRL avg=%s; DATA任务avg=%s(非页数)" %
              (fs(o["including_ctrl"]["avg"]), fs(o["data_task_concurrency"]["avg"])),
-             "页", None, "DATA按(DID,映射后IOVA页)去重后积分; 历史不同页=%s" % o["n_pages"])
+             "页", None, "DATA按(DID,映射后IOVA页)去重后积分; 历史不同页=%s; "
+             "**每设备细分见下方「指标11 专章」**" % o["n_pages"])
     o = m["12"]
     R[12] = ("agg=%s R=%s W=%s" % (fs(o["agg"], 3), fs(o["read"], 3),
                                    fs(o["write"], 3)),
@@ -1179,6 +1288,94 @@ def emit(args, m, man, win3, logstats, counts):
                          nsamp if nsamp is not None else "—", note))
         rows_csv.append([no, titles[no], wv, av if av else "N/A", unit,
                          nsamp if nsamp is not None else "N/A", note])
+
+    # ============ 指标11 专章: IOMMU 内部并发 4KB 页数(每设备细分) ============
+    o11 = m["11"]
+    ms = o11.get("model_side") or {}
+    ms_rows = ms.get("rows") or {}
+    pd = o11.get("per_device") or {}
+    lines_md += [
+        "",
+        "## 指标11 专章：IOMMU 内部并发的不同 4KB 页任务数目（含每设备细分）",
+        "",
+        "- **口径A（模型侧，全采样窗口）**：`print_4kb_concurrency_report`，"
+        "只计 512Byte 数据任务（`is_ctrl=0 && length=512`），"
+        "在途跨度 = parser 准入 → reorder 释放，受 outstanding 额度约束；"
+        "按 `(device_id, iova & ~0xFFF)` 建表，并发数 = 当前 valid 表项数，"
+        "平均值为时间加权。采样窗口 = %s ns。" % fs(ms.get("window_ns"), 1),
+        "- **口径B（离线重算，稳态窗口 W）**：本脚本按 `(DID, 映射后 IOVA 页)` "
+        "去重后对事件流积分，W=(%.3f, %.3f] ns。" % (t10, t90),
+        "- `DistinctPg`/`W内不同页` = 该设备**历史上出现过**的不同 4KB 页数（非并发数）；"
+        "`AvgConc`/`W-avg` 才是**同时在途**的不同 4KB 页数。",
+        "",
+        "| DID | A:AvgConc(页) | A:PeakConc | A:历史不同页 | A:In/Out任务 | "
+        "B:W-avg(页) | B:W-peak | B:W内不同页 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    all_dids = sorted(set(list(ms_rows.keys()) +
+                          [int(d) for d in pd.keys()]))
+    for d in all_dids:
+        a = ms_rows.get(d) or ms_rows.get(str(d)) or {}
+        b = pd.get(str(d)) or pd.get(d) or {}
+        lines_md.append("| %d | %s | %s | %s | %s/%s | %s | %s | %s |" % (
+            d,
+            fs(a.get("avg_conc"), 3), fs(a.get("peak_conc"), 0),
+            fs(a.get("distinct_pages"), 0),
+            fs(a.get("in_tasks"), 0), fs(a.get("out_tasks"), 0),
+            fs(b.get("avg"), 3), fs(b.get("peak"), 0), fs(b.get("n_pages"), 0)))
+    tot = ms.get("total") or {}
+    lines_md.append("| **TOTAL** | **%s** | **%s** | **%s** | **%s/%s** | "
+                    "**%s** | **%s** | **%s** |" % (
+                        fs(tot.get("avg_conc"), 3), fs(tot.get("peak_conc"), 0),
+                        fs(tot.get("distinct_pages"), 0),
+                        fs(tot.get("in_tasks"), 0), fs(tot.get("out_tasks"), 0),
+                        fs(o11.get("avg"), 3), fs(o11.get("peak"), 0),
+                        fs(o11.get("n_pages"), 0)))
+    chk = o11.get("model_side_check") or {}
+    lines_md += [
+        "",
+        "**每设备并发是否均衡**：",
+        "",
+        "| 判据 | 值 |",
+        "|---|---|",
+        "| 口径A Σ每设备AvgConc（复算） | %s 页 |" % fs(chk.get("sum_per_device_avg"), 3),
+        "| 口径A 日志 TOTAL AvgConc | %s 页 |" % fs(chk.get("reported_total_avg"), 3),
+        "| 口径A 日志 Cross-check 行 | %s 页 |" % fs(chk.get("reported_cross_check"), 3),
+        "| 复算与日志绝对差 | %s 页（应为 0.000，浮点尾差 ≤0.01 可接受） |"
+        % fs(chk.get("abs_diff"), 3),
+        "| 单设备最大 PeakConc | %s 页 |" % fs(ms.get("max_dev_peak"), 0),
+        "| 全设备 TOTAL PeakConc | %s 页 |" % fs(tot.get("peak_conc"), 0),
+        "| 峰值同时性（Σ单设备峰值 vs 全局峰值） | %s vs %s → "
+        "**%s**（各设备峰值不同刻出现） |" % (
+            fs(sum((ms_rows.get(d) or {}).get("peak_conc", 0) for d in all_dids), 0),
+            fs(tot.get("peak_conc"), 0),
+            "非同时" if sum((ms_rows.get(d) or {}).get("peak_conc", 0)
+                            for d in all_dids) != (tot.get("peak_conc") or 0)
+            else "同时"),
+        "| 残项 Residual 合计 | %s（应为 0） |" % fs(chk.get("residual_total"), 0),
+        "| 出口失配 NoMatch 合计 | %s（应为 0） |" % fs(chk.get("no_match_total"), 0),
+        "| 入口/出口任务闭合 | %s / %s |" % (
+            fs(chk.get("in_tasks_total"), 0), fs(chk.get("out_tasks_total"), 0)),
+        "| 去重Cache容量 / AvgConc占比 / PeakConc占比 | %s 行 / %s%% / %s%% |" % (
+            fs(ms.get("dedup_lines"), 0), fs(ms.get("avg_pct"), 2),
+            fs(ms.get("peak_pct"), 2)),
+    ]
+    if all_dids:
+        _avgs = [float((ms_rows.get(d) or {}).get("avg_conc") or 0.0)
+                 for d in all_dids]
+        _mx, _mn = max(_avgs), min(_avgs)
+        _mean = sum(_avgs) / len(_avgs) if _avgs else 0.0
+        _jain = ((sum(_avgs) ** 2) / (len(_avgs) * sum(v * v for v in _avgs))
+                 if sum(v * v for v in _avgs) > 0 else None)
+        lines_md += [
+            "",
+            "**每设备 AvgConc 离散度**：max=%s、min=%s、mean=%s、极差比=%.4f、"
+            "Jain 公平性=%s" % (
+                fs(_mx, 3), fs(_mn, 3), fs(_mean, 3),
+                (_mx / _mn) if _mn > 0 else float("nan"),
+                fs(_jain, 6)),
+        ]
+
     lines_md += ["", "## 附录", "",
                  "- 全期hash冲突对照: %s" % json.dumps(logstats.get("conflict"),
                                                         ensure_ascii=False),

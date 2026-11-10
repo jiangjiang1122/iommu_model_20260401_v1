@@ -800,13 +800,25 @@ uint32_t RP_Module::log2szm1(uint32_t n) {
 
 int8_t RP_Module::enable_cq(
     iommu_top *iommu,
-    uint32_t nppn) {
+    uint32_t nppn,
+    uint32_t entries) {
     cqb_t cqb;
     cqcsr_t cqcsr;
 
     cqb.raw = 0;
     cqb.ppn = get_free_ppn(nppn);
-    cqb.log2szm1 = log2szm1((nppn * PAGESIZE)/CQ_ENTRY_SZ);
+    // [CQ深度] entries>0: 显式指定条目数(2的幂), log2szm1 = log2(entries)-1,
+    //   使 IOMMU 侧 qsize = 1<<(log2szm1+1) 精确等于 entries。
+    //   entries==0: 沿用原公式(按分配页数换算), 既有测试项行为完全不变。
+    if ( entries != 0 ) {
+        cqb.log2szm1 = log2szm1(entries) - 1;
+        if ( (entries & (entries - 1)) != 0 || cqb.log2szm1 > 31 ) {
+            printf("enable_cq: entries=%u must be a power of 2\n", entries);
+            return -1;
+        }
+    } else {
+        cqb.log2szm1 = log2szm1((nppn * PAGESIZE)/CQ_ENTRY_SZ);
+    }
     write_register(&iommu->iommu_inst, CQB_OFFSET, 8, cqb.raw);
     do {
         cqcsr.raw = read_register(&iommu->iommu_inst, CQCSR_OFFSET, 4);
@@ -969,6 +981,93 @@ void RP_Module::iotinval(
     cqt.index++;
     write_register(&iommu->iommu_inst, CQT_OFFSET, 4, cqt.raw);
     process_commands(&iommu->iommu_inst);
+    return;
+}
+// ============================================================================
+// [CQ异步] iotinval_doorbell - 只投递不执行
+//   与 iotinval() 完全相同的命令构造/写CQ内存/推进CQT动作, 唯一区别是
+//   **不在 RP 侧同步调用 process_commands()**: 命令滞留于 CQ, 由 IOMMU 侧
+//   cq_async_process_thread 逐笔取出并阻塞执行失效流水线, 完成后推进 CQH。
+//   这样 CQ 才可能真正被填满(63/64), 从而产生规范语义下的反压:
+//     - CPU 失效进程: CQ 满则等待 CQH 前进;
+//     - 请求发送进程: CQ 满(注入信用耗尽)则等待, 每笔 CQH 前进放行 1 组。
+//   宏 TEST_CFG_CPU_INVAL_SCENE 关闭时退化为原同步语义(不影响其他测试项)。
+// ============================================================================
+void RP_Module::iotinval_doorbell(
+    iommu_top *iommu,
+    uint8_t f3, uint8_t GV, uint8_t AV, uint8_t PSCV, uint32_t GSCID, uint32_t PSCID, uint64_t address, uint8_t NL) {
+    command_t cmd;
+    cqb_t cqb;
+    cqt_t cqt;
+    uint64_t temp, temp1;
+    temp = access_viol_addr;
+    temp1 = data_corruption_addr;
+    access_viol_addr = -1;
+    data_corruption_addr = -1;
+    cmd.low = cmd.high = 0;
+    cmd.iotinval.opcode = IOTINVAL;
+    cmd.iotinval.func3 = f3;
+    cmd.iotinval.gv = GV;
+    cmd.iotinval.av = AV;
+    cmd.iotinval.pscv = PSCV;
+    cmd.iotinval.nl = NL;
+    cmd.iotinval.gscid = GSCID;
+    cmd.iotinval.pscid = PSCID;
+    cmd.iotinval.addr_63_12 = address / PAGESIZE;
+    cqb.raw = read_register(&iommu->iommu_inst, CQB_OFFSET, 8);
+    cqt.raw = read_register(&iommu->iommu_inst, CQT_OFFSET, 4);
+    write_memory_test_rp( (char *)&cmd, ((cqb.ppn * PAGESIZE) | (cqt.index * CQ_ENTRY_SZ)), CQ_ENTRY_SZ);
+    access_viol_addr = temp;
+    data_corruption_addr = temp1;
+    cqt.index++;
+    write_register(&iommu->iommu_inst, CQT_OFFSET, 4, cqt.raw);
+#if TEST_CFG_CPU_INVAL_SCENE
+    iommu->cq_doorbell_ring();      // 只敲门铃, 由 IOMMU 侧线程异步取指执行
+#else
+    process_commands(&iommu->iommu_inst);   // 兜底: 宏关闭时保持同步语义
+#endif
+    return;
+}
+// ============================================================================
+// [CQ异步] iofence_doorbell - 只投递不执行的 IOFENCE.C
+//   与 iofence() 完全相同的命令构造/写CQ内存/推进CQT动作, 唯一区别是
+//   **不在 RP 侧同步调用 process_commands()**: 命令滞留于 CQ, 由 IOMMU 侧
+//   cq_async_process_thread 逐笔取出执行。对于 IOFENCE.C, IOMMU 会停止对
+//   在途请求打标并等待已打标请求全部排空后才推进 CQH(需求 5-(2))。
+//   与 iotinval_doorbell 成对使用: 每笔 invalid 后紧跟一笔 iofence(CQ tail +2)。
+// ============================================================================
+void RP_Module::iofence_doorbell(
+    iommu_top *iommu,
+    uint8_t f3, uint8_t PR, uint8_t PW, uint8_t AV, uint8_t WSI_bit, uint64_t addr, uint32_t data) {
+    command_t cmd;
+    cqb_t cqb;
+    cqt_t cqt;
+    uint64_t temp, temp1;
+    temp = access_viol_addr;
+    temp1 = data_corruption_addr;
+    access_viol_addr = -1;
+    data_corruption_addr = -1;
+    cmd.low = cmd.high = 0;
+    cmd.iofence.opcode = IOFENCE;
+    cmd.iofence.func3 = f3;
+    cmd.iofence.pr = PR;
+    cmd.iofence.pw = PW;
+    cmd.iofence.av = AV;
+    cmd.iofence.wsi = WSI_bit;
+    cmd.iofence.addr_63_2 = addr >> 2;
+    cmd.iofence.data = data;
+    cqb.raw = read_register(&iommu->iommu_inst, CQB_OFFSET, 8);
+    cqt.raw = read_register(&iommu->iommu_inst, CQT_OFFSET, 4);
+    write_memory_test_rp( (char *)&cmd, ((cqb.ppn * PAGESIZE) | (cqt.index * CQ_ENTRY_SZ)), CQ_ENTRY_SZ);
+    access_viol_addr = temp;
+    data_corruption_addr = temp1;
+    cqt.index++;
+    write_register(&iommu->iommu_inst, CQT_OFFSET, 4, cqt.raw);
+#if TEST_CFG_CPU_INVAL_SCENE
+    iommu->cq_doorbell_ring();      // 只敲门铃, 由 IOMMU 侧 cq_async_process_thread 异步取指执行
+#else
+    process_commands(&iommu->iommu_inst);   // 兜底: 宏关闭时保持同步语义
+#endif
     return;
 }
 void RP_Module::ats_command(

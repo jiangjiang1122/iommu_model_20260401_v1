@@ -55,5 +55,21 @@ Thumbs.db
 # ============ Qoder repo wiki & specs（按需可取消注释） ============
 # .qoder/
 
+# ============ Python 字节码缓存 ============
+__pycache__/
+*.pyc
+*.pyo
+
+# ============ 仿真结果数据（单目录即 2.3GB+，不入库，仅报告 .md 可单独 add -f）============
+rwsplit_results/**/*.csv
+rwsplit_results/**/*.json
+rwsplit_results/**/*.gz
+rwsplit_results/**/*.png
+rwsplit_results/**/*.txt
+
+# ============ 根目录编译产物可执行文件（无扩展名，git 会当文本造成巨型 diff）============
+/iommu_model_*
+/iommu_t1
+
 # ============ 异常文件名（含命令行残留） ============
 "h -c find . -name 'repowiki' -o -name 'wiki'  grep -v '.git'  head -20"

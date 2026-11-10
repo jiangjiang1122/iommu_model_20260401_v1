@@ -21,6 +21,7 @@
     "num_sets": 64,
     "num_ways": 4,
     "replacement": "plru",
+    "_comment": "DC query = 2ns (baseline caliber, restored after tuning rounds): arbiter0 + hash0 + read_set1 + compare1",
     "arbiter_latency_cycles": 0,
     "hash_latency_cycles": 0,
     "read_set_latency_cycles": 1,
@@ -31,11 +32,11 @@
     "num_sets": 64,
     "num_ways": 4,
     "replacement": "plru",
-    "_comment": "PC query = 2ns, aligned with DC: arbiter0 + hash0 + read_set1 + compare1",
-    "arbiter_latency_cycles": 0,
+    "_comment": "PC query = 1ns (regression caliber aligned with baseline 286.90/371.64 measured at PC=1ns): arbiter1 + hash0 + read_set0 + compare0",
+    "arbiter_latency_cycles": 1,
     "hash_latency_cycles": 0,
-    "read_set_latency_cycles": 1,
-    "compare_latency_cycles": 1
+    "read_set_latency_cycles": 0,
+    "compare_latency_cycles": 0
   },
 
   "msipt_cache": {
@@ -57,7 +58,7 @@
     "num_sets": 64,
     "num_ways": 4,
     "num_rams": 4,
-    "ram_fifo_depth": 8
+    "ram_fifo_depth": 64
   },
 
   "walker_cache": {
@@ -85,7 +86,7 @@
   "statistics": {
     "output_file": "cache_sim.log",
     "enable_latency_histogram": true,
-    "enable_task_trace": true,
+    "enable_task_trace": false,
     "task_trace_level": "detail",
     "histogram_bin_width_ns": 1.0
   },

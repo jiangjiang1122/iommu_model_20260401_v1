@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <functional>
+#include <deque>
 
 namespace iommu {
 
@@ -55,6 +56,38 @@ public:
     // [dedup多RAM] 内部预取任务FIFO: MISS时RAM Worker生成D个预取占位任务,
     // 经 scheduler 重新调度分发到不同RAM并行执行 (深度32, 满则丢弃预取防死锁)
     sc_fifo<CacheMessage> dedup_inside_request_fifo;
+
+    // [去重延迟更新] 小包场景(MPS/MRRS=128B)优化: PTW组完成(1+D)后 dedup_update
+    //   先入带每条目定时器的延迟FIFO, 由排空线程按三条件(定时器到期/占用超阈值/
+    //   去重Buffer满)转入 dedup_update_fifo, 延迟清除去重Cache占位以覆盖
+    //   "PT Cache已判miss但尚未进入去重Cache" 的 outstanding 兄弟包;
+    //   开关 off 时 dedup_update_enqueue 直写 dedup_update_fifo, 旧方案逐位不变。
+    //   不用 sc_fifo: 需按条目 deadline 复核与 (D+1) 笔按组出队。
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+    struct DelayedUpdEntry {
+        CacheMessage msg;
+        sc_time      deadline;   // 入队时刻 + DEDUP_DELAYED_UPDATE_TIMER_NS
+        double       enq_ns;     // [STAT] 入队时刻(ns, 驻留时长统计)
+    };
+    std::deque<DelayedUpdEntry>  delayed_upd_deque_;     // 硬容量=DEDUP_DELAYED_UPDATE_FIFO_DEPTH
+    sc_event_queue               delayed_upd_timer_eq_;  // 每条目定时器(PEQ式有序定时事件)
+    sc_event                     delayed_upd_pressure_ev_;     // 条件2: 占用>(深度-margin)
+    sc_event                     delayed_upd_space_ev_;        // 硬满排空后让出空间
+    sc_event                     dedup_buffer_full_notify_ev_; // 条件3: 去重Buffer满通知
+    bool                         delayed_pressure_pending_ = false;
+    void dedup_delayed_update_drain_thread();
+    void delayed_upd_drain_group(uint32_t n, int cond);
+    void delayed_upd_sample_occ();
+#endif
+    // [去重延迟更新] 统一入队封装: on=延迟FIFO, off=直写dedup_update_fifo
+    void dedup_update_enqueue(CacheMessage& msg);
+    uint32_t delayed_upd_pending() const {
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+        return static_cast<uint32_t>(delayed_upd_deque_.size());
+#else
+        return 0;
+#endif
+    }
 
     // lookup 响应出口：各 cache 独立返回，避免共用一个 depth=1 FIFO 造成串行化。
     sc_fifo<CacheMessage> dc_response_fifo;
@@ -107,6 +140,15 @@ public:
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     uint64_t get_dedup_buffer_full_bypass_count() const { return dedup_buffer_full_bypass_count_; }
+
+    // [稳态窗口] 去重统计原始计数器透传(供双快照做差, 得到仅稳态窗口口径)
+    uint64_t get_dedup_lookup_total()     const { return dedup_lookup_total_; }
+    uint64_t get_dedup_lookup_hit()       const { return dedup_lookup_hit_; }
+    uint64_t get_dedup_lookup_miss()      const { return dedup_lookup_miss_; }
+    uint64_t get_dedup_req_lookup_total() const { return dedup_req_lookup_total_; }
+    uint64_t get_dedup_req_lookup_hit()   const { return dedup_req_lookup_hit_; }
+    uint64_t get_dedup_hash_conflict()    const { return dedup_hash_conflict_count_; }
+    uint64_t get_dedup_conflict_bypass()  const { return dedup_conflict_bypass_count_; }
 
     // ============================================================
     // [STAT需求2] 去重Cache 有效 cacheline 占用统计透传接口
@@ -164,6 +206,12 @@ public:
         int n = dedup_hash_in_fifo.num_available() +
                 dedup_inside_request_fifo.num_available();
         for (const auto& f : dedup_ram_fifo_) n += f->num_available();
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+        // [释放优先通道] 新增的两类 FIFO 同样属于"在途", 必须计入终局排空判据,
+        //   否则统计会提前结束而漏算未刷新的释放消息。
+        n += dedup_upd_hash_in_fifo.num_available();
+        for (const auto& f : dedup_ram_upd_fifo_) n += f->num_available();
+#endif
         return n;
     }
 
@@ -181,6 +229,22 @@ public:
 
     // [失效] 失效通路总开关(CQ 桥接依据; false 时不下发失效任务)
     bool invalidation_enabled() const { return inval_enabled_; }
+
+    // ---- [失效] 延时失效策略(LIB/VN)量化访问器 ----
+    //   仅"扫表类"失效指令(VMA 100/101/001、GVMA GV=1)会进入 LIB;
+    //   精准失效(AV=1)走立即 SCAN_RANGE, 不产生任何 LIB 记录 =>
+    //   可用 record_count()==0 客观证明 strict 未启动延时失效策略。
+    bool     lazy_enabled()          const { return lazy_enabled_; }
+    uint32_t lazy_lib_size()         const { return lib_.size(); }
+    uint32_t lazy_vn_max()           const { return lib_.vn_max(); }
+    uint8_t  lazy_global_vn()        const { return lib_.global_vn(); }
+    uint32_t lazy_lib_valid()        const { return lib_.valid_count(); }
+    uint64_t lazy_record_count()     const { return lib_.record_count(); }
+    uint64_t lazy_wrap_count()       const { return lib_.wrap_count(); }
+    uint64_t lazy_full_fallback()    const { return lib_.full_fallback_count(); }
+    // 查询旁路比对生效次数(CL.VN < LIB.VN -> 命中行按 MISS 丢弃)
+    uint64_t pt_lazy_inval_drops()     const { return pt_cache_ ? pt_cache_->lazy_inval_drops() : 0; }
+    uint64_t walker_lazy_inval_drops() const { return walker_cache_ ? walker_cache_->lazy_inval_drops() : 0; }
 
     // [STAT] 打印32任务组统计报告
     void print_pt_group_report() const;
@@ -395,8 +459,19 @@ private:
     uint32_t dedup_num_rams_ = 1;
     // Scheduler -> Hash 单元接口FIFO(深度1): 写满即代表Hash忙, 天然反压
     sc_fifo<CacheMessage> dedup_hash_in_fifo;
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+    // [释放优先通道 20261109] UPDATE 专用的 Scheduler -> Hash 出口(深度1)。
+    //   与 request 出口物理分离: 任一 RAM 的 request FIFO 满不再顶住释放通路。
+    //   声明紧跟在 dedup_hash_in_fifo 之后, 与构造函数初始化列表同序。
+    sc_fifo<CacheMessage> dedup_upd_hash_in_fifo;
+#endif
     // 每组 RAM 前置 FIFO (深度 ram_fifo_depth, 满则反压 Hash 单元)
     std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_fifo_;
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+    // [释放优先通道] 每组 RAM 的 UPDATE 前置 FIFO(深度同 ram_fifo_depth),
+    //   对齐 walker_ram_upd_fifo_ 范式; RAM worker 侧对本通道严格优先。
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_upd_fifo_;
+#endif
 
     // [STAT] Hash 单元统计
     uint64_t dedup_hash_task_count_       = 0;    // Hash处理任务总数
@@ -453,6 +528,23 @@ private:
     uint64_t dedup_req_lookup_total_ = 0;  // 主任务去重请求(!dedup_is_prefetch)lookup次数
     uint64_t dedup_req_lookup_hit_ = 0;    // 主任务去重请求命中次数
     uint64_t dedup_req_lookup_miss_ = 0;   // 主任务去重请求未命中次数
+    // [STAT] 去重延迟更新统计(仅开关 on 有意义): 入队/三条件出队/按组出队/
+    //   占用峰值与时间加权/ push硬满阻塞/ 条目驻留(入队->出队)
+#if TEST_CFG_DEDUP_DELAYED_UPDATE
+    uint64_t delayed_upd_enq_total_ = 0;
+    uint64_t delayed_upd_drain_c1_ = 0;    // 条件1: 定时器到期出队笔数
+    uint64_t delayed_upd_drain_c2_ = 0;    // 条件2: 压力阈值出队笔数
+    uint64_t delayed_upd_drain_c3_ = 0;    // 条件3: Buffer满出队笔数
+    uint64_t delayed_upd_group_cnt_ = 0;   // 按组出队次数(条件2/3)
+    int      delayed_upd_occ_peak_ = 0;
+    double   delayed_upd_occ_weighted_ns_ = 0.0;
+    double   delayed_upd_occ_last_ns_ = -1.0;
+    double   delayed_upd_first_enq_ns_ = -1.0;
+    uint64_t delayed_upd_push_block_cnt_ = 0;
+    double   delayed_upd_push_block_max_ns_ = 0.0;
+    double   delayed_upd_residency_total_ns_ = 0.0;
+    double   delayed_upd_residency_max_ns_ = 0.0;
+#endif
     // [FIX] Buffer满时dedup worker阻塞等待PTW并发释放的事件
     // PTW每完成一个任务时由iommu_top调用notify, dedup worker在此事件上wait
     sc_event dedup_buffer_full_event_;
@@ -518,6 +610,14 @@ private:
     uint64_t pt_ram_task_count_[PT_MAX_RAMS]   = {};  // 处理任务数(lookup+update)
     uint64_t pt_ram_lookup_count_[PT_MAX_RAMS] = {};  // lookup任务数
     uint64_t pt_ram_update_count_[PT_MAX_RAMS] = {};  // update任务数
+    // [STAT] 仅数据包(is_ctrl_pkt=false)的 per-RAM 访问计数
+    //   用于评估 4 组 RAM 在数据流量上的均衡度(SQ/CQ/MSI 控制包不计)
+    uint64_t pt_ram_data_lookup_count_[PT_MAX_RAMS] = {};
+    uint64_t pt_ram_data_update_count_[PT_MAX_RAMS] = {};
+    // [STAT] per-RAM 真实命中计数(仅 LOOKUP 有命中语义): 全量 + 仅数据包
+    //   per-RAM 命中率 = hit_count / lookup_count, 用于判断各 RAM 命中率是否均衡
+    uint64_t pt_ram_lookup_hit_count_[PT_MAX_RAMS]      = {};  // 全部包(控制+数据)
+    uint64_t pt_ram_data_lookup_hit_count_[PT_MAX_RAMS] = {};  // 仅数据包
     double   pt_ram_busy_ns_[PT_MAX_RAMS]      = {};  // RAM原子段忙总时长
     int      pt_ram_fifo_peak_[PT_MAX_RAMS]    = {};  // FIFO占用峰值
     double   pt_ram_first_start_ns_ = -1.0;           // 首任务开始(全RAM)
@@ -577,6 +677,13 @@ private:
     uint64_t walker_ram_task_count_[WALKER_MAX_WORKERS]   = {};
     uint64_t walker_ram_lookup_count_[WALKER_MAX_WORKERS] = {};
     uint64_t walker_ram_update_count_[WALKER_MAX_WORKERS] = {};
+    // [STAT] 仅数据包(is_ctrl_pkt=false)的 per-(level x RAM) 访问计数
+    //   用于评估 C1/C2/C3 各级 4 组 RAM 在数据流量上的均衡度
+    uint64_t walker_ram_data_lookup_count_[WALKER_MAX_WORKERS] = {};
+    uint64_t walker_ram_data_update_count_[WALKER_MAX_WORKERS] = {};
+    // [STAT] per-(level x RAM) 真实命中计数(仅 LOOKUP): 全量 + 仅数据包
+    uint64_t walker_ram_lookup_hit_count_[WALKER_MAX_WORKERS]      = {};
+    uint64_t walker_ram_data_lookup_hit_count_[WALKER_MAX_WORKERS] = {};
     double   walker_ram_busy_ns_[WALKER_MAX_WORKERS]      = {};
     int      walker_ram_fifo_peak_[WALKER_MAX_WORKERS]    = {};
     double   walker_ram_first_start_ns_ = -1.0;

@@ -609,6 +609,24 @@ do_iofence_c(
     }
     // All previous pending invalidation requests completed or timed out
     iommu->iofence_wait_pending_inv = 0;
+#if TEST_CFG_CPU_INVAL_SCENE
+    // [缓存失效多核] IOFENCE 语义扩展: 除等待 ATS 失效外, 还须等待"在途打标请求"全部排空。
+    //   首次进入(drain_done==0): 暂存参数, 置挂起标志, 返回 1(不推进 CQH); 由
+    //   cq_async_process_thread 停止打标并等待 iofence_inflight_count 归零后, 置 drain_done
+    //   并经 do_pending_iofence 重新调用本函数完成命令(避免二次取指, 不重复计 CQ 取指延时)。
+    //   打标开始时刻 = iommu 开始执行本 iofence 命令的时刻(即此处置挂起后由线程开始排空)。
+    if ( iommu->iofence_inflight_drain_done == 0 ) {
+        iommu->iofence_pending_PR = PR;
+        iommu->iofence_pending_PW = PW;
+        iommu->iofence_pending_AV = AV;
+        iommu->iofence_pending_WSI_BIT = WSI_BIT;
+        iommu->iofence_pending_ADDR = ADDR;
+        iommu->iofence_pending_DATA = DATA;
+        iommu->iofence_wait_inflight_drain = 1;
+        return 1;
+    }
+    iommu->iofence_inflight_drain_done = 0;   // 消费本次排空完成标志, 继续走完成分支
+#endif
     // If any ATC invalidation requests timed out then set command timeout
     if ( iommu->ats_inv_req_timeout == 1 ) {
         if ( iommu->reg_file.cqcsr.cmd_to == 0 ) {

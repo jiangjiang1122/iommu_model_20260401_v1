@@ -85,6 +85,13 @@ constexpr uint64_t MSI_PATTERN = 0x3000, MSI_IOVA_BASE = 0x2000000;
 constexpr uint64_t SQ_IOVA = 0x5000000, CQ_IOVA = 0x5001000, CTRL_GPA = 0x4000000;
 #endif
 constexpr unsigned RANGE_PAGES = RANGE_MB * 256;
+// [预取越界修复] 页表映射上限: 在数据页范围 RANGE_PAGES 之外额外映射 D 个"预取保护页",
+//   使靠近范围末尾的主页(page>=RANGE_PAGES-D)其 D 个预取相邻页(page+1..page+D)也被
+//   map_vs 有效映射。根因: PTW 预取 spawn 仅按 2MB 区(vpn[1])边界截断, 不感知 RANGE_PAGES
+//   末尾, 会预取到 [RANGE_PAGES, RANGE_PAGES+D) 的页; 若这些页未建 VS 映射, 两阶段走表
+//   返回全0 PTE -> agg_flush "两阶段聚合结果PTE无效" 致命abort(4x激励GROUPS=3636触发)。
+//   主页选择范围仍为 RANGE_PAGES(不变), 故1x基线页集与吞吐逐位保持; 仅补映射预取保护页。
+constexpr unsigned MAP_PAGES = RANGE_PAGES + PT_DEDUP_PREFETCH_DEPTH;
 constexpr uint64_t PROBE_IOVA = SQ_IOVA + 0x10000;
 constexpr uint64_t HUGE = 0x200000ULL;
 static_assert(NCHAN >= 1 && NCHAN <= 16, "通道数必须为1..16");
@@ -222,11 +229,13 @@ class MultiChannelScenario {
             rp.write_memory_test_rp(reinterpret_cast<char*>(&mp),dc.msiptp.PPN*4096+v*16,16);
             map_vs(MSI_IOVA_BASE+uint64_t(msi_pages[v])*4096,(MSI_PATTERN<<12)+uint64_t(v)*4096);
         }
-        // 共享 VS 映射 gpas[RANGE_PAGES]: 512MB 多对一随机 GPA(同基线)。
-        gpas.resize(RANGE_PAGES);
+        // 共享 VS 映射 gpas[MAP_PAGES]: 512MB 多对一随机 GPA(同基线)。
+        // [预取越界修复] 尺寸扩到 MAP_PAGES(=RANGE_PAGES+D): 前 RANGE_PAGES 项由同一RNG
+        //   序列填充(与基线逐位一致, 故1x页集/吞吐不变), 末尾追加 D 个预取保护页的GPA。
+        gpas.resize(MAP_PAGES);
         std::mt19937 mapping(42);
         std::array<unsigned,HUGE_COUNT> slots{};
-        for(unsigned i=0;i<RANGE_PAGES;++i) {
+        for(unsigned i=0;i<MAP_PAGES;++i) {
             unsigned h=mapping()%HUGE_COUNT, slot=0;
             if(RANGE_MB==16) {
                 while(slots[h]>=512) h=(h+1)%HUGE_COUNT;
@@ -240,13 +249,16 @@ class MultiChannelScenario {
         // VS 建表 = 所有通道 pages 的并集 + 各自 D 个预取相邻页。
         std::set<unsigned> mapped;
         if(RANGE_MB==16) {
-            for(unsigned i=0;i<RANGE_PAGES;++i) mapped.insert(i);
+            for(unsigned i=0;i<MAP_PAGES;++i) mapped.insert(i);
         } else {
             for(unsigned c=0;c<NCHAN;++c)
                 for(unsigned page:channels[c].pages) {
                     unsigned vpn0=((IOVA_BASE>>12)+page)&511;
                     unsigned depth=std::min<unsigned>(PT_DEDUP_PREFETCH_DEPTH,511-vpn0);
-                    for(unsigned k=0;k<=depth && page+k<RANGE_PAGES;++k) mapped.insert(page+k);
+                    // [预取越界修复] 上界由 RANGE_PAGES 放宽到 MAP_PAGES(=RANGE_PAGES+D):
+                    //   使范围末尾主页(page>=RANGE_PAGES-D)的预取相邻页也建 VS 映射,
+                    //   与 PTW 预取 spawn 的 2MB 区(vpn[1])边界对齐, 杜绝无效PTE abort。
+                    for(unsigned k=0;k<=depth && page+k<MAP_PAGES;++k) mapped.insert(page+k);
                 }
         }
         for(unsigned page:mapped) map_vs(IOVA_BASE+uint64_t(page)*4096,gpas[page]);
