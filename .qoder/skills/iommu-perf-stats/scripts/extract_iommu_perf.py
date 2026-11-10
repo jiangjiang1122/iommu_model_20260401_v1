@@ -214,7 +214,21 @@ def main():
                           r'\s*\|\s*max\s*([\d.]+)/([\d.]+)/([\d.]+)', ln)
             if g:
                 m['hold_' + g.group(1).lower()] = [int(g.group(2))] + [F(g.group(i)) for i in range(3, 9)]
-            continue
+                continue
+            # 新版打印格式(real8/real16/multidev_mc/multichan/mps128/inval/nvme10_rr 等线程):
+            #   "MAIN head (dedup MISS)     n=2052  avg total= 1864.3 ns (W1= 1648.8 W2= 200.0 W3= 15.4) | maxSeg 5491.0/211.0/95.0"
+            #   "MAIN head (PF placeholder) n=0     ..."  /  "SUSPENDED (deduped)  n=14009 ..."
+            # 归一到与 legacy 相同的 7 元组 [n, W1, W2, W3, maxW1, maxW2, maxW3]。
+            g = re.search(r'(MAIN head \(dedup MISS\)|MAIN head \(PF placeholder\)|SUSPENDED \(deduped\))'
+                          r'\s+n=(\d+)\s+avg total=\s*([\d.]+) ns'
+                          r'\s*\(W1=\s*([\d.]+) W2=\s*([\d.]+) W3=\s*([\d.]+)\)'
+                          r'\s*\|\s*maxSeg\s*([\d.]+)/([\d.]+)/([\d.]+)', ln)
+            if g:
+                key = {'MAIN head (dedup MISS)': 'hold_main',
+                       'MAIN head (PF placeholder)': 'hold_pf',
+                       'SUSPENDED (deduped)': 'hold_susp'}[g.group(1)]
+                m[key] = [int(g.group(2))] + [F(g.group(i)) for i in (4, 5, 6, 7, 8, 9)]
+                continue
 
         # ---- Outstanding / concurrency peaks ----
         if section == 'Outstanding Peak Statistics':
@@ -349,7 +363,7 @@ def main():
     out.append('| Buffer 满 bypass(正常预取) | %s |' % g('dedup_buffull_bypass', '{:d}'))
     out.append('| Buffer 持有延时 avg/max/min | %s / %s / %s ns |'
                % (g('hold_avg_ns', '{:.1f}'), g('hold_max_ns', '{:.1f}'), g('hold_min_ns', '{:.1f}')))
-    for tag in ('main', 'susp'):
+    for tag in ('main', 'pf', 'susp'):
         h = m.get('hold_' + tag)
         if h:
             out.append('| Hold %s n/W1/W2/W3 (avg) | %d / %.1f / %.1f / %.1f ns |'
