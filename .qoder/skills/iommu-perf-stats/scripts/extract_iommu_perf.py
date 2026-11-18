@@ -185,10 +185,29 @@ def main():
                 (r'总命中率:\s+([\d.]+)%', 'dedup_hit', F),
                 (r'Conflict bypass to PTW tasks:\s+(\d+)', 'dedup_bypass', int),
                 (r'Bypass to PTW count:\s+(\d+)', 'dedup_buffull_bypass', int),
+                (r'Backpressure count:\s+(\d+)', 'dedup_bp_cnt', int),
+                (r'Backpressure time:\s+([\d.]+)', 'dedup_bp_ns', F),
+                (r'Tasks hashed:\s+(\d+)', 'dedup_hash_tasks', int),
+                (r'Busy time:\s+([\d.]+)', 'dedup_hash_busy', F),
+                (r'Enqueued:\s+(\d+)', 'dupd_enq', int),
+                (r'Drained c1 \(timer\):\s*(\d+)', 'dupd_c1', int),
+                (r'Drained c2 \(pressure\):\s*(\d+)', 'dupd_c2', int),
+                (r'Drained c3 \(bufferfull\):\s*(\d+)', 'dupd_c3', int),
+                (r'Occ avg \(enq->report\):\s+([\d.]+)', 'dupd_avg', F),
             ):
                 g = re.search(pat, ln)
                 if g:
                     m[key] = cast(g.group(1))
+            g = re.search(r'\[Delayed Update FIFO Report\] \(depth=(\d+), timer=(\d+)ns', ln)
+            if g:
+                m['dupd_depth'] = int(g.group(1))
+                m['dupd_timer'] = int(g.group(2))
+            g = re.search(r'Occ peak:\s+(\d+) / (\d+)', ln)
+            if g:
+                m['dupd_peak'] = [int(g.group(1)), int(g.group(2))]
+            g = re.search(r'Residency avg/max:\s+([\d.]+) / ([\d.]+) ns', ln)
+            if g:
+                m['dupd_res'] = [F(g.group(1)), F(g.group(2))]
             continue
 
         # ---- Dedup Buffer peak / occupancy / hold ----
@@ -228,6 +247,28 @@ def main():
                        'MAIN head (PF placeholder)': 'hold_pf',
                        'SUSPENDED (deduped)': 'hold_susp'}[g.group(1)]
                 m[key] = [int(g.group(2))] + [F(g.group(i)) for i in (4, 5, 6, 7, 8, 9)]
+                continue
+
+        # ---- Entry/Dedup FIFO util + per-RAM ram_fifo + 请求均匀性 ----
+        if section.startswith('Entry/Dedup FIFO Utilization'):
+            g = re.search(r'dedup_ram_fifo\[(\d+)\]\s+(\d+)\s+(\d+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)%\s+req=(\d+)\s+\(([\d.]+)%\)', ln)
+            if g:
+                m.setdefault('dedup_ram_fifo', {})[int(g.group(1))] = [
+                    int(g.group(2)), int(g.group(3)), F(g.group(4)), F(g.group(5)),
+                    F(g.group(6)), int(g.group(7)), F(g.group(8))]
+                continue
+            g = re.search(r'Request uniformity: total=(\d+) max=(\d+) min=(\d+) max/min=([\d.]+) '
+                          r'imbalance=([\d.]+)% chi2=([\d.]+) \(df=(\d+), thr=([\d.]+)\) => (\w+)', ln)
+            if g:
+                m['dedup_ram_uniform'] = [int(g.group(1)), int(g.group(2)), int(g.group(3)),
+                                          F(g.group(4)), F(g.group(5)), F(g.group(6)),
+                                          int(g.group(7)), F(g.group(8)), g.group(9)]
+                continue
+            g = re.match(r'\s*(pt_request_fifo|pt_update_fifo|dedup_request_fifo|dedup_update_fifo|'
+                         r'pt_hit_response_fifo|pt_miss_response_fifo)\s+(\d+)\s+(\d+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)%', ln)
+            if g:
+                m['entry_fifo_' + g.group(1)] = [int(g.group(2)), int(g.group(3)),
+                                                 F(g.group(4)), F(g.group(5)), F(g.group(6))]
                 continue
 
         # ---- Outstanding / concurrency peaks ----
@@ -293,6 +334,17 @@ def main():
     if m.get('ptw_main') is not None and m.get('dedup_bypass') is not None:
         m['ptw_main_bypass'] = m['dedup_bypass']
         m['ptw_main_normal'] = m['ptw_main'] - m['dedup_bypass']
+    if m.get('dedup_hash_busy') is not None and m.get('dedup_hash_tasks'):
+        m['dedup_hash_ns'] = m['dedup_hash_busy'] / m['dedup_hash_tasks']
+    if m.get('dupd_depth'):
+        if m.get('dupd_avg') is not None:
+            m['dupd_avg_util'] = pct(m['dupd_avg'], m['dupd_depth'])
+        if m.get('dupd_peak'):
+            m['dupd_peak_util'] = pct(m['dupd_peak'][0], m['dupd_peak'][1] or m['dupd_depth'])
+    if m.get('dupd_enq'):
+        for c in ('c1', 'c2', 'c3'):
+            if m.get('dupd_' + c) is not None:
+                m['dupd_' + c + '_pct'] = pct(m['dupd_' + c], m['dupd_enq'])
 
     # ---------------- render ----------------
     def g(k, fmt='{:.2f}', na='N/A'):
@@ -371,7 +423,43 @@ def main():
             out.append('| Hold %s max W1/W2/W3 | %.1f / %.1f / %.1f ns |'
                        % (tag.upper(), h[4], h[5], h[6]))
     out.append('')
-    out.append('## 5. PTW')
+    out.append('## 5. 去重单元 RAM / 延迟更新 FIFO 明细')
+    out.append('| 指标 | 值 |')
+    out.append('|---|---|')
+    out.append('| 去重 hash 反压次数 / 时长 | %s / %s ns |' % (g('dedup_bp_cnt', '{:d}'), g('dedup_bp_ns', '{:,.0f}')))
+    out.append('| 去重 hash 每笔 | %s ns |' % g('dedup_hash_ns', '{:.3f}'))
+    out.append('| 延迟更新 FIFO depth/timer | %s / %s ns |' % (g('dupd_depth', '{:d}'), g('dupd_timer', '{:d}')))
+    out.append('| 延迟更新 FIFO 平均占用 / 利用率 | %s / %s |' % (g('dupd_avg'), gp('dupd_avg_util')))
+    pk = m.get('dupd_peak')
+    out.append('| 延迟更新 FIFO 峰值占用 / 利用率 | %s / %s |'
+               % ('%d/%d' % tuple(pk) if pk else 'N/A', gp('dupd_peak_util')))
+    out.append('| 延迟更新 FIFO 出队占比 timer/pressure/bufferfull | %s / %s / %s |'
+               % (gp('dupd_c1_pct'), gp('dupd_c2_pct'), gp('dupd_c3_pct')))
+    out.append('|   出队次数 c1/c2/c3 | %s / %s / %s |'
+               % (g('dupd_c1', '{:d}'), g('dupd_c2', '{:d}'), g('dupd_c3', '{:d}')))
+    rs = m.get('dupd_res')
+    out.append('| 延迟更新 FIFO 驻留 avg/max | %s ns |' % ('%.1f / %.1f' % tuple(rs) if rs else 'N/A'))
+    rf = m.get('dedup_ram_fifo')
+    if rf:
+        out.append('')
+        out.append('| RAM | depth | peak | peakUtil | avgOcc | avgUtil | req | req占比 |')
+        out.append('|---|---|---|---|---|---|---|---|')
+        for i in sorted(rf):
+            d, p, pu, ao, au, rq, sh = rf[i]
+            out.append('| %d | %d | %d | %.1f%% | %.2f | %.1f%% | %d | %.2f%% |'
+                       % (i, d, p, pu, ao, au, rq, sh))
+        avgs = [v[3] for v in rf.values()]
+        out.append('- ram_fifo 平均占用(跨RAM均值): %.2f entries' % (sum(avgs) / len(avgs)))
+    un = m.get('dedup_ram_uniform')
+    if un:
+        out.append('- 请求分布均匀性: total=%d max=%d min=%d max/min=%.3f imbalance=%.2f%% '
+                   'chi2=%.2f (df=%d, thr=%.2f) => **%s**' % tuple(un))
+    er = m.get('entry_fifo_dedup_request_fifo')
+    if er:
+        out.append('- 入口 dedup_request_fifo: peak=%d/%d (%.1f%%), avgOcc=%.2f (%.1f%%)'
+                   % (er[1], er[0], er[2], er[3], er[4]))
+    out.append('')
+    out.append('## 6. PTW')
     out.append('| 指标 | 值 |')
     out.append('|---|---|')
     out.append('| PTW 总任务(主+预取) | %s |' % g('ptw_completed', '{:d}'))

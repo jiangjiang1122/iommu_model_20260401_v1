@@ -133,7 +133,7 @@ uint64_t msi_pa(unsigned d, unsigned v) { return 0x40000000ULL + uint64_t(d)*0x1
 constexpr unsigned chan_groups(unsigned c) { return GROUPS_BASE + (c < GROUPS_REM ? 1u : 0u); }
 constexpr unsigned chan_tails(unsigned c) { return FIXED_TOTAL ? (c == 0u ? 1u : 0u) : 1u; }
 constexpr uint64_t chan_count(unsigned c, unsigned e) {
-    return e == 1 ? 2 : e == 2 ? 16 : uint64_t(chan_groups(c)) * PKTS_PER_GROUP + chan_tails(c);
+    return e == 1 ? 2 : e == 2 ? 16 : uint64_t(chan_groups(c)) * PKTS_PER_GROUP +  (c);
 }
 constexpr uint64_t total_count(unsigned e) {
     uint64_t s = 0;

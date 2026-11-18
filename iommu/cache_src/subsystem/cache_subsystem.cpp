@@ -1086,6 +1086,9 @@ void CacheSubsystem::dedup_update_enqueue(CacheMessage& msg) {
     e.deadline = sc_time_stamp() + sc_time(DEDUP_DELAYED_UPDATE_TIMER_NS, SC_NS);
     delayed_upd_deque_.push_back(e);
     delayed_upd_enq_total_++;
+    // [STAT] 写入时采样当前占用(含本笔, 到达加权平均; 出队不采样)
+    delayed_upd_push_occ_sum_ += delayed_upd_deque_.size();
+    delayed_upd_push_cnt_++;
     if (delayed_upd_first_enq_ns_ < 0.0) delayed_upd_first_enq_ns_ = now_ns;
     if ((int)delayed_upd_deque_.size() > delayed_upd_occ_peak_)
         delayed_upd_occ_peak_ = (int)delayed_upd_deque_.size();
@@ -1226,6 +1229,8 @@ void CacheSubsystem::dedup_hash_process_thread() {
         if (!is_upd) {
             int occ = dedup_ram_fifo_[ram_id]->num_available();
             if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
+            dedup_ram_push_occ_sum_[ram_id] += occ;
+            dedup_ram_push_cnt_[ram_id]++;
         }
         dedup_hash_task_count_++;
         dedup_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
@@ -1245,6 +1250,8 @@ void CacheSubsystem::dedup_hash_process_thread() {
         // [STAT] FIFO占用峰值与Hash单元统计
         int occ = dedup_ram_fifo_[ram_id]->num_available();
         if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
+        dedup_ram_push_occ_sum_[ram_id] += occ;
+        dedup_ram_push_cnt_[ram_id]++;
         dedup_hash_task_count_++;
         dedup_hash_busy_ns_ += (wr_end_ns - dequeue_ns);
 #endif
@@ -1718,6 +1725,13 @@ void CacheSubsystem::fifo_util_sampler_thread() {
     fifo_stat_dedup_upd_ = FifoOccStat{"dedup_update_fifo",  64,   0, 0.0, -1.0, -1.0};
     fifo_stat_pt_hit_rsp_  = FifoOccStat{"pt_hit_response_fifo",  32, 0, 0.0, -1.0, -1.0};
     fifo_stat_pt_miss_rsp_ = FifoOccStat{"pt_miss_response_fifo", 32, 0, 0.0, -1.0, -1.0};
+    // [STAT需求] 去重 per-RAM ram_fifo 采样初始化(深度=ram_fifo_depth, 名字静态缓冲保活)
+    static char ram_fifo_names[DEDUP_MAX_RAMS][24];
+    const int ram_depth = (int)cfg_.dedup_cache.ram_fifo_depth;
+    for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+        snprintf(ram_fifo_names[i], sizeof(ram_fifo_names[i]), "dedup_ram_fifo[%u]", i);
+        fifo_stat_dedup_ram_[i] = FifoOccStat{ram_fifo_names[i], ram_depth, 0, 0.0, -1.0, -1.0};
+    }
     const double dt = clock_period_.to_seconds() * 1e9;
     while (true) {
         wait(clock_period_);
@@ -1728,6 +1742,8 @@ void CacheSubsystem::fifo_util_sampler_thread() {
         sample_fifo_occ(fifo_stat_dedup_upd_, dedup_update_fifo.num_available(),  now, dt);
         sample_fifo_occ(fifo_stat_pt_hit_rsp_,  pt_hit_response_fifo.num_available(),  now, dt);
         sample_fifo_occ(fifo_stat_pt_miss_rsp_, pt_miss_response_fifo.num_available(), now, dt);
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i)
+            sample_fifo_occ(fifo_stat_dedup_ram_[i], dedup_ram_fifo_[i]->num_available(), now, dt);
     }
 }
 
@@ -1747,6 +1763,40 @@ void CacheSubsystem::print_fifo_util_report() const {
         const double avg_util  = s.depth > 0 ? 100.0 * avg_occ / s.depth : 0.0;
         printf("  %-22s %7d %7d %9.1f%% %9.2f %9.1f%%\n",
                s.name, s.depth, s.peak, peak_util, avg_occ, avg_util);
+    }
+    // [STAT需求] 去重 per-RAM ram_fifo 占用(峰值+时间加权平均) + 请求分布均匀性
+    if (dedup_num_rams_ > 0) {
+        printf("  ---- Dedup per-RAM ram_fifo (depth=%d) ----\n", (int)cfg_.dedup_cache.ram_fifo_depth);
+        uint64_t tot_req = 0;
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) tot_req += dedup_ram_req_count_[i];
+        const double exp_req = (double)tot_req / dedup_num_rams_;
+        double chi2 = 0.0;
+        uint64_t mx = 0, mn = ~0ULL;
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            const FifoOccStat& s = fifo_stat_dedup_ram_[i];
+            const double win = s.last_nonempty_ns - s.first_nonempty_ns;
+            const double avg_occ = (win > 0.0) ? s.integral_occ_ns / win : 0.0;
+            const double peak_util = s.depth > 0 ? 100.0 * s.peak / s.depth : 0.0;
+            const double avg_util  = s.depth > 0 ? 100.0 * avg_occ / s.depth : 0.0;
+            const uint64_t rq = dedup_ram_req_count_[i];
+            if (rq > mx) mx = rq;
+            if (rq < mn) mn = rq;
+            if (exp_req > 0.0) chi2 += (rq - exp_req) * (rq - exp_req) / exp_req;
+            const double pavg = dedup_ram_push_cnt_[i]
+                ? (double)dedup_ram_push_occ_sum_[i] / dedup_ram_push_cnt_[i] : 0.0;
+            printf("  %-22s %7d %7d %9.1f%% %9.2f %9.1f%%   req=%llu (%.2f%%)  push=%.2f (%.1f%%)\n",
+                   s.name, s.depth, s.peak, peak_util, avg_occ, avg_util,
+                   (unsigned long long)rq, tot_req ? 100.0 * rq / tot_req : 0.0,
+                   pavg, s.depth > 0 ? 100.0 * pavg / s.depth : 0.0);
+        }
+        const double thr = (dedup_num_rams_ == 4) ? 7.81 : 14.07;  // df=3 / df=7, p<0.05
+        const double imbalance = (mn > 0 && mn != ~0ULL) ? 100.0 * (mx - mn) / (double)mn : 0.0;
+        printf("  Request uniformity: total=%llu max=%llu min=%llu max/min=%.3f imbalance=%.2f%% chi2=%.2f (df=%u, thr=%.2f) => %s\n",
+               (unsigned long long)tot_req, (unsigned long long)mx,
+               (mn == ~0ULL ? 0ULL : (unsigned long long)mn),
+               (mn > 0 && mn != ~0ULL) ? (double)mx / mn : 0.0,
+               imbalance, chi2, dedup_num_rams_ - 1, thr,
+               (chi2 <= thr) ? "BALANCED" : "SKEWED");
     }
     printf("  注: 采样步长=%.1fns; AvgOcc/AvgUtil 时间加权窗口=[首包非空~末包非空], 各FIFO独立。\n",
            clock_period_.to_seconds() * 1e9);
@@ -2093,6 +2143,11 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
         printf("    Pending at report:      %u\n", (unsigned)delayed_upd_deque_.size());
         printf("    Occ peak:               %d / %u\n", delayed_upd_occ_peak_, DEDUP_DELAYED_UPDATE_FIFO_DEPTH);
         printf("    Occ avg (enq->report):  %.2f\n", span > 0.0 ? integral / span : 0.0);
+        printf("    Occ avg (push-sampled): %.2f / %u (%.1f%%)  [n=%lu]\n",
+               delayed_upd_push_cnt_ ? (double)delayed_upd_push_occ_sum_ / delayed_upd_push_cnt_ : 0.0,
+               DEDUP_DELAYED_UPDATE_FIFO_DEPTH,
+               delayed_upd_push_cnt_ ? 100.0 * delayed_upd_push_occ_sum_ / delayed_upd_push_cnt_ / DEDUP_DELAYED_UPDATE_FIFO_DEPTH : 0.0,
+               (unsigned long)delayed_upd_push_cnt_);
         printf("    Push hard-full blocks:  %lu (max %.1f ns)\n",
                (unsigned long)delayed_upd_push_block_cnt_, delayed_upd_push_block_max_ns_);
         printf("    Residency avg/max:      %.1f / %.1f ns\n",

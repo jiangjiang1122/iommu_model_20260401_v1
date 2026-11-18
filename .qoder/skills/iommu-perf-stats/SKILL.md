@@ -1,6 +1,6 @@
 ---
 name: iommu-perf-stats
-description: Extracts and reports the complete IOMMU performance metric set from an iommu_model SystemC simulation log — per-device task counts & Jain fairness, IOMMU IOPS, global/read/write concurrency peaks, IO avg/max e2e, input/output port inject intervals, DC/PC/PT/MSIPT/Walker(VS)/S2-Walker cache hit rates (incl. PT 512B-data vs SQ/CQ/MSI-control split), dedup cache hit rate + hash-conflict count & ratio + bypass task count & ratio, dedup Buffer peak/avg-occupancy/full-bypass/hold-time breakdown (W1/W2/W3 for MAIN & SUSP), and PTW totals (main+prefetch, main normal vs bypass, ratio to IOMMU data tasks), PTW concurrency avg/peak/limit, PTW IOPS, main/prefetch avg DDR reads, PTW exec latency, task-group exec latency, and PTW inject/output task intervals. Use when the user asks to 统计/汇总/提取/对比 IOMMU 性能指标、性能参数、缓存命中率、PTW 或去重 Buffer 统计, or to parse an iommu_model / multidev simulation log.
+description: Extracts and reports the complete IOMMU performance metric set from an iommu_model SystemC simulation log — per-device task counts & Jain fairness, IOMMU IOPS, global/read/write concurrency peaks, IO avg/max e2e, input/output port inject intervals, DC/PC/PT/MSIPT/Walker(VS)/S2-Walker cache hit rates (incl. PT 512B-data vs SQ/CQ/MSI-control split), dedup cache hit rate + hash-conflict count & ratio + bypass task count & ratio, dedup Buffer peak/avg-occupancy/full-bypass/hold-time breakdown (W1/W2/W3 for MAIN/PF/SUSP), dedup hash backpressure count/time & ns-per-task, delayed-update FIFO avg/peak occupancy & utilization + dequeue split (timer/pressure/bufferfull) + residency, per-RAM dedup ram_fifo peak/avg occupancy & utilization + per-RAM request share + distribution uniformity (max/min, imbalance, chi2 verdict), and PTW totals (main+prefetch, main normal vs bypass, ratio to IOMMU data tasks), PTW concurrency avg/peak/limit, PTW IOPS, main/prefetch avg DDR reads, PTW exec latency, task-group exec latency, and PTW inject/output task intervals. Use when the user asks to 统计/汇总/提取/对比 IOMMU 性能指标、性能参数、缓存命中率、PTW 或去重 Buffer 统计, or to parse an iommu_model / multidev simulation log.
 ---
 
 # IOMMU 全量性能指标统计
@@ -34,7 +34,8 @@ wsl bash -lc "python3 /mnt/d/<proj>/.qoder/skills/iommu-perf-stats/scripts/extra
 2. **吞吐/并发/e2e/端口间隔**：Sim Time、IOMMU IOPS、完成事务、全局/Read/Write 并发 peak/max、IO avg/max e2e、输入/输出端口注入平均间隔。
 3. **Cache 命中率**：DC、PC、PT(总)、MSIPT、Walker C2/C3(内部表)、Walker(VS) C3/C2、S2 Walker C3 与整体；以及 **PT 512B 数据命中率** 与 **PT SQ/CQ/MSI 控制命中率** 的拆分。
 4. **去重 Cache/Buffer**：去重命中率、hash 冲突次数及**占总查询比例**、bypass 任务数及**占总数据任务比例**、Buffer Peak 与平均占用、Buffer 满 bypass（正常预取）、持有延时 avg/max/min 及 MAIN/SUSP 的 W1/W2/W3 细分。
-5. **PTW**：总任务(主+预取)、主任务(正常/bypass 拆分)、预取任务、**占 IOMMU 全部输入比**与**占 IOMMU 数据任务比**、并发 peak/max 与平均占用(时间加权)与利用率、PTW IOPS、主/预取平均 DDR 次数、执行延时 ALL/MAIN 平均、任务组(1主+D预取)平均执行延时、注入/输出任务平均间隔。
+5. **去重单元 RAM / 延迟更新 FIFO**：hash 反压次数/时长与每笔 ns；延迟更新 FIFO depth/timer、平均/峰值占用与利用率、**出队三分占比**(c1 timer 延时到达 / c2 pressure 近满 / c3 bufferfull Buffer满)与次数、驻留 avg/max；**per-RAM ram_fifo** 逐组 depth/peak/peakUtil/avgOcc/avgUtil + req 数与占比、跨 RAM 平均占用、**请求分布均匀性**(max/min、imbalance、chi2 判定 BALANCED/SKEWED)；入口 dedup_request_fifo peak/avg。
+6. **PTW**：总任务(主+预取)、主任务(正常/bypass 拆分)、预取任务、**占 IOMMU 全部输入比**与**占 IOMMU 数据任务比**、并发 peak/max 与平均占用(时间加权)与利用率、PTW IOPS、主/预取平均 DDR 次数、执行延时 ALL/MAIN 平均、任务组(1主+D预取)平均执行延时、注入/输出任务平均间隔。
 
 ## 派生比例定义（脚本自动计算）
 
@@ -44,6 +45,8 @@ wsl bash -lc "python3 /mnt/d/<proj>/.qoder/skills/iommu-perf-stats/scripts/extra
 - PT 数据命中率 = `(pt_cache.hits − ctrl_pt_hits) / total_data_tasks`。
 - PTW 占数据任务比 = `ptw_completed / total_data_tasks`。
 - 主任务 normal = `ptw_main − dedup_bypass`；主任务 bypass = `dedup_bypass`（hash 冲突旁路进 PTW 的主任务）。
+- 去重 hash 每笔 ns = `dedup_hash_busy / dedup_hash_tasks`。
+- 延迟更新 FIFO 平均/峰值利用率 = `occ / depth`；出队占比 = `dupd_cX / dupd_enq`（c1/c2/c3 之和=100%）。
 
 ## 注意事项
 
@@ -51,3 +54,5 @@ wsl bash -lc "python3 /mnt/d/<proj>/.qoder/skills/iommu-perf-stats/scripts/extra
 - 日志需完整跑完（含 `[MULTIDEV_RESULT]`/统计段）；若被 timeout 截断，指标会显示 N/A，应先确认日志尾部。
 - `Avg output interval` 在多个段重复出现，脚本按段名区分（端口段 vs PTW 段 vs PT Cache 段），勿改用全局 grep。
 - 对比不同 N/参数时，对每个日志各跑一次脚本，再横向对齐同名指标。
+- **per-RAM ram_fifo 段**仅存在于带 per-RAM 采样插桩的 build（`cache_subsystem.cpp` 的 `fifo_util_sampler_thread` 扩展，输出 `---- Dedup per-RAM ram_fifo ----` 子表 + `Request uniformity` 行）。旧日志无该段时脚本自动省略 per-RAM 表与均匀性行，其余指标不受影响（向后兼容）。
+- 延迟更新 FIFO 的 `Drained c3 (bufferfull):` 冒号后**无空格**（c1/c2 有空格），正则须用 `\s*` 而非 `\s+`，否则 c3 静默 N/A。

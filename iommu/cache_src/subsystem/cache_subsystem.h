@@ -486,6 +486,9 @@ private:
     uint64_t dedup_ram_prefetch_count_[DEDUP_MAX_RAMS] = {};  // 预取任务数
     double   dedup_ram_busy_ns_[DEDUP_MAX_RAMS]        = {};  // RAM原子段忙总时长
     int      dedup_ram_fifo_peak_[DEDUP_MAX_RAMS]      = {};  // FIFO占用峰值
+    // [STAT] per-RAM ram_fifo 写入时采样占用(到达加权, 非时间加权): push 后记录 num_available 累加/计数
+    uint64_t dedup_ram_push_occ_sum_[DEDUP_MAX_RAMS]   = {};
+    uint64_t dedup_ram_push_cnt_[DEDUP_MAX_RAMS]       = {};
     double   dedup_ram_first_start_ns_ = -1.0;                // 首任务开始(全RAM)
     double   dedup_ram_last_end_ns_    = 0.0;                 // 末任务结束(全RAM)
     // [STAT] 预取丢弃计数(inside_fifo满时nb_write失败, 保功能防死锁)
@@ -509,6 +512,8 @@ private:
     // [STAT需求] PT Cache 响应链 pt_hit_response_fifo / pt_miss_response_fifo 占用采样
     FifoOccStat fifo_stat_pt_hit_rsp_;
     FifoOccStat fifo_stat_pt_miss_rsp_;
+    // [STAT需求] 去重 per-RAM ram_fifo 占用采样(峰值+时间加权平均), 仿照入口FIFO段
+    FifoOccStat fifo_stat_dedup_ram_[DEDUP_MAX_RAMS];
     static void sample_fifo_occ(FifoOccStat& s, int occ, double now, double dt);
     // [hash冲突] 去重cache set满(无空way且不可替换)冲突统计:
     //   主请求MISS且set满 -> 任务bypass直转PTW(不写cacheline/不占Buffer)
@@ -537,6 +542,9 @@ private:
     uint64_t delayed_upd_drain_c3_ = 0;    // 条件3: Buffer满出队笔数
     uint64_t delayed_upd_group_cnt_ = 0;   // 按组出队次数(条件2/3)
     int      delayed_upd_occ_peak_ = 0;
+    // [STAT] 写入时采样占用(到达加权): 每次 push 后记录当前 size, 累加/计数求均值(非时间加权)
+    uint64_t delayed_upd_push_occ_sum_ = 0;
+    uint64_t delayed_upd_push_cnt_ = 0;
     double   delayed_upd_occ_weighted_ns_ = 0.0;
     double   delayed_upd_occ_last_ns_ = -1.0;
     double   delayed_upd_first_enq_ns_ = -1.0;

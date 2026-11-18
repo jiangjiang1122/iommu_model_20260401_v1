@@ -1044,12 +1044,13 @@ public:
         {
             // [多核] 逐核校验完成事件/命令数/信用守恒, 再聚合校验 CQ/iofence/失效语义。
             const uint64_t done=top.cpu_inval_4kb_done_total;
-            uint64_t meas_events=0, drops=0, cmds=0, groups=0;
+            uint64_t meas_events=0, drops=0, cmds=0, groups=0, finals=0;
             for(unsigned j=0;j<NCHAN;++j) {
                 const uint64_t ev=cpu_inval_done_events[j];
                 const uint64_t gj=chan_groups(j);           // 本核 NVMe 组数(per_channel: =NUM_PAGES)
                 const uint64_t expect_j=INVAL_LAZY?(ev+INVAL_LAZY_N-1)/INVAL_LAZY_N:ev;
                 meas_events+=ev; drops+=cpu_inval_dropped_pre[j]; cmds+=cpu_inval_cmds[j]; groups+=gj;
+                finals+=cpu_inval_final_cmds[j];
                 std::cout << "[CPU_INVAL_CHECK] cpu=" << j
                           << " done_per_cpu=" << top.cpu_inval_4kb_done_per_cpu[j]
                           << " meas_events=" << ev << " groups=" << gj
@@ -1096,7 +1097,12 @@ public:
             // ---- 失效语义自检 ----
             if(INVAL_LAZY) {
                 require(lib_rec==cmds,"lazy: 每笔 VMA 100 都应进入 LIB(延时失效策略)");
-                require(top.cache_sub.pt_lazy_inval_drops()+top.cache_sub.walker_lazy_inval_drops()>0,
+                // [N>=GROUPS 退化档] 当 INVAL_LAZY_N>=每核组数(如1024>909)时, 运行中计数器
+                //   到不了 N, 全部失效都是收尾 final-drain(cmds==finals), 失效后已无查询,
+                //   drops 必为 0 => 此时不要求 drops>0; 只要存在中途失效(cmds>finals)
+                //   仍强制 drops>0, 保留"延时失效未生效"的真 bug 抓取能力。
+                require(top.cache_sub.pt_lazy_inval_drops()+top.cache_sub.walker_lazy_inval_drops()>0
+                        || cmds==finals,
                         "lazy: 延时失效未在查询旁路生效(drops=0)");
             } else {
                 require(lib_rec==0,"strict: VMA 010 精准失效不得启动延时失效策略(LIB 记录应为0)");

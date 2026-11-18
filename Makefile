@@ -827,7 +827,7 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_inval_strict)
         -DTEST_CFG_DDR_INTERNAL_LATENCY_NS=$(MULTICHAN_DDR_NS) $(MULTICHAN_LAYOUT_FLAGS)
 else ifeq ($(TEST), rand4k_msi_mix_multichan_inval_lazy)
     # [单设备-单通道-lazy模式缓存失效场景 + CQ反压闭环] 与 inval_strict 共用 CQ 异步模型,
-    #   差别在 CPU 失效进程: 每 INVAL_LAZY_N(默认32, 可配 16/32/64/128/256) 个"4KB页最后一个TLP包返回"
+    #   差别在 CPU 失效进程: 每 INVAL_LAZY_N(默认32, 可配 16/32/64/128/256/512/1024) 个"4KB页最后一个TLP包返回"
     #   事件后发一笔 IOTINVAL.VMA **100** (GV=1,AV=0,PSCV=0,GSCID=1): 扫描缓存表匹配
     #   GSCID, 清除 PT Cache 与 Walker Cache 中所有 GSCID 匹配的行(本场景全部行 GSCID=1,
     #   等价整表清除), 并由 IOMMU 内部**启动延时失效策略**(LIB 记录 + VN 递增, 查询
@@ -855,10 +855,11 @@ else ifeq ($(TEST), rand4k_msi_mix_multichan_inval_lazy)
     INVAL_LAZY_N ?= 32
     INVAL_CQ_DEPTH ?= 8192
     # [INVAL_LAZY_N 白名单] N 决定每核在途窗口(cpu_count*N 组): 取非 2 的幂会与
-    #   GROUPS(909) 不整除, N>GROUPS 则每核一组都发不满、只剩 final-drain 收尾,
-    #   两种都会让失效条数/并发口径失真 => 只允许下面 5 档。
-    ifeq ($(filter $(INVAL_LAZY_N),16 32 64 128 256),)
-        $(error INVAL_LAZY_N must be 16, 32, 64, 128 or 256)
+    #   GROUPS(909) 不整除; N>=GROUPS(如1024) 时每核 909 组一次发完、运行中计数器
+    #   到不了 N, 只剩 final-drain 一笔失效/核(近乎零中途失效的极限档)。
+    #   为保留口径可控只允许下面 7 档。
+    ifeq ($(filter $(INVAL_LAZY_N),16 32 64 128 256 512 1024),)
+        $(error INVAL_LAZY_N must be 16, 32, 64, 128, 256, 512 or 1024)
     endif
     # [防死锁] 见 inval_strict 分支同注: lazy 全局失效的 miss 风暴会让 agg_flush
     #   阻塞在 pt_update_fifo 上, 切断 dedup Buffer 的唯一释放通路 => 环形等待死锁。
