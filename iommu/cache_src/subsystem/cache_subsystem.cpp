@@ -115,9 +115,17 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
       walker_front_response_fifo(16),
       walker_join_fifo(64),
       walker_serial_fifo(64),
+#if TEST_CFG_DEDUP_UNIT_V1123
+      // [去重单元机制优化 1123] 外层队列深度: req=8, inter=1,
+      //   dedup_update_fifo 退化为 drain->upd_hash 内部衔接(深度24, 假设A2)。
+      dedup_request_fifo(DEDUP_OUT_REQ_FIFO_DEPTH),
+      dedup_update_fifo(DEDUP_UPD_HANDOFF_DEPTH),
+      dedup_inside_request_fifo(DEDUP_OUT_INTER_FIFO_DEPTH),
+#else
       dedup_request_fifo(64),
       dedup_update_fifo(64),
       dedup_inside_request_fifo(32),
+#endif
 #if TEST_CFG_DEDUP_DELAYED_UPDATE
       delayed_upd_timer_eq_("delayed_upd_timer_eq"),
 #endif
@@ -191,12 +199,22 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     }
     SC_THREAD(pt_hash_thread);
     // [dedup多RAM] 去重Cache多RAM改造: Scheduler + Hash单元 + 每组RAM独立worker(sc_spawn)
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [去重单元机制优化 1123] 新拓扑: 取消中央scheduler与单Hash, 改为
+    //   3个类型化Hash单元(req/inter/upd, 各1ns) + 延时更新排空线程(标准机制)
+    //   + 每bank响应写出线程(G3)。旧线程不注册(定义保留供V1123=0 A/B臂)。
+    SC_THREAD(dedup_req_hash_thread);
+    SC_THREAD(dedup_inter_hash_thread);
+    SC_THREAD(dedup_upd_hash_thread);
+    SC_THREAD(dedup_delayed_update_drain_thread);
+#else
     SC_THREAD(dedup_scheduler_thread);
 #if TEST_CFG_DEDUP_DELAYED_UPDATE
     // [去重延迟更新] 延迟FIFO排空线程: 三条件(定时器/压力/Buffer满)转入dedup_update_fifo
     SC_THREAD(dedup_delayed_update_drain_thread);
 #endif
     SC_THREAD(dedup_hash_process_thread);
+#endif
     // [walker多RAM] Walker Cache 多RAM改造: Hash线程 + 每子表x每RAM组独立worker + Join线程
     // 物理拓扑: C1/C2/C3三子表各自独立 num_rams 组RAM, 共 3*num_rams 个worker,
     // 同一lookup的三级子查询天然并行; worker索引=(level-1)*num_rams+ram_id
@@ -231,13 +249,57 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     
     // [NEW] 初始化PT Cache去重功能
     dedup_buffer_ = new DedupBuffer();
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [去重单元机制优化 1123] dedup_buffer_=聚合影子(全4bank合计口径, 占用率分母512);
+    //   4个bank实例与去重RAM一一绑定(每bank 128 entry, alloc/free自动同步累计到影子)。
+    dedup_buffer_->init(0xFFFFFFFFu, nullptr, PT_DEDUP_BUFFER_SIZE);
+    for (uint32_t b = 0; b < DEDUP_NUM_BANKS; ++b) {
+        dedup_banks_[b] = new DedupBuffer();
+        dedup_banks_[b]->init(b, dedup_buffer_, DEDUP_BUFFER_PER_BANK);
+    }
+#endif
     pt_dedup_enabled_ = true;
     // [dedup多RAM] 创建独立 dedup_cache (几何由 cfg.dedup_cache 配置) + RAM分组
     dedup_cache_ = std::make_unique<DedupCache>(cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways);
     dedup_cache_->configure_multi_ram(cfg.dedup_cache.num_rams);
     dedup_num_rams_ = dedup_cache_->num_rams();
     assert(dedup_num_rams_ >= 1 && dedup_num_rams_ <= DEDUP_MAX_RAMS);
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [1123] 几何约束: 4 Bank x 64 CL = 256 (num_sets=64 x num_ways=4 x num_rams=4)
+    assert(dedup_num_rams_ == DEDUP_NUM_BANKS && "V1123 要求 dedup_cache.num_rams=4");
+    assert(dedup_cache_->total_lines() == 256 && "V1123 要求去重Cache总cacheline=256");
+#endif
     {
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // [1123] 每RAM三条类型化前置FIFO: req(32)/inter(16)/upd(2) + 响应staging(64)
+        const int req_depth  = static_cast<int>(DEDUP_RAM_REQ_FIFO_DEPTH);
+        const int pf_depth   = static_cast<int>(DEDUP_RAM_INTER_FIFO_DEPTH);
+        const int upd_depth  = static_cast<int>(DEDUP_RAM_UPD_FIFO_DEPTH);
+        const int stage_depth = static_cast<int>(DEDUP_RSP_STAGE_DEPTH);
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            char fname[36];
+            snprintf(fname, sizeof(fname), "dedup_ram_fifo_%u", i);
+            dedup_ram_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, req_depth));
+            snprintf(fname, sizeof(fname), "dedup_ram_inter_fifo_%u", i);
+            dedup_ram_inter_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, pf_depth));
+            snprintf(fname, sizeof(fname), "dedup_ram_upd_fifo_%u", i);
+            dedup_ram_upd_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, upd_depth));
+            snprintf(fname, sizeof(fname), "dedup_rsp_stage_%u", i);
+            dedup_rsp_stage_fifo_.emplace_back(
+                std::make_unique<sc_fifo<CacheMessage>>(fname, stage_depth));
+        }
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            sc_spawn(sc_bind(&CacheSubsystem::dedup_ram_worker_thread, this,
+                             static_cast<int>(i)));
+        }
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            sc_spawn(sc_bind(&CacheSubsystem::dedup_rsp_writer_thread, this,
+                             static_cast<int>(i)));
+        }
+#else
         const int fifo_depth = static_cast<int>(cfg.dedup_cache.ram_fifo_depth);
         for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
             char fname[36];
@@ -257,13 +319,32 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
             sc_spawn(sc_bind(&CacheSubsystem::dedup_ram_worker_thread, this,
                              static_cast<int>(i)));
         }
+#endif
     }
+#if TEST_CFG_DEDUP_UNIT_V1123
+    printf("[CACHE_SUBSYSTEM][1123] dedup new topology ON: banks=4 x (req%u/inter%u/upd%u), "
+           "outer req=%u/inter=%u/delayed_upd=%u(timer=%uns,margin=%u), hash=3x%uns, "
+           "atomic=%uns, Buffer=4x%u(total %u), rsp_stage=%u/bank, CL=%u(sets%u x ways%u)\n",
+           DEDUP_RAM_REQ_FIFO_DEPTH, DEDUP_RAM_INTER_FIFO_DEPTH, DEDUP_RAM_UPD_FIFO_DEPTH,
+           DEDUP_OUT_REQ_FIFO_DEPTH, DEDUP_OUT_INTER_FIFO_DEPTH,
+           DEDUP_DELAYED_UPDATE_FIFO_DEPTH, DEDUP_DELAYED_UPDATE_TIMER_NS,
+           DEDUP_DELAYED_PRESSURE_MARGIN, DEDUP_HASH_CYCLES, DEDUP_ATOMIC_CYCLES,
+           DEDUP_BUFFER_PER_BANK, PT_DEDUP_BUFFER_SIZE, DEDUP_RSP_STAGE_DEPTH,
+           dedup_cache_->total_lines(), cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways);
+#if defined(TEST_CFG_PT_DEDUP_BUFFER_SIZE)
+    printf("[CACHE_SUBSYSTEM][1123] NOTE: TEST_CFG_PT_DEDUP_BUFFER_SIZE=%u ignored "
+           "(v1123 Buffer fixed = 4 x %u = %u)\n",
+           (unsigned)TEST_CFG_PT_DEDUP_BUFFER_SIZE, DEDUP_BUFFER_PER_BANK, PT_DEDUP_BUFFER_SIZE);
+#endif
+    fflush(stdout);
+#else
     printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u, upd_prio_lane=%d, upd_atomic=%u+chain*%uns, prio=UPD>INS>REQ)\n",
            cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways,
            dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth,
            static_cast<int>(TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE),
            DEDUP_UPD_BASE_CYCLES, DEDUP_UPD_FLUSH_CYCLES);
     fflush(stdout);
+#endif
 
     // [失效] 配置并注入共享 LIB: PT 与 Walker 共用同一个 LIB 与全局 VN
     inval_enabled_ = cfg.invalidation.enable;
@@ -279,8 +360,16 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
 
 #if TEST_CFG_MULTI_DEVICE_SCENE
 bool CacheSubsystem::md_quiescent() const {
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [1123] 在途判据: Σbank预留 + 聚合影子占用(dedup_buffer_ 已含全部bank)
+    uint32_t reserved_sum = 0;
+    for (uint32_t b = 0; b < DEDUP_NUM_BANKS; ++b) reserved_sum += dedup_reserved_bank_[b];
+    if (md_active_ || !walker_join_pending_.empty() || pt_inval_remaining_ || walker_inval_remaining_ ||
+        reserved_sum || (dedup_buffer_ && dedup_buffer_->get_valid_count())) return false;
+#else
     if (md_active_ || !walker_join_pending_.empty() || pt_inval_remaining_ || walker_inval_remaining_ ||
         dedup_reserved_count_ || (dedup_buffer_ && dedup_buffer_->get_valid_count())) return false;
+#endif
     const sc_fifo<CacheMessage>* fifos[] = {
         &dc_request_fifo,&pc_request_fifo,&pt_request_fifo,&walker_request_fifo,&msi_request_fifo,
         &walker_front_request_fifo,&walker_front_response_fifo,&dedup_request_fifo,&dedup_update_fifo,
@@ -292,7 +381,12 @@ bool CacheSubsystem::md_quiescent() const {
         &walker_invalidate_response_fifo,&msi_invalidate_response_fifo,&invalidation_request_fifo,
         &invalidation_response_fifo,&walker_join_fifo,&walker_serial_fifo};
     for(auto* f:fifos) if(f->num_available()) return false;
-#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [1123] 新拓扑全部在途通道都必须排空: per-RAM upd/inter + 响应staging
+    for (const auto& f : dedup_ram_upd_fifo_) if (f->num_available()) return false;
+    for (const auto& f : dedup_ram_inter_fifo_) if (f->num_available()) return false;
+    for (const auto& f : dedup_rsp_stage_fifo_) if (f->num_available()) return false;
+#elif TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
     // [释放优先通道] 新增通道也必须排空, 否则会在释放消息未刷完时就判定静止。
     if (dedup_upd_hash_in_fifo.num_available()) return false;
     for (const auto& f : dedup_ram_upd_fifo_) if (f->num_available()) return false;
@@ -1119,7 +1213,13 @@ void CacheSubsystem::dedup_delayed_update_drain_thread() {
             }
         }
         // c3: Buffer满(唤醒时复核)
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // [1123] 条件3口径: Buffer已拆4 bank, 需"全部bank满"才触发加速排空
+        //   (任一bank满时由该bank worker门控req/inter, 释放仍走无门控的upd通道)。
+        if (!delayed_upd_deque_.empty() && banks_all_full()) {
+#else
         if (!delayed_upd_deque_.empty() && !dedup_admission_ok()) {
+#endif
             const uint32_t sz = (uint32_t)delayed_upd_deque_.size();
             delayed_upd_drain_group(grp < sz ? grp : sz, 3);
             continue;
@@ -1244,6 +1344,142 @@ void CacheSubsystem::dedup_hash_process_thread() {
     }
 }
 
+#if TEST_CFG_DEDUP_UNIT_V1123
+// ============================================================
+// [去重单元机制优化 1123] 三个类型化 Hash 单元线程
+//   req:   dedup_request_fifo(8)  -> hash 1ns -> dedup_ram_fifo_[ram](32)
+//   inter: dedup_inside_request_fifo(1) -> hash 1ns -> dedup_ram_inter_fifo_[ram](8)
+//   upd:   dedup_update_fifo(24衔接, 由drain线程写入) -> hash 1ns -> dedup_ram_upd_fifo_[ram](2)
+// 门控(需求4(6)): req/inter hash 在"4 bank Buffer全满"时不出队(反压最外层队列);
+//   upd hash 永无门控(G2: 释放通路独立)。目标RAM FIFO满则阻塞写=自然反压上游
+//   (req hash 被堵住会经 dedup_request_fifo(8) 传导至 pt_ram_worker 的MISS转发)。
+// 死锁自检: worker 不阻塞在任何写入上(预取生成nb_write满则丢G1, 响应写经staging
+//   解耦G3), 故任一RAM FIFO最多被"上游hash+在途原子段"有限顶住, 无环形等待。
+// ============================================================
+void CacheSubsystem::dedup_req_hash_thread() {
+    while (true) {
+        if (dedup_request_fifo.num_available() == 0) {
+            wait(dedup_request_fifo.data_written_event());
+            continue;
+        }
+        if (banks_all_full()) {
+            // 外层req出队反压(4 bank全满); 同时唤醒排空线程复核条件3
+            dedup_buffer_full_notify_ev_.notify();
+            wait(dedup_banks_[0]->free_event | dedup_banks_[1]->free_event |
+                 dedup_banks_[2]->free_event | dedup_banks_[3]->free_event |
+                 dedup_admission_released_ev_ |
+                 dedup_request_fifo.data_written_event());
+            continue;
+        }
+        CacheMessage msg = dedup_request_fifo.read();
+        {
+            int occ = dedup_request_fifo.num_available();
+            if (occ > dedup_request_fifo_peak_) dedup_request_fifo_peak_ = occ;
+        }
+        const double dequeue_ns = sc_time_stamp().to_seconds() * 1e9;
+        wait(clock_period_ * static_cast<int>(DEDUP_HASH_CYCLES));
+        uint32_t ram_id = dedup_cache_->compute_ram_id(msg.gscid, msg.pscid, msg.iova);
+        sc_fifo<CacheMessage>& target = *dedup_ram_fifo_[ram_id];
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (target.num_free() == 0) {
+            dedup_v1123_hash_bp_cnt_[0]++;
+            printf("[DEDUP_HASH_BP] task_id=%u -> RAM%u reqFIFO full, req-hash blocked\n",
+                   (unsigned)msg.task_id, ram_id);
+            fflush(stdout);
+        }
+        target.write(msg);  // 阻塞写 = 反压
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_v1123_hash_bp_ns_[0] += (wr_end_ns - wr_start_ns);
+        dedup_v1123_hash_cnt_[0]++;
+        dedup_v1123_hash_busy_ns_[0] += (wr_end_ns - dequeue_ns);
+        int occ = target.num_available();
+        if (occ > dedup_ram_fifo_peak_[ram_id]) dedup_ram_fifo_peak_[ram_id] = occ;
+        dedup_ram_push_occ_sum_[ram_id] += occ;
+        dedup_ram_push_cnt_[ram_id]++;
+    }
+}
+
+void CacheSubsystem::dedup_inter_hash_thread() {
+    while (true) {
+        if (dedup_inside_request_fifo.num_available() == 0) {
+            wait(dedup_inside_request_fifo.data_written_event());
+            continue;
+        }
+        if (banks_all_full()) {
+            // 外层inter(预取)出队反压(4 bank全满, 需求4(6)); 预取不占Buffer但仍受门控(A3)
+            dedup_buffer_full_notify_ev_.notify();
+            wait(dedup_banks_[0]->free_event | dedup_banks_[1]->free_event |
+                 dedup_banks_[2]->free_event | dedup_banks_[3]->free_event |
+                 dedup_admission_released_ev_ |
+                 dedup_inside_request_fifo.data_written_event());
+            continue;
+        }
+        CacheMessage msg = dedup_inside_request_fifo.read();
+        const double dequeue_ns = sc_time_stamp().to_seconds() * 1e9;
+        wait(clock_period_ * static_cast<int>(DEDUP_HASH_CYCLES));
+        uint32_t ram_id = dedup_cache_->compute_ram_id(msg.gscid, msg.pscid, msg.iova);
+        sc_fifo<CacheMessage>& target = *dedup_ram_inter_fifo_[ram_id];
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (target.num_free() == 0) {
+            dedup_v1123_hash_bp_cnt_[1]++;
+            printf("[DEDUP_HASH_BP] task_id=%u -> RAM%u interFIFO full, inter-hash blocked\n",
+                   (unsigned)msg.task_id, ram_id);
+            fflush(stdout);
+        }
+        target.write(msg);
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_v1123_hash_bp_ns_[1] += (wr_end_ns - wr_start_ns);
+        dedup_v1123_hash_cnt_[1]++;
+        dedup_v1123_hash_busy_ns_[1] += (wr_end_ns - dequeue_ns);
+        int occ = target.num_available();
+        if (occ > dedup_ram_inter_fifo_peak_[ram_id]) dedup_ram_inter_fifo_peak_[ram_id] = occ;
+        dedup_ram_inter_push_occ_sum_[ram_id] += occ;   // [写入加权] push后采样占用
+        dedup_ram_inter_push_cnt_[ram_id]++;
+    }
+}
+
+void CacheSubsystem::dedup_upd_hash_thread() {
+    while (true) {
+        CacheMessage msg = dedup_update_fifo.read();  // 阻塞读(生产者=delayed排空线程)
+        const double dequeue_ns = sc_time_stamp().to_seconds() * 1e9;
+        wait(clock_period_ * static_cast<int>(DEDUP_HASH_CYCLES));
+        uint32_t ram_id = dedup_cache_->compute_ram_id(msg.gscid, msg.pscid, msg.iova);
+        sc_fifo<CacheMessage>& target = *dedup_ram_upd_fifo_[ram_id];
+        const double wr_start_ns = sc_time_stamp().to_seconds() * 1e9;
+        if (target.num_free() == 0) {
+            dedup_v1123_hash_bp_cnt_[2]++;
+            printf("[DEDUP_HASH_BP] task_id=%u -> RAM%u updFIFO full, upd-hash blocked\n",
+                   (unsigned)msg.task_id, ram_id);
+            fflush(stdout);
+        }
+        target.write(msg);
+        const double wr_end_ns = sc_time_stamp().to_seconds() * 1e9;
+        dedup_v1123_hash_bp_ns_[2] += (wr_end_ns - wr_start_ns);
+        dedup_v1123_hash_cnt_[2]++;
+        dedup_v1123_hash_busy_ns_[2] += (wr_end_ns - dequeue_ns);
+        int occ = target.num_available();
+        if (occ > dedup_ram_upd_fifo_peak_[ram_id]) dedup_ram_upd_fifo_peak_[ram_id] = occ;
+        dedup_ram_upd_push_occ_sum_[ram_id] += occ;     // [写入加权] push后采样占用
+        dedup_ram_upd_push_cnt_[ram_id]++;
+    }
+}
+
+// [G3] 每bank响应写出线程: staging -> pt_hit/pt_miss_response_fifo。
+//   worker 的响应写只落在 staging(64, nb_write)上, 本线程承担对响应FIFO的阻塞反压;
+//   本线程不持有任何 upd 出队路径所需资源, 环不闭合。bank内保序, 零延时衔接。
+void CacheSubsystem::dedup_rsp_writer_thread(int bank_id) {
+    sc_fifo<CacheMessage>& stage = *dedup_rsp_stage_fifo_[bank_id];
+    while (true) {
+        CacheMessage resp = stage.read();
+        if (resp.dedup_suspended) {
+            push_fifo(pt_hit_response_fifo, resp);
+        } else {
+            push_fifo(pt_miss_response_fifo, resp);
+        }
+    }
+}
+#endif // TEST_CFG_DEDUP_UNIT_V1123
+
 // ============================================================
 // [dedup多RAM] dedup_ram_worker_thread - 每组 RAM 独立 worker
 // 同一 RAM FIFO 内任务串行(单线程天然保证原子段不可分割), 跨 RAM 并发。
@@ -1259,11 +1495,50 @@ void CacheSubsystem::dedup_hash_process_thread() {
 // ============================================================
 void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
     sc_fifo<CacheMessage>& my_fifo = *dedup_ram_fifo_[ram_id];
-#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_UNIT_V1123
+    sc_fifo<CacheMessage>& my_upd_fifo = *dedup_ram_upd_fifo_[ram_id];
+    sc_fifo<CacheMessage>& my_pf_fifo  = *dedup_ram_inter_fifo_[ram_id];
+    DedupBuffer* my_bank               = dedup_banks_[ram_id];
+#elif TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
     sc_fifo<CacheMessage>& my_upd_fifo = *dedup_ram_upd_fifo_[ram_id];
 #endif
     while (true) {
-#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // ============================================================
+        // [1123] RAM内严格优先仲裁: upd > inter(预取) > req(主请求), 同RAM完全顺序。
+        //   门控(需求4(6)): 本bank Buffer满(valid+reserved>=128)时 req/inter 不出队
+        //     (非阻塞跳过, 任务滞留各自RAM FIFO); upd 出队永不受门控(G2, 释放通路)。
+        //   准入预留: req 出队时 reserved++(检查与出队间无wait, 协作式原子),
+        //     execute_dedup_request 内转 valid 或 bypass 归还。
+        // ============================================================
+        CacheMessage msg;
+        bool have = false;
+        if ((have = my_upd_fifo.nb_read(msg))) {
+            // upd 最高优先且无门控
+        } else if (bank_admission_ok(ram_id) && my_pf_fifo.nb_read(msg)) {
+            have = true;
+        } else if (bank_admission_ok(ram_id) && my_fifo.nb_read(msg)) {
+            have = true;
+            dedup_reserved_bank_[ram_id]++;
+            if (dedup_reserved_bank_[ram_id] > dedup_reserved_bank_peak_[ram_id])
+                dedup_reserved_bank_peak_[ram_id] = dedup_reserved_bank_[ram_id];
+        }
+        if (!have) {
+            const bool gated = !bank_admission_ok(ram_id);
+            if (gated) {
+                dedup_bank_gate_cnt_[ram_id]++;
+                // 条件3唤醒(排空线程复核"4 bank全满"才加速转出)
+                dedup_buffer_full_notify_ev_.notify();
+                wait(my_upd_fifo.data_written_event() | my_fifo.data_written_event() |
+                     my_pf_fifo.data_written_event() | my_bank->free_event |
+                     dedup_admission_released_ev_);
+            } else {
+                wait(my_upd_fifo.data_written_event() | my_fifo.data_written_event() |
+                     my_pf_fifo.data_written_event());
+            }
+            continue;
+        }
+#elif TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
         // [释放优先通道] update 高优先(对齐 walker_ram_worker_thread 的同名机制:
         //   "保证Walker更新不被积压的lookup延迟") => Buffer 刷新/清占位不会被
         //   积压的 lookup 拖死, 释放通路在单个 RAM 内部也得到保障。
@@ -1363,11 +1638,21 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
             // 响应路由:
             //   dedup_suspended: 任务已挂Buffer -> pt_hit_response_fifo(collector识别后挂起)
             //   否则(MISS/降级): pt_miss_response_fifo -> collector -> PTW
+#if TEST_CFG_DEDUP_UNIT_V1123
+            // [1123/G3] 经本bank staging FIFO 交给 writer 线程推送 —— worker 对响应
+            //   反压零阻塞, upd 出队通道结构性畅通(死锁护栏P3)。staging满回退阻塞写
+            //   仅理论兜底(在途响应<=准入上限128/bank << 64+writer即时排空, 计数应恒0)。
+            if (!dedup_rsp_stage_fifo_[ram_id]->nb_write(resp)) {
+                dedup_rsp_stage_full_cnt_++;
+                dedup_rsp_stage_fifo_[ram_id]->write(resp);
+            }
+#else
             if (resp.dedup_suspended) {
                 push_fifo(pt_hit_response_fifo, resp);
             } else {
                 push_fifo(pt_miss_response_fifo, resp);
             }
+#endif
             dedup_ram_req_count_[ram_id]++;
         }
 
@@ -1713,16 +1998,36 @@ void CacheSubsystem::fifo_util_sampler_thread() {
     // 深度取自构造初始化列表值(sc_fifo::size() 为 protected, 不可直接读)
     fifo_stat_pt_req_    = FifoOccStat{"pt_request_fifo",    16,   0, 0.0, -1.0, -1.0};
     fifo_stat_pt_upd_    = FifoOccStat{"pt_update_fifo",     (int)PT_UPDATE_FIFO_DEPTH, 0, 0.0, -1.0, -1.0};
+#if TEST_CFG_DEDUP_UNIT_V1123
+    fifo_stat_dedup_req_ = FifoOccStat{"dedup_request_fifo", (int)DEDUP_OUT_REQ_FIFO_DEPTH,  0, 0.0, -1.0, -1.0};
+    fifo_stat_dedup_upd_ = FifoOccStat{"dedup_update_fifo",  (int)DEDUP_UPD_HANDOFF_DEPTH,   0, 0.0, -1.0, -1.0};
+#else
     fifo_stat_dedup_req_ = FifoOccStat{"dedup_request_fifo", 64,   0, 0.0, -1.0, -1.0};
     fifo_stat_dedup_upd_ = FifoOccStat{"dedup_update_fifo",  64,   0, 0.0, -1.0, -1.0};
+#endif
     fifo_stat_pt_hit_rsp_  = FifoOccStat{"pt_hit_response_fifo",  32, 0, 0.0, -1.0, -1.0};
     fifo_stat_pt_miss_rsp_ = FifoOccStat{"pt_miss_response_fifo", 32, 0, 0.0, -1.0, -1.0};
     // [STAT需求] 去重 per-RAM ram_fifo 采样初始化(深度=ram_fifo_depth, 名字静态缓冲保活)
     static char ram_fifo_names[DEDUP_MAX_RAMS][24];
+#if TEST_CFG_DEDUP_UNIT_V1123
+    static char ram_inter_names[DEDUP_MAX_RAMS][28];
+    static char ram_upd_names[DEDUP_MAX_RAMS][28];
+    static char rsp_stage_names[DEDUP_MAX_RAMS][28];
+    const int ram_depth = (int)DEDUP_RAM_REQ_FIFO_DEPTH;
+#else
     const int ram_depth = (int)cfg_.dedup_cache.ram_fifo_depth;
+#endif
     for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
         snprintf(ram_fifo_names[i], sizeof(ram_fifo_names[i]), "dedup_ram_fifo[%u]", i);
         fifo_stat_dedup_ram_[i] = FifoOccStat{ram_fifo_names[i], ram_depth, 0, 0.0, -1.0, -1.0};
+#if TEST_CFG_DEDUP_UNIT_V1123
+        snprintf(ram_inter_names[i], sizeof(ram_inter_names[i]), "dedup_ram_inter[%u]", i);
+        fifo_stat_dedup_ram_inter_[i] = FifoOccStat{ram_inter_names[i], (int)DEDUP_RAM_INTER_FIFO_DEPTH, 0, 0.0, -1.0, -1.0};
+        snprintf(ram_upd_names[i], sizeof(ram_upd_names[i]), "dedup_ram_upd[%u]", i);
+        fifo_stat_dedup_ram_upd_[i] = FifoOccStat{ram_upd_names[i], (int)DEDUP_RAM_UPD_FIFO_DEPTH, 0, 0.0, -1.0, -1.0};
+        snprintf(rsp_stage_names[i], sizeof(rsp_stage_names[i]), "dedup_rsp_stage[%u]", i);
+        fifo_stat_dedup_rsp_[i] = FifoOccStat{rsp_stage_names[i], (int)DEDUP_RSP_STAGE_DEPTH, 0, 0.0, -1.0, -1.0};
+#endif
     }
     const double dt = clock_period_.to_seconds() * 1e9;
     while (true) {
@@ -1736,6 +2041,14 @@ void CacheSubsystem::fifo_util_sampler_thread() {
         sample_fifo_occ(fifo_stat_pt_miss_rsp_, pt_miss_response_fifo.num_available(), now, dt);
         for (uint32_t i = 0; i < dedup_num_rams_; ++i)
             sample_fifo_occ(fifo_stat_dedup_ram_[i], dedup_ram_fifo_[i]->num_available(), now, dt);
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // [1123] per-RAM inter/upd 前置FIFO + 响应staging 每拍采样
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            sample_fifo_occ(fifo_stat_dedup_ram_inter_[i], dedup_ram_inter_fifo_[i]->num_available(), now, dt);
+            sample_fifo_occ(fifo_stat_dedup_ram_upd_[i],   dedup_ram_upd_fifo_[i]->num_available(),   now, dt);
+            sample_fifo_occ(fifo_stat_dedup_rsp_[i],       dedup_rsp_stage_fifo_[i]->num_available(), now, dt);
+        }
+#endif
     }
 }
 
@@ -1758,7 +2071,11 @@ void CacheSubsystem::print_fifo_util_report() const {
     }
     // [STAT需求] 去重 per-RAM ram_fifo 占用(峰值+时间加权平均) + 请求分布均匀性
     if (dedup_num_rams_ > 0) {
+#if TEST_CFG_DEDUP_UNIT_V1123
+        printf("  ---- Dedup per-RAM ram_fifo (depth=%d) ----\n", (int)DEDUP_RAM_REQ_FIFO_DEPTH);
+#else
         printf("  ---- Dedup per-RAM ram_fifo (depth=%d) ----\n", (int)cfg_.dedup_cache.ram_fifo_depth);
+#endif
         uint64_t tot_req = 0;
         for (uint32_t i = 0; i < dedup_num_rams_; ++i) tot_req += dedup_ram_req_count_[i];
         const double exp_req = (double)tot_req / dedup_num_rams_;
@@ -1789,6 +2106,23 @@ void CacheSubsystem::print_fifo_util_report() const {
                (mn > 0 && mn != ~0ULL) ? (double)mx / mn : 0.0,
                imbalance, chi2, dedup_num_rams_ - 1, thr,
                (chi2 <= thr) ? "BALANCED" : "SKEWED");
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // [1123] per-RAM inter/upd 前置FIFO 与 响应staging 占用(峰值+时间加权平均)
+        printf("  ---- Dedup per-RAM inter(%d)/upd(%d) FIFO & rsp_stage(%d) ----\n",
+               (int)DEDUP_RAM_INTER_FIFO_DEPTH, (int)DEDUP_RAM_UPD_FIFO_DEPTH, (int)DEDUP_RSP_STAGE_DEPTH);
+        for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+            for (int k = 0; k < 3; ++k) {
+                const FifoOccStat& s = (k == 0) ? fifo_stat_dedup_ram_inter_[i]
+                                   : (k == 1) ? fifo_stat_dedup_ram_upd_[i]
+                                              : fifo_stat_dedup_rsp_[i];
+                const double win = s.last_nonempty_ns - s.first_nonempty_ns;
+                const double avg_occ = (win > 0.0) ? s.integral_occ_ns / win : 0.0;
+                printf("  %-22s depth=%-4d peak=%-4d avg=%.2f util=%.1f%%\n",
+                       s.name, s.depth, s.peak, avg_occ,
+                       s.depth > 0 ? 100.0 * avg_occ / s.depth : 0.0);
+            }
+        }
+#endif
     }
     printf("  注: 采样步长=%.1fns; AvgOcc/AvgUtil 时间加权窗口=[首包非空~末包非空], 各FIFO独立。\n",
            clock_period_.to_seconds() * 1e9);
@@ -2019,32 +2353,74 @@ void CacheSubsystem::print_serial_stage_budget_report() const {
 // [dedup多RAM] 去重Cache多RAM统计报告: Hash单元/每组RAM利用率/FIFO峰值/预取丢弃
 void CacheSubsystem::print_dedup_multi_ram_report() const {
     printf("\n========== Dedup Cache Multi-RAM Report ==========\n");
+#if TEST_CFG_DEDUP_UNIT_V1123
+    printf("  Config[1123]:         banks=4, per-RAM fifo req=%u/inter=%u/upd=%u, outer req=%u/inter=%u/delayed_upd=%u, atomic=%uns, hash=3x%uns, Buffer=4x%u(total %u), rsp_stage=%u\n",
+           DEDUP_RAM_REQ_FIFO_DEPTH, DEDUP_RAM_INTER_FIFO_DEPTH, DEDUP_RAM_UPD_FIFO_DEPTH,
+           DEDUP_OUT_REQ_FIFO_DEPTH, DEDUP_OUT_INTER_FIFO_DEPTH, DEDUP_DELAYED_UPDATE_FIFO_DEPTH,
+           DEDUP_ATOMIC_CYCLES, DEDUP_HASH_CYCLES, DEDUP_BUFFER_PER_BANK,
+           PT_DEDUP_BUFFER_SIZE, DEDUP_RSP_STAGE_DEPTH);
+#else
     printf("  Config:               num_rams=%u, ram_fifo_depth=%u, inside_fifo_depth=32\n",
            dedup_num_rams_, cfg_.dedup_cache.ram_fifo_depth);
+#endif
 
+#if TEST_CFG_DEDUP_UNIT_V1123
+    const uint64_t v1123_hash_total =
+        dedup_v1123_hash_cnt_[0] + dedup_v1123_hash_cnt_[1] + dedup_v1123_hash_cnt_[2];
+    if (v1123_hash_total == 0) {
+#else
     if (dedup_hash_task_count_ == 0) {
+#endif
         printf("  No tasks processed.\n");
         printf("==================================================\n\n");
         return;
     }
 
     // Hash 单元
+#if TEST_CFG_DEDUP_UNIT_V1123
+    printf("  [Hash Units x3] (req/inter/upd 各自独立线程, 1ns/笔)\n");
+    printf("    %-8s %-10s %-12s %-12s %-14s\n", "Unit", "Tasks", "Busy(ns)", "BP_count", "BP_time(ns)");
+    for (int k = 0; k < 3; ++k) {
+        printf("    %-8s %-10lu %-12.1f %-12lu %-14.1f\n",
+               k == 0 ? "req" : (k == 1 ? "inter" : "upd"),
+               (unsigned long)dedup_v1123_hash_cnt_[k], dedup_v1123_hash_busy_ns_[k],
+               (unsigned long)dedup_v1123_hash_bp_cnt_[k], dedup_v1123_hash_bp_ns_[k]);
+    }
+#else
     printf("  [Hash Unit]\n");
     printf("    Tasks hashed:        %lu\n", (unsigned long)dedup_hash_task_count_);
     printf("    Busy time:           %.1f ns\n", dedup_hash_busy_ns_);
     printf("    Backpressure count:  %lu\n", (unsigned long)dedup_hash_backpressure_cnt_);
     printf("    Backpressure time:   %.1f ns (write-block on full RAM FIFO)\n",
            dedup_hash_backpressure_ns_);
+#endif
 
     // 每组 RAM
     double window_ns = dedup_ram_last_end_ns_ - dedup_ram_first_start_ns_;
     printf("  [Per-RAM Workers]  (window=%.1f ns)\n", window_ns);
+#if TEST_CFG_DEDUP_UNIT_V1123
+    printf("    %-5s %-10s %-10s %-10s %-10s %-12s %-9s %-10s %-7s %-7s %-7s\n",
+           "RAM", "Tasks", "Requests", "Updates", "Prefetch", "Busy(ns)", "Util(%)",
+           "ReqFPk", "IntFPk", "UpdFPk", "GateSkip");
+#else
     printf("    %-5s %-10s %-10s %-10s %-10s %-12s %-9s %-10s\n",
            "RAM", "Tasks", "Requests", "Updates", "Prefetch", "Busy(ns)", "Util(%)", "FIFO_Peak");
+#endif
     uint64_t total_tasks = 0;
     double total_busy = 0.0;
     for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
         double util = (window_ns > 0) ? dedup_ram_busy_ns_[i] / window_ns * 100.0 : 0.0;
+#if TEST_CFG_DEDUP_UNIT_V1123
+        printf("    %-5u %-10lu %-10lu %-10lu %-10lu %-12.1f %-9.2f %-10d %-7d %-7d %-7lu\n",
+               i,
+               (unsigned long)dedup_ram_task_count_[i],
+               (unsigned long)dedup_ram_req_count_[i],
+               (unsigned long)dedup_ram_upd_count_[i],
+               (unsigned long)dedup_ram_prefetch_count_[i],
+               dedup_ram_busy_ns_[i], util, dedup_ram_fifo_peak_[i],
+               dedup_ram_inter_fifo_peak_[i], dedup_ram_upd_fifo_peak_[i],
+               (unsigned long)dedup_bank_gate_cnt_[i]);
+#else
         printf("    %-5u %-10lu %-10lu %-10lu %-10lu %-12.1f %-9.2f %-10d\n",
                i,
                (unsigned long)dedup_ram_task_count_[i],
@@ -2052,18 +2428,81 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
                (unsigned long)dedup_ram_upd_count_[i],
                (unsigned long)dedup_ram_prefetch_count_[i],
                dedup_ram_busy_ns_[i], util, dedup_ram_fifo_peak_[i]);
+#endif
         total_tasks += dedup_ram_task_count_[i];
         total_busy += dedup_ram_busy_ns_[i];
     }
     printf("    %-5s %-10lu %-10s %-10s %-10s %-12.1f\n",
            "SUM", (unsigned long)total_tasks, "-", "-", "-", total_busy);
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [写入加权] per-RAM 3条前置FIFO: push时采样占用(到达加权, 非时间加权)
+    //   Pushes=该FIFO被hash单元写入的任务数(=对应RAM该类型访问量), Peak=写入时占用峰值,
+    //   AvgPush=Σ(写入时占用)/Pushes, Util=AvgPush/depth
+    printf("  [Per-RAM FIFO Write-Weighted] (push-sampled, 写入加权口径)\n");
+    printf("    %-5s %-10s %-10s %-8s %-10s %-8s\n", "RAM", "FIFO", "Pushes", "Peak", "AvgPush", "Util%");
+    for (uint32_t i = 0; i < dedup_num_rams_; ++i) {
+        const uint64_t cnts[3]   = { dedup_ram_push_cnt_[i], dedup_ram_inter_push_cnt_[i], dedup_ram_upd_push_cnt_[i] };
+        const int      pks[3]    = { dedup_ram_fifo_peak_[i], dedup_ram_inter_fifo_peak_[i], dedup_ram_upd_fifo_peak_[i] };
+        const double   sums[3]   = { (double)dedup_ram_push_occ_sum_[i], (double)dedup_ram_inter_push_occ_sum_[i], (double)dedup_ram_upd_push_occ_sum_[i] };
+        const int      deps[3]   = { (int)DEDUP_RAM_REQ_FIFO_DEPTH, (int)DEDUP_RAM_INTER_FIFO_DEPTH, (int)DEDUP_RAM_UPD_FIFO_DEPTH };
+        static const char* kNms[3] = { "req", "inter", "upd" };
+        char nms[3][12];
+        for (int k = 0; k < 3; ++k) snprintf(nms[k], sizeof(nms[k]), "%s(%d)", kNms[k], deps[k]);
+        for (int k = 0; k < 3; ++k) {
+            const double avg = cnts[k] ? sums[k] / (double)cnts[k] : 0.0;
+            printf("    %-5u %-10s %-10llu %-8d %-10.2f %-8.1f\n",
+                   i, nms[k], (unsigned long long)cnts[k], pks[k], avg,
+                   deps[k] > 0 ? 100.0 * avg / deps[k] : 0.0);
+        }
+    }
+#if TEST_CFG_DEDUP_PREFETCH_BLOCK
+    printf("  [Prefetch Push Mode] BLOCKING (G1 drop removed): blocks=%lu, block_total=%.1f ns, block_max=%.1f ns\n",
+           (unsigned long)dedup_pf_block_cnt_, dedup_pf_block_ns_, dedup_pf_block_max_ns_);
+#else
+    printf("  [Prefetch Push Mode] DROP-ON-FULL (G1 kept): dropped=%lu\n",
+           (unsigned long)dedup_prefetch_dropped_);
+#endif
+#endif
 
     // 预取丢弃(inside_fifo满)
     printf("  [Prefetch]\n");
     printf("    Dropped (inside_fifo full): %lu\n", (unsigned long)dedup_prefetch_dropped_);
     printf("  [Buffer Full Bypass]\n");
     printf("    Bypass to PTW count:        %lu\n", (unsigned long)dedup_buffer_full_bypass_count_);
-#if TEST_CFG_DEDUP_ADMISSION_CTRL
+#if TEST_CFG_DEDUP_UNIT_V1123
+    printf("  [Admission Control] ENABLED per-bank (1123: bank满门控本RAM req/inter出队, upd不受门控; 4bank全满反压外层req/inter)\n");
+    {
+        uint64_t gate_sum = 0;
+        for (uint32_t b = 0; b < DEDUP_NUM_BANKS; ++b) gate_sum += dedup_bank_gate_cnt_[b];
+        printf("    Bank gate skips (sum):      %lu\n", (unsigned long)gate_sum);
+        printf("    dedup_request_fifo peak:    %d / %u\n",
+               dedup_request_fifo_peak_, (unsigned)DEDUP_OUT_REQ_FIFO_DEPTH);
+        printf("    rsp_stage full fallback:    %lu (理论应为0, G3兜底计数)\n",
+               (unsigned long)dedup_rsp_stage_full_cnt_);
+    }
+    // [1123] per-Bank Buffer 块: 每bank容量128, 链不跨bank; 聚合行为全4bank合计
+    printf("  [Per-Bank Buffer] (cap=%u/bank, total=%u)\n",
+           DEDUP_BUFFER_PER_BANK, PT_DEDUP_BUFFER_SIZE);
+    printf("    %-6s %-8s %-10s %-10s %-12s %-12s %-10s %-12s\n",
+           "Bank", "Peak", "AvgOcc", "AvgUtil%", "HoldCnt", "HoldAvg", "HoldMax", "ResvPeak");
+    for (uint32_t b = 0; b < DEDUP_NUM_BANKS; ++b) {
+        DedupBuffer* bk = dedup_banks_[b];
+        if (!bk) continue;
+        printf("    B%-5u %-8u %-10.2f %-10.1f %-12lu %-12.1f %-10.1f %-12u\n",
+               b, (unsigned)bk->get_peak_valid_count(), bk->get_avg_occupancy(),
+               bk->get_avg_occupancy_pct(), (unsigned long)bk->get_hold_count(),
+               bk->get_avg_hold_ns(), bk->get_max_hold_ns(),
+               (unsigned)dedup_reserved_bank_peak_[b]);
+    }
+    if (dedup_buffer_) {
+        printf("    AGG   peak=%u avg_occ=%.2f util=%.1f%% hold_cnt=%lu avg=%.1f max=%.1f (final_valid=%u)\n",
+               (unsigned)dedup_buffer_->get_peak_valid_count(), dedup_buffer_->get_avg_occupancy(),
+               dedup_buffer_->get_avg_occupancy_pct(),
+               (unsigned long)dedup_buffer_->get_hold_count(),
+               dedup_buffer_->get_avg_hold_ns(), dedup_buffer_->get_max_hold_ns(),
+               (unsigned)dedup_buffer_->get_valid_count());
+    }
+#elif TEST_CFG_DEDUP_ADMISSION_CTRL
     printf("  [Admission Control] ENABLED (Buffer满跳过出队, request FIFO排队反压)\n");
     printf("    Admission stall waits:      %lu\n", (unsigned long)dedup_admission_wait_cnt_);
     printf("    Admission stall total:      %.1f ns (%.3f us)\n",
@@ -2130,7 +2569,11 @@ void CacheSubsystem::print_dedup_multi_ram_report() const {
         printf("    Enqueued:               %lu\n", (unsigned long)delayed_upd_enq_total_);
         printf("    Drained c1 (timer):     %lu\n", (unsigned long)delayed_upd_drain_c1_);
         printf("    Drained c2 (pressure):  %lu\n", (unsigned long)delayed_upd_drain_c2_);
+#if TEST_CFG_DEDUP_UNIT_V1123
+        printf("    Drained c3 (4bank-all-full):%lu\n", (unsigned long)delayed_upd_drain_c3_);
+#else
         printf("    Drained c3 (bufferfull):%lu\n", (unsigned long)delayed_upd_drain_c3_);
+#endif
         printf("    Group drains (c2/c3):   %lu\n", (unsigned long)delayed_upd_group_cnt_);
         printf("    Pending at report:      %u\n", (unsigned)delayed_upd_deque_.size());
         printf("    Occ peak:               %d / %u\n", delayed_upd_occ_peak_, DEDUP_DELAYED_UPDATE_FIFO_DEPTH);
@@ -2916,6 +3359,14 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
     resp.prefetch_depth = req.prefetch_depth;
 
     uint64_t page_iova = req.iova & ~0xFFFULL;
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [1123] bank绑定: 页hash决定bank, 本任务全部Buffer操作走该bank(链不跨bank);
+    //   buf 即本RAM worker 服务的 bank(与 hash 单元同一 compute_ram_id 口径)。
+    const uint32_t bank = dedup_cache_->compute_ram_id(req.gscid, req.pscid, page_iova);
+    DedupBuffer* buf = dedup_banks_[bank];
+#else
+    DedupBuffer* buf = dedup_buffer_;
+#endif
     DedupCacheLine* line = dedup_cache_->lookup(req.gscid, req.pscid, page_iova);
 
     // [STAT需求2] 去重Cache命中率统计: 每次lookup计一次访问, line!=nullptr为命中
@@ -2932,29 +3383,44 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             // -------- 分支1: 主占位CL (is_req=1) 挂 Buffer 链尾 --------
             uint16_t head_idx = line->head_index;
 #if TEST_CFG_MULTI_DEVICE_SCENE
-            iommu_md::require(head_idx < PT_DEDUP_BUFFER_SIZE, "去重链头越界");
+            iommu_md::require(head_idx < DEDUP_BUFFER_ENTRIES, "去重链头越界");
             auto check_entry = [&](uint16_t idx) {
-                iommu_md::require(idx < PT_DEDUP_BUFFER_SIZE, "去重链尾越界");
-                const auto& e = dedup_buffer_->entries[idx];
+                iommu_md::require(idx < DEDUP_BUFFER_ENTRIES, "去重链尾越界");
+                const auto& e = buf->entries[idx];
                 iommu_md::require(e.is_valid() && e.task_ptr && e.gscid == req.gscid &&
                     e.pscid == req.pscid && (e.iova & ~0xFFFULL) == page_iova, "去重挂链上下文不匹配");
+#if TEST_CFG_DEDUP_UNIT_V1123
+                // [1123] 链不跨bank不变量: 链上entry的页hash必须属于本bank
+                iommu_md::require(dedup_cache_->compute_ram_id(e.gscid, e.pscid, e.iova & ~0xFFFULL)
+                                  == bank, "去重链entry跨bank违例");
+#endif
             };
             check_entry(head_idx);
-            check_entry(dedup_buffer_->entries[head_idx].tail_index);
+            check_entry(buf->entries[head_idx].tail_index);
 #endif
-            uint16_t tail_idx = dedup_buffer_->entries[head_idx].tail_index;
+            uint16_t tail_idx = buf->entries[head_idx].tail_index;
 
-            uint16_t new_idx = dedup_buffer_->allocate_entry();
-#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            uint16_t new_idx = buf->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL || TEST_CFG_DEDUP_UNIT_V1123
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 // 准入控制模式: scheduler预留保证有空槽, 理论不可达; 若到达为计数异常, 回退等释放兕底(仅诊断)
                 printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (main HIT, valid=%u reserved=%u)\n",
-                       (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+                       (unsigned)req.task_id, buf->get_valid_count(),
+#if TEST_CFG_DEDUP_UNIT_V1123
+                       (unsigned)dedup_reserved_bank_[bank]);
+#else
+                       (unsigned)dedup_reserved_count_);
+#endif
                 fflush(stdout);
-                while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
-                new_idx = dedup_buffer_->allocate_entry();
+                while (buf->is_full()) wait(buf->free_event);
+                new_idx = buf->allocate_entry();
             }
+#if TEST_CFG_DEDUP_UNIT_V1123
+            dedup_reserved_bank_[bank]--;  // reserved -> valid
+            dedup_admission_released_ev_.notify();
+#else
             dedup_reserved_count_--;  // reserved -> valid
+#endif
 #else
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
@@ -2983,7 +3449,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             }
 #endif
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
-                auto& new_entry = dedup_buffer_->entries[new_idx];
+                auto& new_entry = buf->entries[new_idx];
                 new_entry.gscid = req.gscid;
                 new_entry.pscid = req.pscid;
                 new_entry.iova = req.iova;
@@ -2995,8 +3461,8 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 new_entry.tail_index = DEDUP_BUFFER_INVALID_IDX;  // 非链头
                 new_entry.alloc_src = 2;  // [STAT] 被去重挂起的任务
 
-                dedup_buffer_->entries[tail_idx].next_index = new_idx;
-                dedup_buffer_->entries[head_idx].tail_index = new_idx;  // 仅写 Buffer
+                buf->entries[tail_idx].next_index = new_idx;
+                buf->entries[head_idx].tail_index = new_idx;  // 仅写 Buffer
 
                 resp.dedup_head_index = head_idx;
                 resp.dedup_new_index = new_idx;
@@ -3008,16 +3474,26 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             resp.dedup_suspended = true;  // 任务挂入 Buffer, 无需转发
         } else {
             // -------- 分支2: 预取占位CL (is_req=0) 升级为主占位 --------
-            uint16_t new_idx = dedup_buffer_->allocate_entry();
-#if TEST_CFG_DEDUP_ADMISSION_CTRL
+            uint16_t new_idx = buf->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL || TEST_CFG_DEDUP_UNIT_V1123
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (prefetch HIT, valid=%u reserved=%u)\n",
-                       (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+                       (unsigned)req.task_id, buf->get_valid_count(),
+#if TEST_CFG_DEDUP_UNIT_V1123
+                       (unsigned)dedup_reserved_bank_[bank]);
+#else
+                       (unsigned)dedup_reserved_count_);
+#endif
                 fflush(stdout);
-                while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
-                new_idx = dedup_buffer_->allocate_entry();
+                while (buf->is_full()) wait(buf->free_event);
+                new_idx = buf->allocate_entry();
             }
+#if TEST_CFG_DEDUP_UNIT_V1123
+            dedup_reserved_bank_[bank]--;  // reserved -> valid
+            dedup_admission_released_ev_.notify();
+#else
             dedup_reserved_count_--;  // reserved -> valid
+#endif
 #else
             if (new_idx == DEDUP_BUFFER_INVALID_IDX) {
                 // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
@@ -3045,7 +3521,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             }
 #endif
             if (new_idx != DEDUP_BUFFER_INVALID_IDX) {
-                auto& entry = dedup_buffer_->entries[new_idx];
+                auto& entry = buf->entries[new_idx];
                 entry.gscid = req.gscid;
                 entry.pscid = req.pscid;
                 entry.iova = req.iova;
@@ -3085,8 +3561,13 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 #if TEST_CFG_MULTI_DEVICE_SCENE
             md_record(req, "dedup", "hash_conflict_bypass", iommu_md::now_ns());
 #endif
-#if TEST_CFG_DEDUP_ADMISSION_CTRL
+#if TEST_CFG_DEDUP_ADMISSION_CTRL || TEST_CFG_DEDUP_UNIT_V1123
+#if TEST_CFG_DEDUP_UNIT_V1123
+            dedup_reserved_bank_[bank]--;  // 归还准入预留(该任务不占Buffer)
+            dedup_admission_released_ev_.notify();
+#else
             dedup_reserved_count_--;  // 归还准入预留(该任务不占Buffer)
+#endif
 #endif
             resp.hit = false;
             resp.dedup_bypass = true;
@@ -3097,20 +3578,30 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
             fflush(stdout);
             return resp;
         }
-        uint16_t head_idx = dedup_buffer_->allocate_entry();
-#if TEST_CFG_DEDUP_ADMISSION_CTRL
+        uint16_t head_idx = buf->allocate_entry();
+#if TEST_CFG_DEDUP_ADMISSION_CTRL || TEST_CFG_DEDUP_UNIT_V1123
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
             printf("[DEDUP_ADM_ERR] task_id=%u -> allocate failed under admission (MISS, valid=%u reserved=%u)\n",
-                   (unsigned)req.task_id, dedup_buffer_->get_valid_count(), dedup_reserved_count_);
+                   (unsigned)req.task_id, buf->get_valid_count(),
+#if TEST_CFG_DEDUP_UNIT_V1123
+                   (unsigned)dedup_reserved_bank_[bank]);
+#else
+                   (unsigned)dedup_reserved_count_);
+#endif
             fflush(stdout);
 #if TEST_CFG_DEDUP_DELAYED_UPDATE
             // [去重延迟更新] 条件3: Buffer满, 通知排空线程加速转出延迟FIFO
             dedup_buffer_full_notify_ev_.notify();
 #endif
-            while (dedup_buffer_->is_full()) wait(dedup_buffer_->free_event);
-            head_idx = dedup_buffer_->allocate_entry();
+            while (buf->is_full()) wait(buf->free_event);
+            head_idx = buf->allocate_entry();
         }
+#if TEST_CFG_DEDUP_UNIT_V1123
+        dedup_reserved_bank_[bank]--;  // reserved -> valid
+        dedup_admission_released_ev_.notify();
+#else
         dedup_reserved_count_--;  // reserved -> valid
+#endif
 #else
         if (head_idx == DEDUP_BUFFER_INVALID_IDX) {
             // [FIX] Buffer满时等待PTW并发释放: 阻塞当前dedup worker直到PTW有空闲槽位
@@ -3139,7 +3630,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 #endif
 
         if (head_idx != DEDUP_BUFFER_INVALID_IDX) {
-            auto& entry = dedup_buffer_->entries[head_idx];
+            auto& entry = buf->entries[head_idx];
             entry.gscid = req.gscid;
             entry.pscid = req.pscid;
             entry.iova = req.iova;
@@ -3180,6 +3671,27 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                         pf.stage = req.stage;
                         pf.dedup_is_prefetch = true;
                         pf.timestamp = sc_time_stamp();
+#if TEST_CFG_DEDUP_UNIT_V1123 && TEST_CFG_DEDUP_PREFETCH_BLOCK
+                        // [P9->P1实验] 满则阻塞写(废除G1丢弃护栏): 阻塞发生在 worker
+                        //   任务处理中途, 本bank upd 消费同时停摆 —— 死锁环复现点。
+                        {
+                            const double blk_t0 = sc_time_stamp().to_seconds() * 1e9;
+                            const bool was_full = (dedup_inside_request_fifo.num_free() == 0);
+                            if (was_full) {
+                                dedup_pf_block_cnt_++;
+                                printf("[DEDUP_PF_BLOCK] t=%.1f ns task_id=%u -> inter_fifo(1) full, worker blocked mid-task, prefetch iova=0x%lx\n",
+                                       blk_t0, (unsigned)req.task_id, (unsigned long)pf.iova);
+                                fflush(stdout);
+                            }
+                            dedup_inside_request_fifo.write(pf);  // 阻塞写
+                            const double blk_ns = sc_time_stamp().to_seconds() * 1e9 - blk_t0;
+                            if (blk_ns > 0.0) {
+                                dedup_pf_block_ns_ += blk_ns;
+                                if (blk_ns > dedup_pf_block_max_ns_) dedup_pf_block_max_ns_ = blk_ns;
+                            }
+                            prefetch_issued++;
+                        }
+#else
                         // nb_write: inside_fifo满则丢弃预取(保功能防死锁, 仅损失性能)
                         if (dedup_inside_request_fifo.nb_write(pf)) {
                             prefetch_issued++;
@@ -3192,6 +3704,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                                    (unsigned)req.task_id, (unsigned long)pf.iova);
                             fflush(stdout);
                         }
+#endif
                     }
                 }
                 printf("[DEDUP_CACHE] task_id=%u -> MISS, inserted main placeholder (head=%u, iova=0x%lx), prefetch_issued=%u\n",
@@ -3199,7 +3712,7 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
                 fflush(stdout);
             } else {
                 // 降级: dedup_cache set 全部为 is_req=1 受保护 -> 直接转发 PTW
-                dedup_buffer_->free_entry(head_idx);
+                buf->free_entry(head_idx);
                 resp.hit = false;
                 resp.dedup_bypass = true;
                 // [bypass预取] bypass任务保留预取能力(不禁用), PTW完成后走late-spawn真正执行预取;
@@ -3230,6 +3743,13 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 // ============================================================
 uint32_t CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
     uint64_t page_iova = upd.iova & ~0xFFFULL;
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [1123] upd 与 req 同口径: 页hash决定bank, 链遍历只碰本bank Buffer。
+    const uint32_t bank = dedup_cache_->compute_ram_id(upd.gscid, upd.pscid, page_iova);
+    DedupBuffer* buf = dedup_banks_[bank];
+#else
+    DedupBuffer* buf = dedup_buffer_;
+#endif
     DedupCacheLine* line = dedup_cache_->lookup(upd.gscid, upd.pscid, page_iova);
     if (line == nullptr) {
         // 无占位(降级任务/无等待任务的预取): 无操作
@@ -3269,8 +3789,8 @@ uint32_t CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
     //   上限PT_DEDUP_BUFFER_SIZE防链异常死循环(回调内另有成环断言)
     uint32_t chain_len = 0;
     for (uint16_t cur = head_index;
-         cur != DEDUP_BUFFER_INVALID_IDX && chain_len < PT_DEDUP_BUFFER_SIZE;
-         cur = dedup_buffer_->entries[cur].next_index) {
+         cur != DEDUP_BUFFER_INVALID_IDX && chain_len < DEDUP_BUFFER_ENTRIES;
+         cur = buf->entries[cur].next_index) {
         chain_len++;
     }
 

@@ -137,6 +137,42 @@ static const uint32_t PT_UPDATE_FIFO_DEPTH = TEST_CFG_PT_UPDATE_FIFO_DEPTH;
 static_assert(TEST_CFG_AGG_FLUSH_RELEASE_FIRST == 0 || TEST_CFG_AGG_FLUSH_RELEASE_FIRST == 1,
               "AGG_FLUSH_RELEASE_FIRST 必须为 0 或 1");
 
+// ============================================================
+// [去重单元机制优化 1123] 总开关 (TEST_CFG_DEDUP_UNIT_V1123)
+//   1(默认): 新机制对所有场景生效:
+//     (a) 外层3任务队列: req fifo(8) / inter req fifo(1) /
+//         update fifo=dedup_delayed_update_fifo(24, 每组"主+D预取"占4条);
+//     (b) 3个独立Hash单元(各1ns), 按任务类型从对应队列取任务、hash得ram id后
+//         写入该ram的类型化FIFO: req(32)/inter(8)/upd(2);
+//     (c) RAM内严格优先仲裁 upd > inter > req, 同RAM顺序处理;
+//         req/inter出队受本bank Buffer满门控, upd出队永不受门控;
+//     (d) 去重Cache=4 Bank x 64 CL=256; 去重Buffer拆为4个(每bank 128 entry),
+//         与bank一一绑定(链不跨bank);
+//     (e) req/inter原子段 5ns->4ns (UPDATE保持"3+链长x2"可变模型);
+//     (f) 延时更新三条件: c1 每笔200ns定时器 / c2 占用>20排一组4笔 /
+//         c3 由"单Buffer满"改为"4个bank Buffer全满";
+//     (g) 死锁护栏: 预取生成nb_write满则丢(G1) / upd通路无门控(G2) /
+//         worker响应写经per-bank staging FIFO解耦(G3, 深度64)。
+//   0: 旧机制(scheduler+单hash+单Buffer), 行为逐位不变, 供A/B对照。
+//   v1123=1 时强制 TEST_CFG_DEDUP_DELAYED_UPDATE=1(延时更新成为标准机制),
+//   并关闭被新拓扑取代的 TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE。
+// ============================================================
+#ifndef TEST_CFG_DEDUP_UNIT_V1123
+#define TEST_CFG_DEDUP_UNIT_V1123 1
+#endif
+static_assert(TEST_CFG_DEDUP_UNIT_V1123 == 0 || TEST_CFG_DEDUP_UNIT_V1123 == 1,
+              "DEDUP_UNIT_V1123 必须为 0 或 1");
+#if TEST_CFG_DEDUP_UNIT_V1123
+#ifdef TEST_CFG_DEDUP_DELAYED_UPDATE
+#undef TEST_CFG_DEDUP_DELAYED_UPDATE
+#endif
+#define TEST_CFG_DEDUP_DELAYED_UPDATE 1
+#ifdef TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#undef TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#endif
+#define TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE 0
+#endif
+
 // [去重释放优先通道 20261109] dedup 通路的 UPDATE(释放)是否与 REQUEST 物理分离。
 //   背景(为何需要): 旧结构下 UPDATE 与 REQUEST/inside 共用 **单线程 scheduler**
 //     + **深度1** 的 dedup_hash_in_fifo + **单 hash 线程** + 每 RAM 一条 dedup_ram_fifo_。
@@ -218,6 +254,62 @@ static const uint32_t DEDUP_DELAYED_UPDATE_TIMER_NS = TEST_CFG_DEDUP_DELAYED_UPD
 #define TEST_CFG_DEDUP_DELAYED_PRESSURE_MARGIN 4
 #endif
 static const uint32_t DEDUP_DELAYED_PRESSURE_MARGIN = TEST_CFG_DEDUP_DELAYED_PRESSURE_MARGIN;
+
+// ============================================================
+// [去重单元机制优化 1123] 拓扑容量参数 (仅 V1123=1 生效)
+// ============================================================
+#if TEST_CFG_DEDUP_UNIT_V1123
+// 外层任务队列深度: req(主请求)=8, inter(预取)=1;
+//   update 外层队列即 dedup_delayed_update_fifo(深度24, 见上)。
+#ifndef TEST_CFG_DEDUP_REQ_FIFO_DEPTH
+#define TEST_CFG_DEDUP_REQ_FIFO_DEPTH 8
+#endif
+#ifndef TEST_CFG_DEDUP_INTER_FIFO_DEPTH
+#define TEST_CFG_DEDUP_INTER_FIFO_DEPTH 1
+#endif
+// drain->upd_hash 内部衔接FIFO深度(实现细节, 非架构外部队列; 取24与delayed同量,
+//   避免衔接段比delayed更紧而提前反压)。
+#ifndef TEST_CFG_DEDUP_UPD_HANDOFF_DEPTH
+#define TEST_CFG_DEDUP_UPD_HANDOFF_DEPTH 24
+#endif
+// RAM内类型化前置FIFO深度: req=32, inter=16(20261123由8调深), upd=2。
+#ifndef TEST_CFG_DEDUP_RAM_REQ_FIFO_DEPTH
+#define TEST_CFG_DEDUP_RAM_REQ_FIFO_DEPTH 32
+#endif
+#ifndef TEST_CFG_DEDUP_RAM_INTER_FIFO_DEPTH
+#define TEST_CFG_DEDUP_RAM_INTER_FIFO_DEPTH 16
+#endif
+#ifndef TEST_CFG_DEDUP_RAM_UPD_FIFO_DEPTH
+#define TEST_CFG_DEDUP_RAM_UPD_FIFO_DEPTH 2
+#endif
+// [G3] worker响应暂存FIFO深度: 解耦 worker 与 pt_hit/miss_response 反压,
+//   保证 upd FIFO 永不被"卡在响应写上的worker"顶住(死锁护栏)。
+#ifndef TEST_CFG_DEDUP_RSP_STAGE_DEPTH
+#define TEST_CFG_DEDUP_RSP_STAGE_DEPTH 64
+#endif
+static const uint32_t DEDUP_OUT_REQ_FIFO_DEPTH    = TEST_CFG_DEDUP_REQ_FIFO_DEPTH;
+static const uint32_t DEDUP_OUT_INTER_FIFO_DEPTH  = TEST_CFG_DEDUP_INTER_FIFO_DEPTH;
+static const uint32_t DEDUP_UPD_HANDOFF_DEPTH     = TEST_CFG_DEDUP_UPD_HANDOFF_DEPTH;
+static const uint32_t DEDUP_RAM_REQ_FIFO_DEPTH    = TEST_CFG_DEDUP_RAM_REQ_FIFO_DEPTH;
+static const uint32_t DEDUP_RAM_INTER_FIFO_DEPTH  = TEST_CFG_DEDUP_RAM_INTER_FIFO_DEPTH;
+static const uint32_t DEDUP_RAM_UPD_FIFO_DEPTH    = TEST_CFG_DEDUP_RAM_UPD_FIFO_DEPTH;
+static const uint32_t DEDUP_RSP_STAGE_DEPTH       = TEST_CFG_DEDUP_RSP_STAGE_DEPTH;
+
+// [P9->P1 实验 20261123] 预取注入模式 (TEST_CFG_DEDUP_PREFETCH_BLOCK):
+//   1(默认): 外层 inter req fifo(深度1)满时**阻塞写** —— 废除"满则丢弃"护栏G1,
+//     用于复现理论分析 P1 死锁环:
+//     worker X 任务中途阻塞写inter(1) ← inter-hash 阻塞写 bank Y 的 inter fifo(8)
+//     ← bank Y 的 worker 同样阻塞在 inter(1) 写上(或后续全部worker相继阻塞)
+//     → Y 的 upd 停止消费 → handoff/delayed 顶满 → agg_flush 停 → PTW 额度不释放
+//     → 释放链全停 → 环闭合。
+//   0: 维持 nb_write 满则丢弃(G1护栏, 与1123首版回归一致), 供A/B对照。
+#ifndef TEST_CFG_DEDUP_PREFETCH_BLOCK
+#define TEST_CFG_DEDUP_PREFETCH_BLOCK 1
+#endif
+static_assert(TEST_CFG_DEDUP_PREFETCH_BLOCK == 0 || TEST_CFG_DEDUP_PREFETCH_BLOCK == 1,
+              "DEDUP_PREFETCH_BLOCK 必须为 0 或 1");
+#endif // TEST_CFG_DEDUP_UNIT_V1123
+
 
 // ===================== 缓存参数 =====================
 // DC Cache (Device Context Cache)
@@ -391,12 +483,29 @@ static const bool PT_CACHE_DEDUP_ENABLED = true;             // 去重功能开�
 // 允许经 Makefile -DTEST_CFG_PT_DEDUP_BUFFER_SIZE=N 覆盖(如场景13调参为266):
 // Buffer < 全局outstanding时, execute_dedup_request在Buffer满时旁路直转PTW(不阻塞),
 // 避免 RAM Worker阻塞->RAM FIFO满->Hash/Scheduler阻塞->UPDATE无法分发 的死锁环。
+#if TEST_CFG_DEDUP_UNIT_V1123
+// [去重单元机制优化 1123] Buffer 拆分为 4 个 bank(与去重RAM一一绑定):
+//   每 bank DEDUP_BUFFER_PER_BANK(默认128) entry, 总容量 PT_DEDUP_BUFFER_SIZE=4x128=512。
+//   v1123 下 TEST_CFG_PT_DEDUP_BUFFER_SIZE(SCENE13_BUFFER) 不再生效(构造期提示一次);
+//   DEDUP_BUFFER_ENTRIES = 单bank数组/索引边界(bank局部索引)。
+#ifndef TEST_CFG_DEDUP_BUFFER_PER_BANK
+#define TEST_CFG_DEDUP_BUFFER_PER_BANK 128
+#endif
+static const uint32_t DEDUP_BUFFER_PER_BANK  = TEST_CFG_DEDUP_BUFFER_PER_BANK;
+static const uint32_t DEDUP_NUM_BANKS        = 4;
+static const uint32_t PT_DEDUP_BUFFER_SIZE   = DEDUP_NUM_BANKS * DEDUP_BUFFER_PER_BANK;
+static const uint32_t DEDUP_BUFFER_ENTRIES   = DEDUP_BUFFER_PER_BANK;
+#else
 #if defined(TEST_CFG_PT_DEDUP_BUFFER_SIZE)
 static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_PT_DEDUP_BUFFER_SIZE;
 #elif !defined(TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING)
 static const uint32_t PT_DEDUP_BUFFER_SIZE = 256;            // Buffer大小（entries）
 #else
 static const uint32_t PT_DEDUP_BUFFER_SIZE = TEST_CFG_IOMMU_GLOBAL_MAX_OUTSTANDING;
+#endif
+static const uint32_t DEDUP_BUFFER_PER_BANK = PT_DEDUP_BUFFER_SIZE;  // 旧路径单池=全容量
+static const uint32_t DEDUP_NUM_BANKS       = 1;
+static const uint32_t DEDUP_BUFFER_ENTRIES  = PT_DEDUP_BUFFER_SIZE;
 #endif
 // [准入控制开关] Buffer满后的处理机制, 两套机制共存, 编译期切换(Makefile: DEDUP_ADM=0/1):
 //   0 = bypass机制(默认): execute_dedup_request分配失败时旁路直转PTW(dedup_bypass);
@@ -431,8 +540,14 @@ static const uint32_t DEDUP_GET_SET_CYCLES     = 2;   // get cache set (稳态�
 static const uint32_t DEDUP_GET_FREE_LINE_CYCLES = 2; // hit? get free cache line
 static const uint32_t DEDUP_WRITE_LINE_CYCLES  = 1;   // write cache line
 // REQUEST/inter 原子段总周期 = get_set + get_free_line + write_line = 5cyc
+// [去重单元机制优化 1123] RAM内原子处理能力 5ns->4ns: 分量改 2+1+1
+//   (需求只定总数4ns, 分量拆分为实现口径假设A1); UPDATE 保持 3+链长x2 可变模型。
+#if TEST_CFG_DEDUP_UNIT_V1123
+static const uint32_t DEDUP_ATOMIC_CYCLES = 4;
+#else
 static const uint32_t DEDUP_ATOMIC_CYCLES =
     DEDUP_GET_SET_CYCLES + DEDUP_GET_FREE_LINE_CYCLES + DEDUP_WRITE_LINE_CYCLES;
+#endif
 // [机制v2] UPDATE 原子段 = 基础拍(get cache set/hit判断) + 链长 × 每entry刷新拍数
 static const uint32_t DEDUP_UPD_BASE_CYCLES    = 3;   // get cache set / hit判断
 #ifndef TEST_CFG_DEDUP_UPD_FLUSH_CYCLES

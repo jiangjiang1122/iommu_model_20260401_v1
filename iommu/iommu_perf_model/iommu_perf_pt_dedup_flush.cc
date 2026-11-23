@@ -35,12 +35,25 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
         return;
     }
 
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [去重单元机制优化 1123] Buffer 已拆 4 bank: upd 消息的页hash决定 bank,
+    //   链上全部 entry 属于该 bank 的局部索引空间(链不跨bank, 同页同bank不变量)。
+    const uint32_t bank = cache_sub.dedup_bank_of(upd.gscid, upd.pscid,
+                                                  upd.iova & ~static_cast<uint64_t>(0xFFF));
+    auto* dedup_buf = cache_sub.get_dedup_bank(bank);
+    if (dedup_buf == nullptr) {
+        printf("[DEDUP_FLUSH_CB] ERROR: dedup bank %u buffer is nullptr!\n", (unsigned)bank);
+        fflush(stdout);
+        return;
+    }
+#else
     auto* dedup_buf = cache_sub.get_pt_dedup_buffer();
     if (dedup_buf == nullptr) {
         printf("[DEDUP_FLUSH_CB] ERROR: dedup_buffer is nullptr!\n");
         fflush(stdout);
         return;
     }
+#endif
 
     const bool is_msi_flush = (upd.pt_data.reserved.is_msi != 0);
     const uint64_t pa_base = upd.dedup_pa_base & ~0xFFFULL;  // MSI时为GPA页基址
@@ -56,7 +69,7 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
 
     while (cur != DEDUP_BUFFER_INVALID_IDX) {
 #if TEST_CFG_MULTI_DEVICE_SCENE
-        iommu_md::require(cur < PT_DEDUP_BUFFER_SIZE && visited.insert(cur).second,
+        iommu_md::require(cur < DEDUP_BUFFER_ENTRIES && visited.insert(cur).second,
                           "去重刷新索引越界或链成环");
         const auto& checked = dedup_buf->entries[cur];
         iommu_md::require(checked.is_valid() && checked.task_ptr && checked.gscid == upd.gscid &&
@@ -64,7 +77,7 @@ void iommu_top::dedup_flush_chain_cb(uint16_t head_index,
             "去重刷新entry身份不匹配");
         iommu_md::require(checked.task_ptr->GSCID == upd.gscid && checked.task_ptr->PSCID == upd.pscid &&
             (checked.task_ptr->iova & ~0xFFFULL) == (upd.iova & ~0xFFFULL), "去重刷新task身份不匹配");
-        iommu_md::require(checked.next_index == DEDUP_BUFFER_INVALID_IDX || checked.next_index < PT_DEDUP_BUFFER_SIZE,
+        iommu_md::require(checked.next_index == DEDUP_BUFFER_INVALID_IDX || checked.next_index < DEDUP_BUFFER_ENTRIES,
                           "去重刷新next索引越界");
 #endif
         auto& entry = dedup_buf->entries[cur];

@@ -1116,6 +1116,18 @@ endif
 DEDUP_UPD_FLUSH_NS ?= 2
 TEST_FLAGS += -DTEST_CFG_DEDUP_UPD_FLUSH_CYCLES=$(DEDUP_UPD_FLUSH_NS)
 
+# [去重单元机制优化 1123] 总开关(对所有TEST生效, iommu_perf_params.hh 默认1):
+#   1=新机制(3Hash+4Bank×3RAM FIFO+4×128 Buffer绑定bank+4ns原子段+延时更新标准机制);
+#   0=旧机制(scheduler+单Hash+单Buffer), 供同码A/B对照。
+#   改此宏需 make clean 全量重编(Makefile不追踪 -D 宏)。
+DEDUP_UNIT_V1123 ?= 1
+TEST_FLAGS += -DTEST_CFG_DEDUP_UNIT_V1123=$(DEDUP_UNIT_V1123)
+
+# [P9->P1 实验] 预取注入模式(仅V1123=1生效): 1=外层inter fifo满则阻塞写(复现死锁环),
+#   0=满则丢弃(G1护栏)。改此宏需 make clean 全量重编。
+DEDUP_PF_BLOCK ?= 1
+TEST_FLAGS += -DTEST_CFG_DEDUP_PREFETCH_BLOCK=$(DEDUP_PF_BLOCK)
+
 # Source files
 CXX_SOURCES = \
     iommu/iommu_fun_model/iommu_utils.cc \

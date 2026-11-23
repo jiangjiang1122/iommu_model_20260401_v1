@@ -140,6 +140,21 @@ public:
     void set_dedup_buffer(DedupBuffer* buffer) { dedup_buffer_ = buffer; }
     DedupBuffer* get_pt_dedup_buffer() { return dedup_buffer_; }
     uint64_t get_dedup_buffer_full_bypass_count() const { return dedup_buffer_full_bypass_count_; }
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [去重单元机制优化 1123] V1123=1 时 dedup_buffer_ 为"聚合影子"实例(全4 bank合计口径),
+    //   既有消费方(iommu_top快照/[SW]报告/rp线程诊断)读到的即聚合值;
+    //   需要 bank 局部数据(entry链/局部占用)时用 get_dedup_bank(bank)。
+    DedupBuffer* get_dedup_bank(uint32_t bank) const {
+        return bank < DEDUP_NUM_BANKS ? dedup_banks_[bank] : nullptr;
+    }
+    // 页 -> bank 归属(与 hash 单元同一 compute_ram_id 口径; 同页链必同bank)
+    uint32_t dedup_bank_of(gscid_t gscid, pscid_t pscid, iova_t iova) const {
+        return dedup_cache_ ? dedup_cache_->compute_ram_id(gscid, pscid, iova & ~static_cast<iova_t>(0xFFF)) : 0;
+    }
+    uint32_t dedup_reserved_bank(uint32_t bank) const { return dedup_reserved_bank_[bank]; }
+    bool dedup_admission_ok_bank(uint32_t bank) const { return bank_admission_ok(bank); }
+    bool all_banks_full() const { return banks_all_full(); }
+#endif
 
     // [稳态窗口] 去重统计原始计数器透传(供双快照做差, 得到仅稳态窗口口径)
     uint64_t get_dedup_lookup_total()     const { return dedup_lookup_total_; }
@@ -206,7 +221,14 @@ public:
         int n = dedup_hash_in_fifo.num_available() +
                 dedup_inside_request_fifo.num_available();
         for (const auto& f : dedup_ram_fifo_) n += f->num_available();
-#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_UNIT_V1123
+        // [1123] 新拓扑全部在途通道: 外层req/update + per-RAM inter/upd + 响应staging
+        n += dedup_request_fifo.num_available();
+        n += dedup_update_fifo.num_available();
+        for (const auto& f : dedup_ram_inter_fifo_) n += f->num_available();
+        for (const auto& f : dedup_ram_upd_fifo_) n += f->num_available();
+        for (const auto& f : dedup_rsp_stage_fifo_) n += f->num_available();
+#elif TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
         // [释放优先通道] 新增的两类 FIFO 同样属于"在途", 必须计入终局排空判据,
         //   否则统计会提前结束而漏算未刷新的释放消息。
         n += dedup_upd_hash_in_fifo.num_available();
@@ -332,6 +354,15 @@ private:
     void dedup_scheduler_thread();
     void dedup_hash_process_thread();
     void dedup_ram_worker_thread(int ram_id);
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // [去重单元机制优化 1123] 新拓扑: 3个类型化Hash单元线程(req/inter/upd, 各1ns)
+    //   + 每bank响应写出线程(G3: worker经staging FIFO解耦响应反压)。
+    //   旧 dedup_scheduler_thread/dedup_hash_process_thread 不注册(代码保留供V1123=0)。
+    void dedup_req_hash_thread();
+    void dedup_inter_hash_thread();
+    void dedup_upd_hash_thread();
+    void dedup_rsp_writer_thread(int bank_id);
+#endif
     void msi_scheduler_thread();
     void walker_update_worker_thread();
     void invalidation_worker_thread();
@@ -467,12 +498,69 @@ private:
     sc_fifo<CacheMessage> dedup_upd_hash_in_fifo;
 #endif
     // 每组 RAM 前置 FIFO (深度 ram_fifo_depth, 满则反压 Hash 单元)
+    // [1123] V1123=1 时本通道为 per-RAM req FIFO(深度 DEDUP_RAM_REQ_FIFO_DEPTH=32)
     std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_fifo_;
-#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
+#if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE || TEST_CFG_DEDUP_UNIT_V1123
     // [释放优先通道] 每组 RAM 的 UPDATE 前置 FIFO(深度同 ram_fifo_depth),
     //   对齐 walker_ram_upd_fifo_ 范式; RAM worker 侧对本通道严格优先。
+    // [1123] V1123=1 时深度=DEDUP_RAM_UPD_FIFO_DEPTH(2), 由专用 upd hash 线程写入。
     std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_upd_fifo_;
 #endif
+#if TEST_CFG_DEDUP_UNIT_V1123
+    // ============================================================
+    // [去重单元机制优化 1123] 新拓扑成员 (V1123=1 专用)
+    // ============================================================
+    // per-RAM inter(预取)前置FIFO(深度8): 由 inter hash 线程写入
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_ram_inter_fifo_;
+    // [G3] per-bank 响应暂存FIFO(深度64): worker nb_write, writer线程阻塞push到
+    //   pt_hit/pt_miss_response_fifo —— worker 永不因响应反压停摆, upd 出队通道畅通。
+    std::vector<std::unique_ptr<sc_fifo<CacheMessage>>> dedup_rsp_stage_fifo_;
+    // 4个与bank一一绑定的去重Buffer(每bank 128 entry); dedup_buffer_ 指向聚合影子。
+    DedupBuffer* dedup_banks_[DEDUP_MAX_RAMS] = {};
+    // [准入控制] per-bank 预留计数: worker 从本bank req fifo 出队主请求时+1,
+    //   execute_dedup_request 内 allocate成功(转valid)或bypass归还时-1。
+    uint16_t dedup_reserved_bank_[DEDUP_MAX_RAMS] = {};
+    uint16_t dedup_reserved_bank_peak_[DEDUP_MAX_RAMS] = {};
+    // 任一bank容量释放(free_entry经聚合影子无法发事件, 由subsystem在归还预留时
+    //   notify本事件; entry释放事件用聚合影子 dedup_buffer_->free_event 转发)
+    sc_event dedup_admission_released_ev_;
+    // [STAT] 3个Hash单元: 0=req, 1=inter, 2=upd
+    uint64_t dedup_v1123_hash_cnt_[3]      = {};
+    double   dedup_v1123_hash_busy_ns_[3]  = {};
+    uint64_t dedup_v1123_hash_bp_cnt_[3]   = {};
+    double   dedup_v1123_hash_bp_ns_[3]    = {};
+    // [STAT] per-RAM inter/upd 前置FIFO占用峰值(push时采样) + bank门控跳过计数
+    int      dedup_ram_inter_fifo_peak_[DEDUP_MAX_RAMS] = {};
+    int      dedup_ram_upd_fifo_peak_[DEDUP_MAX_RAMS]   = {};
+    uint64_t dedup_bank_gate_cnt_[DEDUP_MAX_RAMS]       = {};  // worker因bank满跳过req/inter出队次数
+    uint64_t dedup_rsp_stage_full_cnt_ = 0;  // [G3兜底] staging满回退阻塞写次数(理论0)
+    // [STAT] per-RAM inter/upd 前置FIFO 写入加权采样(与req通道 dedup_ram_push_occ_sum_ 同口径:
+    //   push 后读 num_available 累加, 均值=Σocc/pushes, 非时间加权)
+    uint64_t dedup_ram_inter_push_occ_sum_[DEDUP_MAX_RAMS] = {};
+    uint64_t dedup_ram_inter_push_cnt_[DEDUP_MAX_RAMS]     = {};
+    uint64_t dedup_ram_upd_push_occ_sum_[DEDUP_MAX_RAMS]   = {};
+    uint64_t dedup_ram_upd_push_cnt_[DEDUP_MAX_RAMS]       = {};
+    // [P9->P1实验] 预取阻塞写统计(PF_BLOCK=1): worker 任务中途阻塞在外层inter(1)写的
+    //   次数/总时长/单次最大时长(死锁环取证关键指标)
+    uint64_t dedup_pf_block_cnt_     = 0;
+    double   dedup_pf_block_ns_      = 0.0;
+    double   dedup_pf_block_max_ns_  = 0.0;
+    // [STAT需求] per-RAM 3类FIFO + staging 占用时间加权采样
+    FifoOccStat fifo_stat_dedup_ram_inter_[DEDUP_MAX_RAMS];
+    FifoOccStat fifo_stat_dedup_ram_upd_[DEDUP_MAX_RAMS];
+    FifoOccStat fifo_stat_dedup_rsp_[DEDUP_MAX_RAMS];
+    // bank级准入判定: valid+reserved < 每bank容量 (检查与出队/预留间无wait, 协作式原子)
+    bool bank_admission_ok(uint32_t bank) const {
+        if (!dedup_banks_[bank]) return true;
+        return dedup_banks_[bank]->get_valid_count() + dedup_reserved_bank_[bank]
+               < (uint16_t)DEDUP_BUFFER_PER_BANK;
+    }
+    bool banks_all_full() const {
+        for (uint32_t b = 0; b < DEDUP_NUM_BANKS; ++b)
+            if (bank_admission_ok(b)) return false;
+        return true;
+    }
+#endif // TEST_CFG_DEDUP_UNIT_V1123
 
     // [STAT] Hash 单元统计
     uint64_t dedup_hash_task_count_       = 0;    // Hash处理任务总数

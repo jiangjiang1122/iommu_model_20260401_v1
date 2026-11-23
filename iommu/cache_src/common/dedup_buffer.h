@@ -74,12 +74,26 @@ struct DedupBufferEntry {
  * - 顺序分配（0, 1, 2...）
  * - 链表挂接
  * - 释放Entry
+ *
+ * [去重单元机制优化 1123] V1123=1 时实例化为 4 个 bank(每 bank DEDUP_BUFFER_PER_BANK=128
+ *   entry, 与去重RAM一一绑定; 链索引为 bank 局部索引), 外加一个"聚合影子"实例:
+ *   各 bank 通过 agg 指针把 valid_count/峰值/占用积分/持有延时同步累计到影子实例,
+ *   使既有 get_pt_dedup_buffer() 消费方(iommu_top快照/[SW]报告/rp线程诊断)无需改动
+ *   即可读到全 4 bank 的聚合口径。V1123=0 时 agg=nullptr, 单实例行为逐位不变。
  */
 struct DedupBuffer {
-    DedupBufferEntry entries[PT_DEDUP_BUFFER_SIZE];
+    DedupBufferEntry entries[DEDUP_BUFFER_ENTRIES];
+    uint32_t         bank_id  = 0;              // [1123] bank 编号(聚合影子=0xFFFFFFFF)
+    DedupBuffer*     agg      = nullptr;        // [1123] 聚合影子指针(非空时alloc/free同步累计)
+    uint32_t         capacity = DEDUP_BUFFER_ENTRIES;  // [1123] 占用率分母(影子=总容量512)
     uint16_t         valid_count = 0;       // 当前有效Entry数量
     uint16_t         peak_valid_count = 0;  // [STAT] 峰值有效Entry数量
     sc_event         free_event;            // [P3/P5] Buffer释放事件（反压通知）
+
+    // [1123] 构造后初始化: bank 编号 + 聚合影子 + 占用率分母
+    void init(uint32_t bid, DedupBuffer* agg_ptr, uint32_t cap) {
+        bank_id = bid; agg = agg_ptr; capacity = cap;
+    }
     // [STAT] buffer任务持有延时(申请allocate_entry → PTW完成free_entry)
     double           total_hold_ns = 0.0;
     uint64_t         hold_count = 0;
@@ -107,13 +121,14 @@ struct DedupBuffer {
      * @return Entry索引（0~255），失败返回0xFF
      */
     uint16_t allocate_entry() {
-        if (valid_count >= PT_DEDUP_BUFFER_SIZE) {
-            std::cout << "[DEDUP_BUFFER] Buffer full! Cannot allocate entry." << std::endl;
+        if (valid_count >= DEDUP_BUFFER_ENTRIES) {
+            std::cout << "[DEDUP_BUFFER] Buffer full! Cannot allocate entry. bank="
+                      << bank_id << std::endl;
             return DEDUP_BUFFER_INVALID_IDX;
         }
         
         // 从0开始线性查找第一个空闲Entry
-        for (uint32_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
+        for (uint32_t i = 0; i < DEDUP_BUFFER_ENTRIES; i++) {
             if (!entries[i].is_valid()) {
                 entries[i].clear();
                 entries[i].valid = 1;
@@ -124,6 +139,14 @@ struct DedupBuffer {
                 // [稳态窗口] 峰值不可做差, 单独累加一份仅窗口内的峰值
                 if (g_iommu_steady_sampling && valid_count > steady_peak_valid_count)
                     steady_peak_valid_count = valid_count;
+                // [1123] 同步累计到聚合影子
+                if (agg) {
+                    agg->settle_occupancy();
+                    agg->valid_count++;
+                    if (agg->valid_count > agg->peak_valid_count) agg->peak_valid_count = agg->valid_count;
+                    if (g_iommu_steady_sampling && agg->valid_count > agg->steady_peak_valid_count)
+                        agg->steady_peak_valid_count = agg->valid_count;
+                }
                 return static_cast<uint16_t>(i);  // 返回索引（0, 1, 2, ...顺序）
             }
         }
@@ -137,7 +160,7 @@ struct DedupBuffer {
      * @param idx Entry索引
      */
     void free_entry(uint16_t idx) {
-        if (idx == DEDUP_BUFFER_INVALID_IDX || idx >= PT_DEDUP_BUFFER_SIZE) return;
+        if (idx == DEDUP_BUFFER_INVALID_IDX || idx >= DEDUP_BUFFER_ENTRIES) return;
         if (entries[idx].is_valid()) {
             // [STAT] 记录持有延时(申请→PTW完成释放)
             double hold_ns = sc_time_stamp().to_seconds() * 1e9 - entries[idx].alloc_time_ns;
@@ -151,10 +174,23 @@ struct DedupBuffer {
                     if (hold_ns > steady_max_hold_ns) steady_max_hold_ns = hold_ns;
                     if (hold_ns < steady_min_hold_ns) steady_min_hold_ns = hold_ns;
                 }
+                // [1123] 持有延时同步累计到聚合影子
+                if (agg) {
+                    agg->total_hold_ns += hold_ns;
+                    agg->hold_count++;
+                    if (hold_ns > agg->max_hold_ns) agg->max_hold_ns = hold_ns;
+                    if (hold_ns < agg->min_hold_ns) agg->min_hold_ns = hold_ns;
+                    if (g_iommu_steady_sampling) {
+                        if (hold_ns > agg->steady_max_hold_ns) agg->steady_max_hold_ns = hold_ns;
+                        if (hold_ns < agg->steady_min_hold_ns) agg->steady_min_hold_ns = hold_ns;
+                    }
+                }
             }
             entries[idx].clear();
             settle_occupancy();  // [STAT需求] 结算占用积分(变化前)
             valid_count--;
+            // [1123] 聚合影子占用同步(先结算尾段再递减)
+            if (agg) { agg->settle_occupancy(); agg->valid_count--; }
             // [P5] 通知反压等待者：有Buffer Entry被释放
             free_event.notify(SC_ZERO_TIME);
         }
@@ -163,7 +199,7 @@ struct DedupBuffer {
     /**
      * @brief 检查Buffer是否已满
      */
-    bool is_full() const { return valid_count >= PT_DEDUP_BUFFER_SIZE; }
+    bool is_full() const { return valid_count >= DEDUP_BUFFER_ENTRIES; }
     
     /**
      * @brief 获取当前有效Entry数量
@@ -180,7 +216,7 @@ struct DedupBuffer {
         double span = last_change_ns_ - first_change_ns_;
         return span > 0.0 ? occupancy_integral_ / span : 0.0;
     }
-    double   get_avg_occupancy_pct() const { return get_avg_occupancy() / PT_DEDUP_BUFFER_SIZE * 100.0; }
+    double   get_avg_occupancy_pct() const { return get_avg_occupancy() / capacity * 100.0; }
     double   get_occupancy_window_ns() const {
         return (first_change_ns_ >= 0.0 && last_change_ns_ > first_change_ns_) ? (last_change_ns_ - first_change_ns_) : 0.0;
     }
@@ -203,7 +239,7 @@ struct DedupBuffer {
      * @brief 重置Buffer（清空所有Entry）
      */
     void reset() {
-        for (uint32_t i = 0; i < PT_DEDUP_BUFFER_SIZE; i++) {
+        for (uint32_t i = 0; i < DEDUP_BUFFER_ENTRIES; i++) {
             entries[i].clear();
         }
         valid_count = 0;
