@@ -7,71 +7,79 @@ scope:
 source_files:
     - Makefile
     - build_cpp.sh
+    - compile_systemc.bat
+    - compile_wsl.sh
+    - link_and_run.sh
     - main.cpp
-    - iommu/cache_config/default_config.json
-    - iommu/cache_src/common/json_config.cpp
-    - iommu/cache_src/common/json_config.h
-    - iommu/cache_src/common/mini_json.h
 ---
 
 ## 1. 使用的系统与工具
 
-本项目是一个纯 C++ SystemC 性能/功能模型，**没有使用任何包管理器**（无 `go.mod`、`package.json`、`CMakeLists.txt`、`vcpkg.json`、`conanfile.py` 等）。所有第三方依赖通过 **SystemC 运行时库** 以系统级静态/动态库形式引入，由根目录的 `Makefile` 和辅助脚本 `build_cpp.sh` 直接编译与链接。
+本项目是一个纯 C++/SystemC 仿真模型，**没有使用任何语言级包管理器**（如 Conan、vcpkg、npm、pip、go mod 等），也没有 vendoring 第三方源码。所有外部依赖通过 **GNU Make + g++** 直接链接到宿主系统的已安装库：
 
-- 编译器：`g++` / `gcc`，语言标准固定为 `-std=c++17`。
-- 构建系统：GNU Make（`Makefile`），辅以若干 shell 脚本（`build_cpp.sh`、`compile_and_test.sh`、`link_and_run.sh`、`run_wsl.sh` 等）作为便捷入口。
-- 外部依赖：仅依赖操作系统提供的 SystemC 库（`-lsystemc -lpthread -lm`）以及 POSIX 线程。
+- **SystemC 2.x**：唯一的第三方运行时库，通过 `-lsystemc -Wl,--no-as-needed` 链接。
+- **POSIX 标准库**：`-lpthread -lm`。
+- **编译器**：g++，要求 C++17（`-std=c++17`）。
+
+构建入口是根目录的 `Makefile`，另有辅助脚本 `build_cpp.sh`、`compile_wsl.sh`、`compile_systemc.bat` 用于不同环境。
 
 ## 2. 关键文件
 
-| 文件 | 作用 |
-|---|---|
-| `Makefile` | 主构建规则，声明所有源文件、头文件搜索路径、测试场景、调试宏、链接选项 |
-| `build_cpp.sh` | 独立于 Make 的手动编译脚本，逐文件编译 `iommu/cache_src/*.cpp` 并链接 |
-| `main.cpp` | 程序入口，链接到 SystemC 仿真内核 |
-| `iommu/include/*.hh` | 项目内部公共接口头文件，被各模块包含 |
-| `iommu/cache_src/common/json_config.h` | 解析 `default_config.json` 等配置文件的轻量 JSON 解析器（`mini_json.h`） |
-| `iommu/cache_config/default_config.json` | 缓存子系统运行参数配置文件 |
+- `Makefile`：定义全部编译/链接参数、源文件清单、测试场景选择、目标产物 `iommu_model`。
+- `build_cpp.sh`：逐文件编译 `iommu/cache_src/*.cpp` 并链接的 Bash 脚本，作为 Make 之外的备选路径。
+- `compile_systemc.bat`：在 Windows 上从源码编译并安装 SystemC 2.3.3 的批处理脚本，设置 `SYSTEMC_HOME` / `SYSTEMC_INCLUDE` / `SYSTEMC_LIBDIR` 环境变量。
+- `compile_wsl.sh`：在 WSL 环境中执行 `make clean && make all` 的封装脚本。
+- `link_and_run.sh`、`run_wsl.sh`、`test_*.sh`、`check_*.sh`：运行与验证脚本，不引入新依赖。
 
 ## 3. 架构与约定
 
-### 3.1 依赖来源
-- **SystemC 运行时**：通过硬编码的系统路径引入——
-  - `SYSTEMC_PREFIX = /usr`
-  - `SYSTEMC_INCLUDE = /usr/include`
-  - `SYSTEMC_LIB = /usr/lib/x86_64-linux-gnu`
-  - 链接时追加 `-L$(SYSTEMC_LIB) -lsystemc -Wl,--no-as-needed -lpthread -lm`
-- **POSIX 线程与数学库**：`-lpthread -lm`。
-- **无 vendoring**：项目中不存在 `vendor/`、`third_party/`、`lib/` 等子目录；所有第三方代码均以系统安装方式提供。
+### 3.1 依赖声明方式
 
-### 3.2 版本锁定策略
-- **无 lockfile**：仓库中不存在 `*.lock`、`*.sum`、`Pipfile.lock`、`poetry.lock` 等同构文件。
-- **版本约束方式**：完全依赖宿主系统的 SystemC 安装。构建脚本中通过编译期宏 `-DSC_DISABLE_API_VERSION_CHECK` 显式关闭 SystemC API 版本检查，使项目可兼容不同版本的 SystemC 安装。
-- **可移植性约定**：若 SystemC 安装在非 `/usr` 路径，需修改 `Makefile` 中的 `SYSTEMC_*` 变量（见注释 `# adjust these paths if SystemC is installed elsewhere`）。
+依赖不是以声明式清单（如 `package.json`、`go.mod`、`CMakeLists.txt`）集中描述，而是**硬编码在构建脚本中**：
 
-### 3.3 内部模块组织（自包含依赖）
-项目自身按功能划分为多个子目录，彼此通过头文件包含而非共享库解耦：
-- `iommu/iommu_fun_model/`：IOMMU 功能模型实现
-- `iommu/iommu_perf_model/`：性能采集与统计
-- `iommu/cache_src/{cache,common,replacement,subsystem}/`：PT/DC/PC/Walker/Msipt 缓存及替换策略
-- `rp/`、`slink/`、`pcienoc/`、`ddr/`：各类测试驱动与外设模拟
-- 所有 `.cc/.cpp` 源文件在 `Makefile` 的 `CXX_SOURCES` 中集中声明，统一编译到 `build/` 目录后链接为单一可执行文件 `iommu_model`。
+| 位置 | 内容 |
+|---|---|
+| `Makefile` L21–23 | `SYSTEMC_PREFIX = /usr`、`SYSTEMC_INCLUDE = /usr/include`、`SYSTEMC_LIB = /usr/lib/x86_64-linux-gnu` |
+| `Makefile` L26 | `CXXFLAGS` 通过 `-I$(SYSTEMC_INCLUDE)` 将 SystemC 头文件纳入搜索路径 |
+| `Makefile` L39 | `LIBS = -lsystemc -Wl,--no-as-needed -lpthread -lm` |
+| `Makefile` L311 | 链接阶段 `-L$(SYSTEMC_LIB) $(LIBS)` |
+| `build_cpp.sh` L4/L20 | 同样的 `-I/usr/include` 和 `-L/usr/lib/x86_64-linux-gnu -lsystemc` |
+| `compile_systemc.bat` L5–7 | Windows 下 SystemC 源码路径 `D:\TOOLS\systemc-2.3.3`，安装到 `D:\TOOLS\systemc-2.3.3\install` |
 
-### 3.4 构建产物与清理
-- 对象文件输出至 `build/` 目录（`build/%.o`），最终产物为根目录下的 `iommu_model`。
-- `make clean` 会删除 `build/` 目录及目标文件。
-- 单元测试 `test_dedup_unit` 通过 `Makefile` 中的独立 target 用 `g++` 直接编译单个 `.cpp` 生成 `./test_dedup_unit`。
+### 3.2 版本管理策略
+
+- **SystemC 版本**：Windows 脚本固定为 `systemc-2.3.3`；Linux 默认假设系统包管理器安装的任意 2.x 版本位于 `/usr`。**仓库内没有锁定具体版本号**。升级 SystemC 需要手动修改 `Makefile` 中的 `SYSTEMC_*` 路径或重新安装系统包。
+- **C++ 标准**：固定为 C++17（`-std=c++17`），由编译器保证。
+- **无 lockfile**：不存在 `package-lock.json`、`go.sum`、`Pipfile.lock`、`conan.lock` 等任何锁文件。
+
+### 3.3 本地源码依赖组织
+
+项目自身代码按功能模块分目录组织，并通过 `#include` 相对路径引用，而非通过包管理器分发：
+
+- `iommu/iommu_fun_model/`、`iommu/iommu_perf_model/`、`iommu/include/`：IOMMU 核心逻辑。
+- `iommu/cache_src/{cache,common,replacement,subsystem}`：缓存子系统源码。
+- `rp/`、`pcienoc/`、`slink/`、`ddr/`：Root Port、PCIe NoC、串行链路、DDR 测试驱动。
+- `main.cpp`：SystemC 仿真入口。
+
+这些模块之间通过 `Makefile` 中的 `CXX_SOURCES` 列表显式参与编译，而不是通过自动依赖发现。
+
+### 3.4 多平台构建约定
+
+| 平台 | 构建方式 | 依赖安装位置 |
+|---|---|---|
+| Linux (原生/WSL) | `make all` 或 `./compile_wsl.sh` | 系统包管理器安装的 SystemC，位于 `/usr` |
+| Windows | `compile_systemc.bat` 先编译安装 SystemC，再手动用 MSVC/g++ 编译 | `D:\TOOLS\systemc-2.3.3\install` |
 
 ## 4. 约定与约束
 
-- **必须使用 C++17**：所有编译命令均带 `-std=c++17`，禁止降级。
-- **SystemC 必须已安装到系统路径**：默认期望位于 `/usr/include` 与 `/usr/lib/x86_64-linux-gnu`；若不在该位置，需手动修改 `Makefile` 中的 `SYSTEMC_*` 变量。
-- **禁用 SystemC API 版本检查**：通过 `-DSC_DISABLE_API_VERSION_CHECK` 宏强制跳过版本校验，以便在不同 SystemC 发行版间复用同一份源码。
-- **允许重复符号定义**：链接时使用 `-Wl,--allow-multiple-definition`，表明项目接受多 TU 中存在同名符号（通常用于单测或临时 hack）。
-- **调试/发布开关**：通过 `DEBUG=0/1` 切换 `-O0 -g -DDEBUG*` 与 `-O3 -DNDEBUG` 两套编译标志。
-- **测试场景通过 `TEST=` 选择**：`Makefile` 根据 `TEST` 变量选择对应的 `rp/test_rp_*.cc` 测试源文件和一组 `TEST_CFG_*` 编译期宏，无需重新维护源码即可切换行为。
-- **配置文件与源码分离**：缓存相关参数集中在 `iommu/cache_config/default_config.json`，由 `json_config.cpp` 在运行时读取，避免硬编码。
+- **必须预先安装 SystemC 头文件和库**：`Makefile` 假定 `systemc.h` 可在 `-I/usr/include` 找到，`libsystemc.so` 可在 `-L/usr/lib/x86_64-linux-gnu` 链接。若不在该路径，需通过 `SYSTEMC_INCLUDE` / `SYSTEMC_LIB` 覆盖（见 `build_log.txt` 中 `SYSTEMC_INCLUDE=D:/TOOLS/syst...` 的调用示例）。
+- **SystemC API 版本检查被禁用**：编译时强制传入 `-DSC_DISABLE_API_VERSION_CHECK`，使模型可兼容不同版本的 SystemC 二进制接口。
+- **动态进程支持**：通过 `-DSC_INCLUDE_DYNAMIC_PROCESSES` 启用 SystemC 动态进程。
+- **调试/发布开关**：`DEBUG=1`（默认）开启 `-g -O0 -DDEBUG` 及大量 `DEBUG_*` 宏；`DEBUG=0` 切换为 `-O3 -DNDEBUG`。
+- **测试场景通过 `TEST=` 变量选择**：`make TEST=rand4k_singlestage`、`make TEST=seq128k_twostage`、`make TEST=msi_perf` 等，每个场景对应 `rp/test_rp_*.cc` 中的一个线程源文件，并通过 `TEST_FLAGS` 注入编译期配置宏（如 `TEST_CFG_PTW_MAX_OUTSTANDING_TASKS`、`TEST_TWO_STAGE`）。
+- **无私有注册表**：未配置任何私有 npm/pip/Conan/Cargo 注册表，所有依赖来自系统路径或源码树。
+- **无 CI 自动化**：仓库中没有 GitHub Actions / Jenkins / GitLab CI 等流水线，依赖安装与构建完全依赖开发者本地环境。
 
 ## 5. 总结
 
-该项目采用最简化的 C++ 构建方式：**Makefile + 系统级 SystemC 库**，不引入任何包管理器、锁文件或私有仓库。依赖管理的核心就是确保宿主环境正确安装了 SystemC 及其头文件/库，并通过 `SYSTEMC_*` 变量指向其安装路径。升级第三方依赖等同于升级系统安装的 SystemC 版本，并在必要时调整 `SYSTEMC_*` 路径。
+本项目的“依赖管理”本质上是**手工维护的 Makefile + 系统级库链接**模式：SystemC 作为唯一外部依赖，其路径、版本、头文件/库目录全部硬编码在 `Makefile` 和若干脚本中，没有包管理器、lockfile 或 vendoring 机制。跨平台差异通过 `compile_systemc.bat`（Windows）和 `compile_wsl.sh`（WSL/Linux）两个入口脚本分别处理。这种方式的优点是简单直接，缺点是缺乏可复现的版本锁定和便捷的依赖迁移能力。

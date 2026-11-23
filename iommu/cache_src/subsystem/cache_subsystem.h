@@ -350,7 +350,8 @@ private:
     CacheMessage execute_pc_request(const CacheMessage& req);
     CacheMessage execute_pt_request(const CacheMessage& req);
     CacheMessage execute_dedup_request(const CacheMessage& req);
-    void         execute_dedup_update(const CacheMessage& upd);
+    // [机制v2] 返回实际刷新的Buffer链长(无链可刷返回0), 供worker计算可变原子段
+    uint32_t     execute_dedup_update(const CacheMessage& upd);
     CacheMessage execute_walker_request(const CacheMessage& req);
     CacheMessage execute_msi_request(const CacheMessage& req);
     CacheMessage execute_dc_update_request(const CacheMessage& req);

@@ -1108,6 +1108,14 @@ else
     TEST_FLAGS =
 endif
 
+# [去重单元机制v2 20261119] 全局生效(所有TEST场景):
+#   仲裁严格优先级 UPDATE > inter(预取) > REQUEST; UPDATE原子段=3拍+链长×每entry刷新拍数。
+#   DEDUP_UPD_FLUSH_NS: 刷新Buffer每entry拍数(ns), 默认2(20261119起定为全场景默认口径);
+#   链长8的UPDATE原子段=3+8*2=19ns; 如需旧对照口径显式传1(=11ns)。
+#   改此宏需 make clean 全量重编(Makefile不追踪 -D 宏)。
+DEDUP_UPD_FLUSH_NS ?= 2
+TEST_FLAGS += -DTEST_CFG_DEDUP_UPD_FLUSH_CYCLES=$(DEDUP_UPD_FLUSH_NS)
+
 # Source files
 CXX_SOURCES = \
     iommu/iommu_fun_model/iommu_utils.cc \

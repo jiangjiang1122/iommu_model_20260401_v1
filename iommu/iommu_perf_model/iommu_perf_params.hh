@@ -417,17 +417,28 @@ static const uint16_t DEDUP_BUFFER_INVALID_IDX = 0xFFFF;     // 无效索引标�
 
 // ===================== dedup_cache 流水线时序参数 =====================
 // [dedup多RAM] 查询流水线: Scheduler -> Hash(1cyc, dedup_hash_process_thread显式消耗)
-//   -> 按ram_id分发 -> RAM原子段[get set -> get free line -> write line](5cyc,
-//      dedup_ram_worker_thread消耗, 同RAM串行/跨RAM并发)
-// MISS的D个预取占位异步化为独立任务(经dedup_inside_request_fifo), 各消耗1个原子段。
-// 稳态吞吐 ≈ num_rams 个结果 / 5cyc (跨RAM并发理想情况)。
+//   -> 按ram_id分发 -> RAM原子段(dedup_ram_worker_thread消耗, 同RAM串行/跨RAM并发)
+// [机制v2 20261119] 仲裁改为严格优先级 UPDATE > inter(预取) > REQUEST(原乒乓废除);
+//   REQUEST/inter原子段仍为固定5cyc[get set(2)+get free line(2)+write line(1)];
+//   UPDATE原子段改为可变: 3cyc(get cache set/hit判断) + 实际刷新Buffer链长 × 每entry刷新拍数
+//   (DEDUP_UPD_FLUSH_CYCLES, Makefile DEDUP_UPD_FLUSH_NS 配置, 默认2ns, 20261119起全场景默认);
+//   链长按刷新时刻链上实际挂起任务数动态判定(512B典型8, PTW提前返回可不足8,
+//   128B场景最长32); 无链可刷(无占位/预取占位/foreign跳过)仅计3cyc。原子段期间独占本RAM,
+//   阻塞同RAM后续查询。MISS的D个预取占位异步化为独立任务(经dedup_inside_request_fifo),
+//   各消耗1个5cyc原子段。稳态查询吞吐 ≈ num_rams 个结果 / 5cyc (跨RAM并发理想情况)。
 static const uint32_t DEDUP_HASH_CYCLES        = 1;   // hash 单元单拍延时
 static const uint32_t DEDUP_GET_SET_CYCLES     = 2;   // get cache set (稳态口径, 见需求书注2/3)
 static const uint32_t DEDUP_GET_FREE_LINE_CYCLES = 2; // hit? get free cache line
 static const uint32_t DEDUP_WRITE_LINE_CYCLES  = 1;   // write cache line
-// 原子段总周期 = get_set + get_free_line + write_line = 5cyc
+// REQUEST/inter 原子段总周期 = get_set + get_free_line + write_line = 5cyc
 static const uint32_t DEDUP_ATOMIC_CYCLES =
     DEDUP_GET_SET_CYCLES + DEDUP_GET_FREE_LINE_CYCLES + DEDUP_WRITE_LINE_CYCLES;
+// [机制v2] UPDATE 原子段 = 基础拍(get cache set/hit判断) + 链长 × 每entry刷新拍数
+static const uint32_t DEDUP_UPD_BASE_CYCLES    = 3;   // get cache set / hit判断
+#ifndef TEST_CFG_DEDUP_UPD_FLUSH_CYCLES
+#define TEST_CFG_DEDUP_UPD_FLUSH_CYCLES 2
+#endif
+static const uint32_t DEDUP_UPD_FLUSH_CYCLES = TEST_CFG_DEDUP_UPD_FLUSH_CYCLES; // 刷新Buffer每entry拍数(ns)
 
 // ===================== Walk上下文读缓冲区大小 =====================
 // 必须同时满足：

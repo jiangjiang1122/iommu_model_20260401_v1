@@ -9,63 +9,75 @@ source_files:
     - iommu/cache_config/input_params_example.json
     - iommu/cache_src/common/json_config.h
     - iommu/cache_src/common/json_config.cpp
-    - iommu/cache_src/common/mini_json.h
     - iommu/cache_src/common/types.h
     - iommu/cache_src/subsystem/cache_subsystem.h
+    - iommu/iommu_top.hh
 ---
 
-## 1. 系统概述
+## 1. 采用的方案
 
-该仓库为 RISC-V IOMMU SystemC 性能与功能仿真模型，其**配置系统**专门服务于 `iommu/cache_src` 下的缓存子系统（DC/PC/MSIPT/PT/Dedup/Walker Cache），通过一个自实现的轻量 JSON 解析器加载外部 JSON 配置文件，将运行时参数注入到 `GlobalConfig` 结构体中，再由 `CacheSubsystem` 构造时消费。
+本仓库使用自研的轻量级 JSON 配置加载器（`iommu/cache_src/common/mini_json.h` + `json_config.cpp`）来加载 RISC-V IOMMU 性能仿真中 cache subsystem 的全部运行时参数。没有引入外部配置库，也没有环境变量或命令行参数解析；所有可配置项集中在 `iommu/cache_config/` 下的 JSON 文件中。
 
-## 2. 核心文件与职责
+## 2. 关键文件与包
 
-- **`iommu/cache_config/default_config.json`**：默认配置模板，定义全局时钟、随机种子、各 cache 几何（sets/ways/replacement）、时序延迟、Walker Cache 三级子表、失效策略（LIB/VN）及统计输出。
-- **`iommu/cache_config/input_params_example.json`**：用户示例配置，展示可覆盖的子集字段。
-- **`iommu/cache_src/common/mini_json.h`**：自实现 JSON 解析器 `mini_json::Parser`，支持对象、数组、字符串、布尔、数字、null，并允许 `//` 行注释和 `/* */` 块注释，无外部依赖。
-- **`iommu/cache_src/common/json_config.h/.cpp`**：暴露 `load_config(json_path)` 与 `parse_config(json_str)` 两个入口；内部按 section 分派解析函数（如 `parse_cache_timing_config`、`parse_cache_config`）。
-- **`iommu/cache_src/common/types.h`**：定义所有配置结构体——`CacheConfig`、`InvalidationConfig`、`StatsConfig`、`GlobalConfig`，以及各 cache 的默认值（如 PT Cache 默认 `num_sets=1024, num_ways=8, replacement="srrip"`）。
-- **`iommu/cache_src/subsystem/cache_subsystem.h`**：`CacheSubsystem` 构造函数签名 `CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)`，从外部传入已解析的配置。
+- `iommu/cache_config/default_config.json`：默认完整配置模板，包含 global、cache_timing、dc_cache、pc_cache、msipt_cache、pt_cache、dedup_cache、walker_cache、statistics、invalidation 全部字段。
+- `iommu/cache_config/input_params_example.json`：精简版示例，仅含必要字段，用于演示最小配置集。
+- `iommu/cache_src/common/json_config.h` / `json_config.cpp`：暴露 `load_config(json_path)` 和 `parse_config(json_str)` 两个入口，内部依赖 `mini_json::Parser`。
+- `iommu/cache_src/common/types.h`：定义配置结构体 `CacheConfig`、`InvalidationConfig`、`StatsConfig`、`GlobalConfig`，是 JSON 到 C++ 对象的映射目标。
+- `iommu/cache_src/subsystem/cache_subsystem.h` / `.cpp`：`CacheSubsystem` 模块构造函数签名 `CacheSubsystem(sc_module_name, const GlobalConfig&)`，消费 `GlobalConfig` 实例化各 cache 子模块。
+- `iommu/iommu_top.hh`：顶层模块在成员初始化列表中调用 `iommu::load_config("iommu/cache_config/default_config.json")` 并构造 `iommu::CacheSubsystem cache_sub{"cache_sub", cfg}`。
 
-## 3. 架构与设计约定
+## 3. 架构与约定
 
-### 3.1 分层解析 + 默认值合并
-解析流程采用“默认值 → 部分覆盖”模式：每个 cache 先构造一个带硬编码默认值的 `CacheConfig`（例如 DC/PC/MSIPT 默认 `64 sets × 4 ways × plru`），再调用 `parse_cache_config(j["xxx_cache"], defaults)` 用 JSON 中的字段逐项覆盖。缺失的 key 不会报错，仅保留默认值。
+### 3.1 配置结构分层
 
-### 3.2 共享 timing 配置
-`cache_timing` 段提供通用延迟参数（arbiter/hash/read_set/compare/update_way_select/fill_compute_index/write_way/invalidation_compare_per_way），被 DC/PC/MSIPT/PT/Dedup/Walker 各 cache 作为公共基类默认值继承，避免重复声明。
+`GlobalConfig` 作为根对象，聚合以下子配置：
 
-### 3.3 Walker Cache 嵌套配置
-`walker_cache` 使用嵌套对象 `ptw_c1 / ptw_c2 / ptw_c3`，每级独立指定 `num_ways`、`replacement`、`num_rams`、`ram_fifo_depth`，并通过 `base_sets` 统一控制各级 set 数。
+| JSON 顶层键 | 对应结构体 | 作用 |
+|---|---|---|
+| `global` | `clock_period_ns`, `random_seed` | 全局时钟周期与随机种子 |
+| `cache_timing` | 共享给各 cache 的时序延迟字段 | arbiter/hash/read_set/compare/fill/write/invalidation 等拍数 |
+| `dc_cache` / `pc_cache` / `msipt_cache` / `pt_cache` / `dedup_cache` | `CacheConfig` | 各 cache 几何（sets/ways/replacement/srrip_m_bits/num_rams/ram_fifo_depth）+ 覆盖的时序 |
+| `walker_cache.base_sets` + `walker_cache.ptw_c1/c2/c3` | `uint32_t walker_base_sets` + 三个 `CacheConfig` | Walker Cache 三级子表独立配置 |
+| `invalidation` | `InvalidationConfig` | 失效总开关、lazy_enable、LIB大小、VN位宽、匹配延时 |
+| `statistics` | `StatsConfig` | 输出文件名、直方图开关、task trace level、bin宽度 |
 
-### 3.4 Dedup Cache 几何复用
-当 JSON 未显式给出 `dedup_cache` 时，解析器自动复用 `pt_cache` 的 `num_sets`/`num_ways`，并固定 `num_rams=4, ram_fifo_depth=8`，体现 dedup 与 PT Cache 在几何上的强耦合关系。
+### 3.2 默认值与覆盖策略
 
-### 3.5 失效策略配置
-`invalidation` 段集中管理失效通路开关：`enable`（总开关）、`lazy_enable`（是否走 LIB 延迟失效）、`lib_size`（LIB CAM 容量）、`vn_bits`（全局版本号位宽）、`lib_match_cycles`（匹配拍数）。这些字段直接映射到 `InvalidationConfig`，并被 `CacheSubsystem` 用于控制 CQ 桥接与懒失效行为。
+`parse_cache_config` 采用 defaults + override 模式：对每个 cache 先构造一个带硬编码默认值的 `CacheConfig`（例如 dc/pc/msipt 默认 num_sets=64, num_ways=4, replacement="plru"；pt_cache 默认 num_sets=1024, num_ways=8, replacement="srrip", srrip_m_bits=2），再逐项用 JSON 中的字段覆盖。缺失字段保留默认值，因此 JSON 可以只写差异部分。
 
-### 3.6 统计与日志配置
-`statistics` 段控制输出文件（支持 `output_file` 与兼容别名 `unified_log_file`）、延迟直方图开关、任务追踪级别（`off/basic/detail`）及直方图 bin 宽度。
+`dedup_cache` 的默认几何复用 `cfg.pt_cache`（即继承 pt_cache 的 sets/ways），并固定 num_rams=4, ram_fifo_depth=8。
 
-## 4. 约束与规则
+Walker Cache 的三个级别（c1/c2/c3）各自有独立的默认 ways（1/2/4）和 replacement（none/plru/plru），且强制把 num_sets 对齐到 walker_base_sets。
 
-- **JSON 语法限制**：解析器仅支持标准 JSON 子集，但额外允许 `//` 单行注释和 `/* */` 块注释（见 `mini_json.h` 的 `skip_ws` 逻辑），因此配置文件可自由添加注释。
-- **可选字段语义**：所有 JSON 字段均通过 `j.contains("key")` 判断存在性后再赋值；缺失字段即保持 `types.h` 中定义的默认值，不存在必填校验。
-- **类型转换安全**：数值字段通过 `static_cast<uint32_t>(...)` 或 `static_cast<double>(...)` 转换，字符串字段通过 `operator std::string()` 读取；类型不匹配会抛出 `std::runtime_error`。
-- **文件打开失败抛异常**：`load_config` 在无法打开文件时抛出 `std::runtime_error("Cannot open config file: ...")`，由调用方捕获。
-- **配置不可变传播**：`GlobalConfig` 在解析完成后以 `const GlobalConfig&` 形式传递给 `CacheSubsystem`，子系统内只读访问，禁止运行时修改。
-- **哈希模式回退**：`hash_mode` 支持 `"inval_v2"`（新哈希，支持 addr 枚举失效）与 `"legacy"`（旧哈希，仅回归对比），用于功能一致性验证。
+### 3.3 解析实现要点
 
-## 5. 使用方式
+- 所有字段读取都通过 j.contains("key") 做可选性判断，然后 static_cast<T>(j["key"]) 取值，不存在时跳过——这是向后兼容新增字段的约定。
+- `load_config` 打开文件后读入整个文本，委托给 `parse_config`；文件打不开时抛出 std::runtime_error("Cannot open config file: ...")。
+- `statistics.output_file` 支持旧字段名 unified_log_file 作为别名：若同时出现，优先取 output_file。
 
-典型用法为：
-```cpp
-#include "common/json_config.h"
-auto cfg = iommu::load_config("iommu/cache_config/default_config.json");
-iommu::CacheSubsystem subsystem("cache", cfg);
+### 3.4 启动链路
+
+```text
+iommu_top.hh 成员初始化列表
+  → iommu::load_config("iommu/cache_config/default_config.json")
+  → mini_json::Parser::parse(json_str)
+  → parse_config() 构建 GlobalConfig
+  → iommu::CacheSubsystem cache_sub{"cache_sub", cfg}
 ```
-或通过 `parse_config(std::string)` 从内存字符串解析，便于测试与动态生成配置。
 
-## 6. 适用范围说明
+`CacheSubsystem` 构造函数接收 `const GlobalConfig& cfg`，并通过 `config()` 访问器对外暴露只读引用，供统计、报告和多 RAM 拓扑（pt_num_rams_、dedup_num_rams_、walker_num_rams_）使用。
 
-该配置系统**仅针对缓存子系统**（`iommu/cache_src`），IOMMU 顶层模块（`main.cpp`、`iommu_top.*`、`rp/`、`pcienoc/`、`ddr/`、`slink/`）通过 SystemC 端口绑定与硬编码参数运行，不使用此 JSON 配置机制。因此本配置系统是一个局部而非全局的运行时配置方案。
+### 3.5 运行时开关
+
+`invalidation.enable` 控制整条失效通路：当为 false 时，`CacheSubsystem::invalidation_enabled()` 返回 false，`perf_enqueue_cache_invalidation`（位于 `iommu_top.cc`）会直接 return，CQ→性能模型失效桥接不生效。`invalidation.lazy_enable` 控制是否走 LIB/VN 延迟失效路径。
+
+## 4. 约定与约束
+
+- **配置文件位置约定**：顶层 `iommu_top.hh` 硬编码了默认路径 `"iommu/cache_config/default_config.json"`，运行期必须保证该相对路径存在，否则 `load_config` 抛异常。
+- **JSON 字段可选性约定**：所有字段均通过 contains 检查，新增字段不会破坏旧 JSON；但新增字段必须在 `parse_config` 中显式添加解析分支，否则会被静默忽略。
+- **默认值来源约定**：默认值不是从 JSON 中读取，而是写在 `parse_config` 里（例如 dc/pc/msipt 的 64×4 plru、pt_cache 的 1024×8 srrip）。修改默认行为需要改代码而非只改 JSON。
+- **类型安全约定**：JSON 数值一律通过 static_cast<uint32_t> / static_cast<double> / static_cast<bool> 转换，无 schema 校验；非法类型会在运行时抛出 mini_json 解析异常。
+- **向后兼容字段约定**：`statistics.unified_log_file` 作为 `output_file` 的别名保留，但 `output_file` 优先级更高。
+- **配置与功能解耦**：`GlobalConfig` 仅承载数据，业务逻辑通过 `CacheSubsystem::config()` 只读访问，避免在解析层耦合仿真语义。
+- **不在本系统中处理的配置**：环境变量、命令行参数、feature flags、secrets 在本仓库中未见相关机制；配置完全由 JSON 文件驱动。

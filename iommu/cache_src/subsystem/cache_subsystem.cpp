@@ -258,10 +258,11 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
                              static_cast<int>(i)));
         }
     }
-    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u, upd_prio_lane=%d)\n",
+    printf("[CACHE_SUBSYSTEM] PT Cache dedup enabled, Buffer + dedup_cache created (sets=%u, ways=%u, num_rams=%u, ram_fifo_depth=%u, upd_prio_lane=%d, upd_atomic=%u+chain*%uns, prio=UPD>INS>REQ)\n",
            cfg.dedup_cache.num_sets, cfg.dedup_cache.num_ways,
            dedup_num_rams_, cfg.dedup_cache.ram_fifo_depth,
-           static_cast<int>(TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE));
+           static_cast<int>(TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE),
+           DEDUP_UPD_BASE_CYCLES, DEDUP_UPD_FLUSH_CYCLES);
     fflush(stdout);
 
     // [失效] 配置并注入共享 LIB: PT 与 Walker 共用同一个 LIB 与全局 VN
@@ -921,8 +922,8 @@ void CacheSubsystem::pt_ram_worker_thread(int ram_id) {
 // ============================================================
 // [dedup多RAM] dedup_scheduler_thread - 去重 Cache 纯调度线程
 // 轮询3入口FIFO: dedup_request_fifo / dedup_inside_request_fifo / dedup_update_fifo
-//   - 乒乓仲裁: REQUEST类 vs UPDATE 交替(保持原策略)
-//   - REQUEST类内: inside(预取)优先于 request(预取尽早占位, 避免后续任务MISS)
+//   - [机制v2] 严格优先级仲裁: UPDATE > inside(inter预取) > REQUEST(原乒乓废除)
+//   - UPDATE为释放路径, 严格最高优先保证Buffer释放不被查询饿死
 // 选中后阻塞写 dedup_hash_in_fifo(深度1): 写满=Hash忙=反压三个入口FIFO。
 // Hash单元空闲即可读下一任务(不等前一任务RAM原子段完成)。
 // ============================================================
@@ -973,7 +974,7 @@ void CacheSubsystem::dedup_scheduler_thread() {
             continue;
         }
 
-        // 乒乓仲裁: REQUEST类(request+inside) vs UPDATE
+        // [机制v2] 严格优先级仲裁: UPDATE > REQUEST类(类内 inside 优先于 request)
         bool any_request = has_req || has_ins;
         bool do_request;
 #if TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
@@ -988,7 +989,7 @@ void CacheSubsystem::dedup_scheduler_thread() {
         //     不阻塞, 回到仲裁重选。因为两个出口都**只由本线程写入**, 且
         //     num_free() 与 write() 之间无任何 wait, 故 write() 结构上不会阻塞
         //     => "深度1出口绝不能被堵住" 得到保证。
-        //   仲裁优先级与准入前置条件保持原语义, 不改延时/容量/消息内容。
+        //   仲裁优先级为[机制v2]严格优先(UPDATE>REQUEST类), 准入前置条件保持原语义。
         // ============================================================
         const bool can_req = any_request && (dedup_hash_in_fifo.num_free() > 0);
         const bool can_upd = has_upd     && (dedup_upd_hash_in_fifo.num_free() > 0);
@@ -1002,30 +1003,17 @@ void CacheSubsystem::dedup_scheduler_thread() {
                  dedup_update_fifo.data_written_event());
             continue;
         }
-#if TEST_CFG_DEDUP_DELAYED_UPDATE
-        // UPDATE 严格优先(与旧开关语义一致, 仅把"可用"换成"可下发")
+        // [机制v2] UPDATE严格优先(各开关分支统一, 原乒乓废除)
         do_request = can_req && !can_upd;
-#else
-        if (can_req && can_upd) do_request = dedup_sched_next_is_request_;  // 两类都能发: 乒乓
-        else                    do_request = can_req;                      // 只一类能发: 发它
-#endif
 #else   // !TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
-#if TEST_CFG_DEDUP_DELAYED_UPDATE
-        // [去重延迟更新] UPDATE严格优先于REQUEST类(释放路径先行, 与延迟FIFO
-        //   配合加速Buffer释放); REQUEST类内inside优先不变。开关off保持乒乓。
+        // [机制v2] UPDATE严格优先(各开关分支统一, 原乒乓废除);
+        //   REQUEST类内inside优先不变, 合成为 UPD > INS > REQ。
         do_request = any_request && !has_upd;
-#else
-        if (any_request && has_upd) {
-            do_request = dedup_sched_next_is_request_;  // 两类都有, 按乒乓选择
-        } else {
-            do_request = any_request;  // 只有一类可用, 处理它
-        }
-#endif
 #endif  // TEST_CFG_DEDUP_UPDATE_PRIORITY_LANE
 
         CacheMessage msg;
         if (do_request) {
-            // REQUEST类内: inside(预取)优先
+            // [机制v2] REQUEST类内: inside(inter预取)严格优先于主查询
             if (has_ins) {
                 msg = dedup_inside_request_fifo.read();
             } else {
@@ -1038,10 +1026,8 @@ void CacheSubsystem::dedup_scheduler_thread() {
                 }
 #endif
             }
-            dedup_sched_next_is_request_ = false;
         } else {
             msg = dedup_update_fifo.read();
-            dedup_sched_next_is_request_ = true;
         }
 
         // 下发Hash单元
@@ -1261,7 +1247,9 @@ void CacheSubsystem::dedup_hash_process_thread() {
 // ============================================================
 // [dedup多RAM] dedup_ram_worker_thread - 每组 RAM 独立 worker
 // 同一 RAM FIFO 内任务串行(单线程天然保证原子段不可分割), 跨 RAM 并发。
-// 原子段 = get_set(2) + get_free_line(2) + write(1) = 5cyc, 每任务消耗1次。
+// [机制v2] REQUEST/inter原子段 = get_set(2)+get_free_line(2)+write(1) = 5cyc;
+//   UPDATE原子段 = 3cyc(get set/hit判断) + 刷新链长 × DEDUP_UPD_FLUSH_CYCLES,
+//   原子段期间独占本RAM, 阻塞同RAM后续查询。
 // 任务类型:
 //   UPDATE(msg_type=PT_UPDATE): lookup + (主占位)flush回调 + clear_line
 //   预取REQUEST(dedup_is_prefetch=1): lookup已存在则跳过, 否则insert预取占位; 无响应
@@ -1302,9 +1290,13 @@ void CacheSubsystem::dedup_ram_worker_thread(int ram_id) {
         if (is_update) {
             // ============ UPDATE: 查表 + 刷Buffer + 清占位 ============
             trace_task_event("begin", "dedup_cache", "update", msg, dequeue_time);
-            execute_dedup_update(msg);
-            // 原子段延时; Buffer刷新的FIFO转发阻塞已在回调内推进时间
-            wait(clock_period_ * static_cast<int>(DEDUP_ATOMIC_CYCLES));
+            const uint32_t flushed_chain = execute_dedup_update(msg);
+            // [机制v2] UPDATE可变原子段 = 3拍(get set/hit判断) + 链长 × 每entry刷新拍数;
+            //   无链可刷(无占位/预取占位/foreign跳过)仅计3拍; Buffer刷新的FIFO转发
+            //   阻塞已在回调内推进时间; 原子段期间独占本RAM, 阻塞同RAM后续查询
+            const uint32_t upd_cycles =
+                DEDUP_UPD_BASE_CYCLES + flushed_chain * DEDUP_UPD_FLUSH_CYCLES;
+            wait(clock_period_ * static_cast<int>(upd_cycles));
 
             const sc_time end_time = sc_time_stamp();
             const double end_ns = end_time.to_seconds() * 1e9;
@@ -3233,13 +3225,15 @@ CacheMessage CacheSubsystem::execute_dedup_request(const CacheMessage& req) {
 // [重构] execute_dedup_update - PTW 完成后刷新 (由 Monitor 写 dedup_update_fifo 触发)
 // 任务1: 查 dedup_cache -> 取 head_index/is_req -> (is_req时)刷 Buffer -> 置 V=0
 // 任务2(Buffer 刷新): 通过 dedup_flush_cb_ (iommu_top 实现) 遍历链、算PA、转发
+// [机制v2] 返回实际刷新的链长(无占位/预取占位/foreign跳过返回0),
+//   供 worker 计算可变原子段 3 + 链长×DEDUP_UPD_FLUSH_CYCLES。
 // ============================================================
-void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
+uint32_t CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
     uint64_t page_iova = upd.iova & ~0xFFFULL;
     DedupCacheLine* line = dedup_cache_->lookup(upd.gscid, upd.pscid, page_iova);
     if (line == nullptr) {
         // 无占位(降级任务/无等待任务的预取): 无操作
-        return;
+        return 0;
     }
     uint16_t head_index = line->head_index;
     bool is_req = line->is_req;
@@ -3249,7 +3243,7 @@ void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
         dedup_cache_->clear_line(line);
         printf("[DEDUP_UPDATE] iova=0x%lx -> prefetch placeholder cleared (no waiting task)\n", (unsigned long)page_iova);
         fflush(stdout);
-        return;
+        return 0;
     }
 
     // [FIX-UAF] 主占位owner竞态防护: fresh MISS的owner正在PTW行走(可能已建预取组),
@@ -3265,7 +3259,19 @@ void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
         printf("[DEDUP_UPDATE] iova=0x%lx -> SKIP foreign update (owner task_id=%u walking in PTW, upd from task_id=%llu)\n",
                (unsigned long)page_iova, line->owner_task_id, (unsigned long long)upd.task_id);
         fflush(stdout);
-        return;
+        return 0;
+    }
+
+    // [机制v2] flush前先统计实际链长(回调内逐entry释放, flush后无法再数),
+    //   链长非固定值, 按刷新时刻Buffer链上实际挂起的任务数动态判定:
+    //   512B场景典型=8(4KB页=8×512B连续包); PTW提前返回时链可能不足8;
+    //   128B场景最长可达32(4KB=32×128B)。UPDATE原子延时=3+实际链长×每entry刷新拍数。
+    //   上限PT_DEDUP_BUFFER_SIZE防链异常死循环(回调内另有成环断言)
+    uint32_t chain_len = 0;
+    for (uint16_t cur = head_index;
+         cur != DEDUP_BUFFER_INVALID_IDX && chain_len < PT_DEDUP_BUFFER_SIZE;
+         cur = dedup_buffer_->entries[cur].next_index) {
+        chain_len++;
     }
 
     // 主占位: 先刷 Buffer 链(回调), 完成后再清除 dedup_cache line
@@ -3273,9 +3279,10 @@ void CacheSubsystem::execute_dedup_update(const CacheMessage& upd) {
         dedup_flush_cb_(head_index, upd);
     }
     dedup_cache_->clear_line(line);
-    printf("[DEDUP_UPDATE] iova=0x%lx -> main placeholder flushed (head=%u) and cleared\n",
-           (unsigned long)page_iova, head_index);
+    printf("[DEDUP_UPDATE] iova=0x%lx -> main placeholder flushed (head=%u, chain=%u) and cleared\n",
+           (unsigned long)page_iova, head_index, chain_len);
     fflush(stdout);
+    return chain_len;
 }
 
 CacheMessage CacheSubsystem::execute_walker_request(const CacheMessage& req) {

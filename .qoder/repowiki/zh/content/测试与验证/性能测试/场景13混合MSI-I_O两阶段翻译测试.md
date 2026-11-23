@@ -9,6 +9,7 @@
 - [rp/test_rp_cache_inval_thread.cc](file://rp/test_rp_cache_inval_thread.cc)
 - [rp/test_rp_func.cc](file://rp/test_rp_func.cc)
 - [rp/test_rp.hh](file://rp/test_rp.hh)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc)
 - [iommu/iommu_top.hh](file://iommu/iommu_top.hh)
 - [iommu/iommu_fun_model/iommu_two_stage_trans.cc](file://iommu/iommu_fun_model/iommu_two_stage_trans.cc)
 - [iommu/iommu_fun_model/iommu_msi_trans.cc](file://iommu/iommu_fun_model/iommu_msi_trans.cc)
@@ -23,11 +24,16 @@
 - [iommu/iommu_perf_model/iommu_perf_msipt_cache.cc](file://iommu/iommu_perf_model/iommu_perf_msipt_cache.cc)
 - [iommu/include/iommu_command_queue.hh](file://iommu/include/iommu_command_queue.hh)
 - [tmp/commit_msg_scene13_512mb.txt](file://tmp/commit_msg_scene13_512mb.txt)
+- [multichan_n8_perf.md](file://multichan_n8_perf.md)
+- [multichan_n8_slink100_perf.md](file://multichan_n8_slink100_perf.md)
+- [multichan_n8_perf.json](file://multichan_n8_perf.json)
 </cite>
 
 ## 更新摘要
 **变更内容**
-- **重大性能增强**：实现了读写分离的并发请求处理机制，新增read_max=243和write_max=265配置，支持508个并发请求
+- **重大性能增强 v4**：PTW并发从27提升至64，缓冲区从512优化至320，全局outstanding从不对称508调整为对称640(320写+320读)，实现250.33M trans/s高性能
+- **Walker Cache优化**：C3缓存命中率提升至61.7%，S2阶段实现100%缓存命中
+- **读写分离并发处理**：支持read_max=320和write_max=320配置，实现对称的640个并发请求
 - **512MB IOVA地址空间支持**：将IOVA随机范围从16MB扩展到512MB，支持更大规模的数据访问模式
 - **参数化配置优化**：通过SCENE13_PTW和SCENE13_BUFFER Makefile变量实现PTW并发任务和去重Buffer深度的灵活配置
 - **增强的bypass预取机制**：当缓冲区溢出时任务可直接绕过dedup buffer进入PTW，避免死锁
@@ -36,6 +42,7 @@
 - **改进性能监控能力**：新增时间加权平均占用率跟踪功能，提供更准确的dedup buffer使用统计
 - **优化MSI设备处理**：禁用早期spawn预取并改进清理逻辑，提高MSI路径性能
 - **SQ/CQ/MSI混合负载**：每组包含8x512B Data + 1x32B SQ + 1x16B CQ + 1x4B MSI = 11任务
+- **新增多通道变体**：在同一设备内支持n路并发通道，保持周期准确性同时启用并发通道处理，提供 sophisticated multi-threaded stimulus injection capabilities
 
 ## 目录
 1. [简介](#简介)
@@ -50,20 +57,21 @@
 10. [附录](#附录)
 
 ## 简介
-本文件聚焦"场景13：混合MSI-I/O两阶段翻译测试"，该测试在开启两级地址翻译（S1=VS-stage，S2=G-stage）的前提下，将常规IO访问与MSI中断投递请求混合注入，验证IOMMU在两阶段翻译路径中对MSI的识别、分流与缓存命中行为。**v4版本重大性能增强**包括读写分离并发处理、bypass预取机制、聚合刷新等关键优化，并新增了512MB IOVA地址空间支持和参数化配置能力。测试覆盖以下关键点：
+本文件聚焦"场景13：混合MSI-I/O两阶段翻译测试"，该测试在开启两级地址翻译（S1=VS-stage，S2=G-stage）的前提下，将常规IO访问与MSI中断投递请求混合注入，验证IOMMU在两阶段翻译路径中对MSI的识别、分流与缓存命中行为。**v4版本重大性能增强**包括PTW并发提升至64、缓冲区优化至320、全局outstanding对称化至640等关键优化，实现了250.33M trans/s的高性能表现，Walker C3缓存命中率提升至61.7%，S2阶段实现100%缓存命中。**新增多通道变体**在同一设备内支持n路并发通道处理，保持周期准确性同时启用并发通道处理，提供了 sophisticated multi-threaded stimulus injection capabilities。测试覆盖以下关键点：
 - 普通IO：随机4KB页上的连续读写，经VS-stage映射到GPA，再经G-stage映射到SPA。
 - MSI：设备配置MSIPTP为Flat模式，MSI窗口与普通GPA不重叠；MSI IOVA区与普通IOVA区不重叠；两级模式下PTW在S1完成后识别MSI并跳过S2，直接走MSIPT路径。
-- **v4增强特性**：读写分离outstanding (read_max=243, write_max=265, total=508)，bypass预取机制，聚合刷新(200ns PEQ)，SQ/CQ/MSI混合负载。
+- **v4增强特性**：对称读写分离outstanding (read_max=320, write_max=320, total=640)，PTW并发64，缓冲区320，bypass预取机制，聚合刷新(200ns PEQ)，SQ/CQ/MSI混合负载。
 - **512MB扩展支持**：IOVA随机范围从16MB扩展到512MB，支持更大规模的数据访问模式。
 - **参数化配置**：通过SCENE13_PTW和SCENE13_BUFFER变量实现PTW并发和Buffer深度的灵活调优。
+- **多通道并发处理**：同一设备内n路并发通道，每通道独立随机选择4KB页面，组内8x512B地址连续，控制包共享，逐包轮询仲裁后经统一输出口注入。
 - **增强性能监控**：时间加权平均占用率跟踪，提供更准确的dedup buffer使用统计。
 - 统计：MSIPT Cache命中率、PTW DDR访问、去重Buffer峰值、Little's Law平均并发等。
 
 ## 项目结构
 - 顶层入口 main.cpp 负责实例化 IOMMU、RP、PCIENOC、DDR、SLINK 等模块并绑定端口。
-- 测试用例位于 rp/ 下，场景13由 test_rp_rand4k_msi_mix_thread.cc 实现，Phase 3验证由 test_rp_cache_inval_thread.cc 提供。
+- 测试用例位于 rp/ 下，场景13由 test_rp_rand4k_msi_mix_thread.cc 实现，Phase 3验证由 test_rp_cache_inval_thread.cc 提供，**多通道变体**由 test_rp_rand4k_msi_mix_multichan_thread.cc 实现。
 - IOMMU核心功能分布在 iommu/ 下，包括两阶段翻译、MSI翻译、MSIPT Cache、CacheSubsystem等。
-- Makefile 提供 TEST=scene13 编译开关，启用两阶段、预取深度、Walker Cache、AXI宽度、并发限制等宏。
+- Makefile 提供 TEST=scene13 编译开关，启用两阶段、预取深度、Walker Cache、AXI宽度、并发限制等宏，**新增多通道场景配置**。
 
 ```mermaid
 graph TB
@@ -78,12 +86,15 @@ C --> H["命令队列(CQ)<br/>command_queue.*"]
 C --> I["DDR/NoC模型<br/>ddr/slink/pcienoc"]
 C --> J["聚合刷新PEQ<br/>200ns延迟刷新"]
 C --> K["性能监控<br/>时间加权占用率跟踪"]
+B --> L["多通道变体<br/>test_rp_rand4k_msi_mix_multichan_thread.cc"]
+L --> M["n路并发通道<br/>RR轮询仲裁"]
 ```
 
 **图表来源**
 - [main.cpp:49-83](file://main.cpp#L49-L83)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:50-125](file://rp/test_rp_rand4k_msi_mix_thread.cc#L50-L125)
 - [rp/test_rp_cache_inval_thread.cc:40-46](file://rp/test_rp_cache_inval_thread.cc#L40-L46)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:12-30](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L12-L30)
 - [iommu/iommu_top.hh:44-103](file://iommu/iommu_top.hh#L44-L103)
 
 章节来源
@@ -93,6 +104,7 @@ C --> K["性能监控<br/>时间加权占用率跟踪"]
 
 ## 核心组件
 - RP测试线程（场景13-v4）：构造设备上下文、页表、MSI PTE，注入混合负载，校验响应。
+- **多通道变体**：在同一设备(device_id=0/GSCID=1)内支持n路并发通道，每通道独立随机选择4KB页面，组内8x512B地址连续，控制包共享，通过RR轮询仲裁器统一注入。
 - **v4增强组件**：读写分离并发处理、bypass预取机制、聚合刷新PEQ、改进的pending_group_update结构。
 - IOMMU顶层：维护大量FIFO、统计、重排序、DDR仲裁、MSI相关线程与接口。
 - 两阶段翻译：实现VS-stage与G-stage的页表遍历、权限检查、大页处理、A/D位更新。
@@ -104,6 +116,7 @@ C --> K["性能监控<br/>时间加权占用率跟踪"]
 
 章节来源
 - [rp/test_rp_rand4k_msi_mix_thread.cc:50-125](file://rp/test_rp_rand4k_msi_mix_thread.cc#L50-L125)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:12-30](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L12-L30)
 - [rp/test_rp_cache_inval_thread.cc:40-46](file://rp/test_rp_cache_inval_thread.cc#L40-L46)
 - [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
 - [iommu/iommu_top.hh:44-103](file://iommu/iommu_top.hh#L44-L103)
@@ -119,6 +132,7 @@ C --> K["性能监控<br/>时间加权占用率跟踪"]
   - 普通IO：DC/PC/PT Cache -> PTW -> 返回结果。
   - MSI：在S1完成后识别MSI，跳过S2，进入MSIPT路径（MSIPT Cache -> MSIPTW -> Forwarder）。
 - **v4增强流程**：读写分离并发处理、bypass预取机制、聚合刷新PEQ优化。
+- **多通道变体流程**：n路并发通道各自生成请求，通过RR轮询仲裁器统一注入，保持周期准确性。
 - **512MB支持**：扩展的IOVA地址空间支持更大规模的数据访问。
 - **参数化配置**：通过Makefile变量灵活调整PTW并发和Buffer深度。
 - 最终结果经重排序输出给发起方，同时更新各类统计。
@@ -126,6 +140,7 @@ C --> K["性能监控<br/>时间加权占用率跟踪"]
 ```mermaid
 sequenceDiagram
 participant RP as "RP测试线程"
+participant MC as "多通道变体"
 participant CQ as "命令队列(CQ)"
 participant IOM as "IOMMU Top"
 participant COL as "Collector"
@@ -133,8 +148,12 @@ participant PTW as "PTW"
 participant MSI as "MSI路径"
 participant AGG as "聚合刷新PEQ"
 participant MON as "性能监控"
-Note over RP,CQ : v4增强流程 + 512MB支持
-RP->>IOM : 注入混合负载(IO+SQ+CQ+MSI)
+Note over RP,MC : v4增强流程 + 多通道并发 + 512MB支持
+RP->>MC : 启动n路并发通道
+loop n路通道
+MC->>MC : 每通道独立随机选择4KB页面
+end
+MC->>IOM : RR轮询仲裁后统一注入
 IOM->>COL : 解析并路由
 alt 普通IO
 COL->>PTW : VS/G stage页表遍历
@@ -155,6 +174,7 @@ end
 
 **图表来源**
 - [rp/test_rp_rand4k_msi_mix_thread.cc:303-428](file://rp/test_rp_rand4k_msi_mix_thread.cc#L303-L428)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:288-367](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L288-L367)
 - [rp/test_rp_cache_inval_thread.cc:273-280](file://rp/test_rp_cache_inval_thread.cc#L273-280)
 - [rp/test_rp_func.cc:930-959](file://rp/test_rp_func.cc#L930-959)
 - [iommu/iommu_top.hh:419-459](file://iommu/iommu_top.hh#L419-459)
@@ -162,6 +182,42 @@ end
 - [iommu/iommu_fun_model/iommu_msi_trans.cc:99-130](file://iommu/iommu_fun_model/iommu_msi_trans.cc#L99-L130)
 
 ## 详细组件分析
+
+### 多通道变体测试线程（MultiChannelScenario）
+**新增** 多通道变体实现在同一设备内支持n路并发通道处理：
+- **单设备共享**：所有通道共享device_id=0/GSCID=1，复用多设备追踪(md_trace/md_response_handler)。
+- **n路并发通道**：每个通道独立随机选择4KB页面，组内8x512B地址连续，控制包(SQ/CQ/MSI)共享。
+- **RR轮询仲裁**：单一scheduler进程通过RR轮询从各通道队列取请求，保证入口4ns(数据)/2ns(控制)阻塞节拍。
+- **有界队列反压**：每通道独立queue_depth(默认32)，满时producer等待space_event。
+- **负载均衡**：fixed_total模式下总组数=NUM_PAGES(909)，余数分给前GROUPS_REM个通道，末尾1个tail MSI只给通道0。
+- **周期准确性**：与单流基线逐包一致，Jain公平性=1.0(退化预期)。
+
+```mermaid
+flowchart TD
+Start(["启动多通道变体"]) --> Setup["配置单设备<br/>device_id=0/GSCID=1"]
+Setup --> SpawnChannels["spawn n路producer进程"]
+SpawnChannels --> Scheduler["spawn RR scheduler"]
+Scheduler --> Watchdog["spawn watchdog"]
+Watchdog --> Epoch1["Epoch 1: 哨兵请求"]
+Epoch1 --> Epoch2["Epoch 2: 预热(MSIPT+SQ/CQ)"]
+Epoch2 --> Measure["测量epoch: 正式性能统计"]
+Measure --> Stats["统计各通道指标<br/>injected/peak_queue/full_waits"]
+Stats --> Report["md_trace.report()"]
+Report --> End(["结束"])
+```
+
+**图表来源**
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:122-139](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L122-L139)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:288-367](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L288-L367)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:385-405](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L385-L405)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:424-495](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L424-L495)
+
+章节来源
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:12-30](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L12-L30)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:122-139](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L122-L139)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:288-367](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L288-L367)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:385-405](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L385-L405)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:424-495](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L424-L495)
 
 ### 场景13-v4测试线程（RP）
 - 设备配置：设备0x0A，iosatp=Sv48，iohgatp=Sv48x4，MSIPTP=Flat，mask/pattern设定MSI窗口与普通GPA不重叠。
@@ -197,14 +253,14 @@ Stats --> End(["结束"])
 **图表来源**
 - [rp/test_rp_rand4k_msi_mix_thread.cc:117-172](file://rp/test_rp_rand4k_msi_mix_thread.cc#L117-L172)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:240-288](file://rp/test_rp_rand4k_msi_mix_thread.cc#L240-L288)
-- [rp/test_rp_rand4k_msi_mix_thread.cc:303-428](file://rp/test_rp_rand4k_msi_mix_thread.cc#L303-L428)
+- [rp/test_rp_rand4k_msi_mix_thread.cc:303-428](file://rp/test_rp_rand4k_msi_mix_thread.cc#L303-428)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:457-533](file://rp/test_rp_rand4k_msi_mix_thread.cc#L457-L533)
 - [rp/test_rp_cache_inval_thread.cc:273-280](file://rp/test_rp_cache_inval_thread.cc#L273-280)
 
 章节来源
 - [rp/test_rp_rand4k_msi_mix_thread.cc:117-172](file://rp/test_rp_rand4k_msi_mix_thread.cc#L117-L172)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:240-288](file://rp/test_rp_rand4k_msi_mix_thread.cc#L240-L288)
-- [rp/test_rp_rand4k_msi_mix_thread.cc:303-428](file://rp/test_rp_rand4k_msi_mix_thread.cc#L303-L428)
+- [rp/test_rp_rand4k_msi_mix_thread.cc:303-428](file://rp/test_rp_rand4k_msi_mix_thread.cc#L303-428)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:457-533](file://rp/test_rp_rand4k_msi_mix_thread.cc#L457-L533)
 
 ### 512MB IOVA地址空间支持
@@ -218,12 +274,12 @@ Stats --> End(["结束"])
 章节来源
 - [rp/test_rp_rand4k_msi_mix_thread.cc:41-55](file://rp/test_rp_rand4k_msi_mix_thread.cc#L41-L55)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:97-103](file://rp/test_rp_rand4k_msi_mix_thread.cc#L97-L103)
-- [rp/test_rp_rand4k_msi_mix_thread.cc:302-309](file://rp/test_rp_rand4k_msi_mix_thread.cc#L302-L309)
+- [rp/test_rp_rand4k_msi_mix_thread.cc:302-309](file://rp/test_rp_rand4k_msi_mix_thread.cc#L302-309)
 
 ### 参数化配置优化
 **新增** 通过Makefile变量实现灵活的参数化配置：
-- **SCENE13_PTW**：控制PTW最大并发任务数，默认值27，可通过命令行覆盖
-- **SCENE13_BUFFER**：控制去重Buffer深度，默认值512，可通过命令行覆盖
+- **SCENE13_PTW**：控制PTW最大并发任务数，默认值64（从27提升至64），可通过命令行覆盖
+- **SCENE13_BUFFER**：控制去重Buffer深度，默认值320（从512优化至320），可通过命令行覆盖
 - **编译时配置**：在Makefile中定义TEST_FLAGS，支持运行时参数调整
 - **多场景支持**：支持不同规模的测试场景，从小规模验证到大规模性能测试
 
@@ -231,11 +287,11 @@ Stats --> End(["结束"])
 - [Makefile:193-233](file://Makefile#L193-L233)
 - [tmp/commit_msg_scene13_512mb.txt:6-7](file://tmp/commit_msg_scene13_512mb.txt#L6-L7)
 
-### v4增强：读写分离并发处理
-**新增** 读写分离的并发请求处理机制：
-- **read_max=243**：最大243个并发读请求
-- **write_max=265**：最大265个并发写请求  
-- **total=508**：总并发上限508个请求
+### v4增强：对称读写分离并发处理
+**新增** 对称的读写分离并发请求处理机制：
+- **read_max=320**：最大320个并发读请求（从243提升至320）
+- **write_max=320**：最大320个并发写请求（从265提升至320）
+- **total=640**：总并发上限640个请求（从508提升至640）
 - 系统级任务模式：偶数批全读(8x512B)，奇数批全写(8x512B)
 - 支持更高的并发吞吐量，避免读写竞争导致的性能下降
 
@@ -265,7 +321,7 @@ Stats --> End(["结束"])
 - [tmp/commit_msg_scene13_512mb.txt:11-14](file://tmp/commit_msg_scene13_512mb.txt#L11-L14)
 - [iommu/iommu_perf_model/iommu_perf_ptw.cc:2912-2924](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L2912-L2924)
 - [iommu/iommu_perf_model/iommu_perf_ptw.cc:2950-2954](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L2950-L2954)
-- [iommu/iommu_perf_model/iommu_perf_ptw.cc:3027-3034](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L3027-L3034)
+- [iommu/iommu_perf_model/iommu_perf_ptw.cc:3027-3034](file://iommu/iommu_perf_model/iommu_perf_ptw.cc#L3027-3034)
 
 ### v4增强：MSI设备处理优化
 **新增** MSI设备处理的优化：
@@ -289,7 +345,7 @@ Stats --> End(["结束"])
 章节来源
 - [iommu/cache_src/common/dedup_buffer.h:76-86](file://iommu/cache_src/common/dedup_buffer.h#L76-L86)
 - [iommu/cache_src/common/dedup_buffer.h:154-161](file://iommu/cache_src/common/dedup_buffer.h#L154-L161)
-- [rp/test_rp_rand4k_msi_mix_thread.cc:872-883](file://rp/test_rp_rand4k_msi_mix_thread.cc#L872-L883)
+- [rp/test_rp_rand4k_msi_mix_thread.cc:872-883](file://rp/test_rp_rand4k_msi_mix_thread.cc#L872-883)
 
 ### 两阶段翻译（S1+S2）
 - 当iosatp非Bare时，执行VS-stage页表遍历，必要时调用second_stage_address_translation进行G-stage转换。
@@ -359,7 +415,7 @@ CommandQueue <.. IOMMU_Top : "命令处理"
 - [iommu/cache_src/cache/msipt_cache.h:8-27](file://iommu/cache_src/cache/msipt_cache.h#L8-L27)
 - [iommu/cache_src/cache/msipt_cache.cpp:11-43](file://iommu/cache_src/cache/msipt_cache.cpp#L11-L43)
 - [iommu/iommu_top.hh:433-459](file://iommu/iommu_top.hh#L433-459)
-- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
+- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-817)
 - [rp/test_rp_func.cc:930-959](file://rp/test_rp_func.cc#L930-959)
 
 章节来源
@@ -386,7 +442,7 @@ CommandQueue <.. IOMMU_Top : "命令处理"
 - **同步机制**：IOFENCE.C确保命令执行的顺序和完整性。
 
 章节来源
-- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
+- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-817)
 - [rp/test_rp_func.cc:930-959](file://rp/test_rp_func.cc#L930-959)
 - [iommu/iommu_perf_model/iommu_command_queue.cc:52-86](file://iommu/iommu_perf_model/iommu_command_queue.cc#L52-L86)
 - [iommu/iommu_perf_model/iommu_command_queue.cc:278-292](file://iommu/iommu_perf_model/iommu_command_queue.cc#L278-L292)
@@ -394,6 +450,7 @@ CommandQueue <.. IOMMU_Top : "命令处理"
 
 ## 依赖关系分析
 - 场景13-v4测试线程依赖RP_Module接口、IOMMU顶层、DDR模型。
+- **多通道变体**依赖RP_Module接口、IOMMU顶层、DDR模型，复用多设备追踪(md_trace/md_response_handler)。
 - IOMMU顶层依赖两阶段翻译、MSI翻译、MSIPT Cache、CacheSubsystem、DDR/NoC模型。
 - **v4增强依赖**：聚合刷新PEQ、读写分离并发、bypass预取机制。
 - **512MB支持依赖**：条件编译宏、地址空间配置、部分映射逻辑。
@@ -404,6 +461,8 @@ CommandQueue <.. IOMMU_Top : "命令处理"
 graph LR
 RP["RP测试线程(v4)"] --> IOM["IOMMU Top"]
 RP --> CQ["命令队列(CQ)"]
+MC["多通道变体"] --> RP
+MC --> MD["多设备追踪(md_trace)"]
 IOM --> TS["两阶段翻译"]
 IOM --> MSIT["MSI翻译"]
 IOM --> MSIPT["MSIPT Cache"]
@@ -418,27 +477,38 @@ CQ --> IOM
 **图表来源**
 - [main.cpp:49-83](file://main.cpp#L49-L83)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:50-125](file://rp/test_rp_rand4k_msi_mix_thread.cc#L50-L125)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:52-55](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L52-L55)
 - [rp/test_rp_cache_inval_thread.cc:40-46](file://rp/test_rp_cache_inval_thread.cc#L40-L46)
-- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
+- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-817)
 - [iommu/iommu_top.hh:44-103](file://iommu/iommu_top.hh#L44-L103)
 
 章节来源
 - [main.cpp:49-83](file://main.cpp#L49-L83)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:50-125](file://rp/test_rp_rand4k_msi_mix_thread.cc#L50-L125)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:52-55](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L52-L55)
 - [rp/test_rp_cache_inval_thread.cc:40-46](file://rp/test_rp_cache_inval_thread.cc#L40-L46)
-- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
+- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-817)
 - [iommu/iommu_top.hh:44-103](file://iommu/iommu_top.hh#L44-L103)
 
 ## 性能考量
 - 预取深度：TEST_CFG_PT_DEDUP_PREFETCH_DEPTH=3，减少PTW次数。
 - Walker Cache：启用Walker Cache与S2 Walker Cache，降低重复walk开销。
 - AXI宽度：1024位，提高带宽利用率。
-- 全局Outstanding：512，平衡吞吐与资源占用。
 - **v4性能增强**：
-  - 读写分离outstanding：read_max=243, write_max=265, total=508
+  - **PTW并发提升**：从27提升至64，显著提升翻译吞吐量
+  - **缓冲区优化**：从512优化至320，在保持性能的同时减少内存占用
+  - **对称outstanding**：从不对称508(read=243,write=265)调整为对称640(read=320,write=320)，平衡读写性能
+  - **高性能实现**：实现250.33M trans/s的高吞吐量
+  - **Walker Cache优化**：C3缓存命中率提升至61.7%，S2阶段实现100%缓存命中
   - bypass预取机制：避免死锁，提升高负载下的稳定性
   - 聚合刷新PEQ：200ns非阻塞延迟刷新，提升整体吞吐
   - MSI设备优化：禁用early-spawn，改进清理逻辑
+- **多通道变体性能**：
+  - **n=8通道性能**：179.78 M trans/s，全局并发peak/max 513/640
+  - **Jain公平性**：ALL=1.0 / DATA=1.0（退化预期，单设备）
+  - **负载均衡**：RR轮询仲裁，各通道请求均匀分布
+  - **队列反压**：QUEUE_DEPTH=32，full_waits统计通道拥塞情况
+  - **周期准确性**：入口4ns(数据)/2ns(控制)节拍与单流基线一致
 - **512MB性能优势**：
   - 更大的地址空间支持更复杂的应用场景
   - 部分映射优化减少内存占用
@@ -453,6 +523,8 @@ CQ --> IOM
 章节来源
 - [Makefile:193-233](file://Makefile#L193-L233)
 - [rp/test_rp_rand4k_msi_mix_thread.cc:317-320](file://rp/test_rp_rand4k_msi_mix_thread.cc#L317-320)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:313-367](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L313-367)
+- [multichan_n8_perf.md:1-74](file://multichan_n8_perf.md#L1-L74)
 - [tmp/commit_msg_scene13_512mb.txt:8-15](file://tmp/commit_msg_scene13_512mb.txt#L8-L15)
 
 ## 故障排查指南
@@ -461,6 +533,7 @@ CQ --> IOM
   - 两阶段翻译中的页错误（cause=12/13/15）、访问错误（cause=1/5/7）、数据损坏（cause=274）、Guest页错误（cause=20/21/23）。
   - **Phase 3相关**：CQ启用失败、命令队列忙、失效指令执行异常。
   - **v4相关问题**：读写分离并发冲突、bypass预取异常、聚合刷新PEQ延迟。
+  - **多通道变体问题**：通道队列积压、RR仲裁死锁、通道间负载不均、epoch同步失败。
   - **512MB相关问题**：地址空间不足、部分映射失败、地址重叠检测。
   - **参数化配置问题**：PTW并发过高导致资源耗尽、Buffer过小导致频繁bypass。
 - 调试建议：
@@ -469,28 +542,33 @@ CQ --> IOM
   - 验证MSI PTE的V/M字段及reserved位设置。
   - **Phase 3调试**：检查CQ状态寄存器、命令队列指针、失效指令执行结果。
   - **v4调试**：监控读写分离计数器、bypass预取标志、PEQ队列状态。
+  - **多通道调试**：检查各通道队列长度、peak_queue、full_waits、RR调度日志。
   - **512MB调试**：验证地址空间配置、部分映射状态、地址避让策略。
   - **性能监控调试**：检查时间加权占用率统计、buffer使用模式分析。
 
 章节来源
 - [iommu/iommu_fun_model/iommu_msi_trans.cc:154-293](file://iommu/iommu_fun_model/iommu_msi_trans.cc#L154-L293)
 - [iommu/iommu_fun_model/iommu_two_stage_trans.cc:504-598](file://iommu/iommu_fun_model/iommu_two_stage_trans.cc#L504-L598)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:368-384](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L368-L384)
 
 ## 结论
-场景13-v4有效验证了IOMMU在两级翻译模式下对MSI的识别与分流能力，结合MSIPT Cache显著提升了MSI翻译性能。**v4版本的重大性能增强**包括读写分离并发处理、bypass预取机制、聚合刷新PEQ等关键优化，并新增了512MB IOVA地址空间支持和参数化配置能力。通过命令队列(CQ)、IODIR.INVAL_DDT失效指令、IOFENCE同步操作，确保了缓存失效的正确性和后续MSI翻译的准确性。测试覆盖了普通IO与MSI混合负载，以及SQ/CQ控制路径，确保地址布局、页表构造、缓存策略的正确性。通过详细的统计与校验，可评估系统在真实工作负载下的行为与瓶颈。**512MB扩展和参数化配置**进一步增强了测试的灵活性和实用性，能够支持更大规模和更复杂的性能验证场景。
+场景13-v4有效验证了IOMMU在两级翻译模式下对MSI的识别与分流能力，结合MSIPT Cache显著提升了MSI翻译性能。**v4版本的重大性能增强**包括PTW并发从27提升至64、缓冲区从512优化至320、全局outstanding从不对称508调整为对称640(320写+320读)等关键优化，实现了250.33M trans/s的高性能表现，Walker C3缓存命中率提升至61.7%，S2阶段实现100%缓存命中。**新增的多通道变体**在同一设备内支持n路并发通道处理，保持周期准确性同时启用并发通道处理，提供了 sophisticated multi-threaded stimulus injection capabilities，n=8通道时达到179.78 M trans/s性能，Jain公平性=1.0。**通过命令队列(CQ)、IODIR.INVAL_DDT失效指令、IOFENCE同步操作**，确保了缓存失效的正确性和后续MSI翻译的准确性。测试覆盖了普通IO与MSI混合负载，以及SQ/CQ控制路径，确保地址布局、页表构造、缓存策略的正确性。通过详细的统计与校验，可评估系统在真实工作负载下的行为与瓶颈。**512MB扩展、参数化配置和多通道并发**进一步增强了测试的灵活性和实用性，能够支持更大规模和更复杂的性能验证场景。
 
 ## 附录
 - 运行方式：使用make TEST=scene13编译，生成可执行文件后运行。
-- 关键参数：SCENE13_PTW控制PTW最大并发任务数，SCENE13_BUFFER控制去重Buffer深度，TEST_CFG_NUM_PAGES控制普通IO页数。
+- 关键参数：SCENE13_PTW控制PTW最大并发任务数（默认64），SCENE13_BUFFER控制去重Buffer深度（默认320），TEST_CFG_NUM_PAGES控制普通IO页数。
 - 输出示例：包含MSIPT Cache命中率、PTW DDR访问统计、去重Buffer峰值等。
 - **Phase 3参数**：CQ页面数量、失效指令类型、同步操作验证。
-- **v4增强参数**：读写分离并发限制(read_max=243, write_max=265)、聚合刷新延迟(200ns)、bypass预取阈值。
+- **v4增强参数**：对称读写分离并发限制(read_max=320, write_max=320)、聚合刷新延迟(200ns)、bypass预取阈值。
+- **多通道变体参数**：MULTICHAN_N(通道数，默认8)、MULTICHAN_QUEUE_DEPTH(队列深度，默认32)、MULTICHAN_LOAD_MODE(fixed_total/per_channel)、MULTICHAN_RR_START(RR起点)。
 - **512MB配置**：通过TEST_CFG_S13_IOVA_512MB宏启用512MB地址空间模式。
 - **性能监控**：时间加权平均占用率统计，提供更准确的buffer使用分析。
 
 章节来源
 - [Makefile:193-233](file://Makefile#L193-L233)
-- [rp/test_rp_rand4k_msi_mix_thread.cc:485-533](file://rp/test_rp_rand4k_msi_mix_thread.cc#L485-L533)
+- [Makefile:308-378](file://Makefile#L308-L378)
+- [rp/test_rp_rand4k_msi_mix_thread.cc:485-533](file://rp/test_rp_rand4k_msi_mix_thread.cc#L485-533)
+- [rp/test_rp_rand4k_msi_mix_multichan_thread.cc:424-495](file://rp/test_rp_rand4k_msi_mix_multichan_thread.cc#L424-L495)
 - [rp/test_rp_cache_inval_thread.cc:40-46](file://rp/test_rp_cache_inval_thread.cc#L40-L46)
-- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-L817)
+- [rp/test_rp_func.cc:788-817](file://rp/test_rp_func.cc#L788-817)
 - [tmp/commit_msg_scene13_512mb.txt:1-18](file://tmp/commit_msg_scene13_512mb.txt#L1-L18)

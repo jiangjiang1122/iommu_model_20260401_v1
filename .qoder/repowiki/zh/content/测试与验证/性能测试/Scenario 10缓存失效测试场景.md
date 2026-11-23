@@ -31,9 +31,18 @@
 - [iommu_task_cache_convert.hh](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh)
 - [iommu_task_cache_convert.cc](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc)
 - [test_rp_func.cc](file://rp/test_rp_func.cc)
-- [test_rp_rand4k_two_stage_inval_thread.cc](file://rp/test_rp_rand4k_two_stage_inval_thread.cc)
+- [test_rp_rand4k_msi_mix_multichan_inval_thread.cc](file://rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc)
 - [s10_sweep.sh](file://tmp/s10_sweep.sh)
+- [mc_inval_strict_n1_512mb_summary.csv](file://mc_inval_strict_n1_512mb_summary.csv)
+- [mc_inval_lazy_n1_512mb_summary.csv](file://mc_inval_lazy_n1_512mb_summary.csv)
 </cite>
+
+## 更新摘要
+**变更内容**   
+- 新增严格的缓存失效测试场景(rand4k_msi_mix_multichan_inval_strict)和懒失效测试场景(rand4k_msi_mix_multichan_inval_lazy)
+- 支持多核操作和CQ背压机制
+- 增强CQ异步处理线程和命令队列管理
+- 完善统计分析和性能监控
 
 ## 目录
 1. [简介](#简介)
@@ -48,7 +57,9 @@
 10. [附录](#附录)
 
 ## 简介
-本文件围绕“场景10：缓存失效测试场景”展开，面向IOMMU模型中的页表与数据相关缓存（PT/PC/DC/MSIPT/Walker等）的失效行为验证。文档从系统架构、组件职责、数据流与控制流入手，结合代码级关系图与流程图，帮助读者理解失效触发路径、一致性约束与统计观测方式，并提供可操作的测试与排障建议。
+本文件围绕"场景10：缓存失效测试场景"展开，面向IOMMU模型中的页表与数据相关缓存（PT/PC/DC/MSIPT/Walker等）的失效行为验证。文档从系统架构、组件职责、数据流与控制流入手，结合代码级关系图与流程图，帮助读者理解失效触发路径、一致性约束与统计观测方式，并提供可操作的测试与排障建议。
+
+**最新更新**：新增了严格的缓存失效测试场景(rand4k_msi_mix_multichan_inval_strict)和懒失效测试场景(rand4k_msi_mix_multichan_inval_lazy)，支持多核操作和CQ背压机制，实现了完整的命令队列异步处理和信用反压控制。
 
 ## 项目结构
 仓库采用分层组织：顶层入口与构建脚本位于根目录；IOMMU核心逻辑与性能模型在 iommu/ 下；缓存子系统位于 iommu/cache_src/；替换策略位于 replacement/；公共类型与配置在 common/；测试用例分布在 rp/ 与 tmp/ 下的脚本。
@@ -70,6 +81,7 @@ C --> M["stats_collector.h"]
 C --> N["json_config.h"]
 B --> O["iommu_perf_model.hh"]
 O --> P["iommu_task_cache_convert.hh/cc"]
+B --> Q["cq_async_process_thread"]
 ```
 
 图表来源 
@@ -86,9 +98,9 @@ O --> P["iommu_task_cache_convert.hh/cc"]
 - [plru_policy.h:1-200](file://iommu/cache_src/replacement/plru_policy.h#L1-L200)
 - [srrip_policy.h:1-200](file://iommu/cache_src/replacement/srrip_policy.h#L1-L200)
 - [stats_collector.h:1-200](file://iommu/cache_src/common/stats_collector.h#L1-200)
-- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-200)
-- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-200)
-- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-200)
+- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-L200)
+- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-L200)
+- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-L200)
 
 章节来源
 - [README.md:1-200](file://README.md#L1-L200)
@@ -106,6 +118,7 @@ O --> P["iommu_task_cache_convert.hh/cc"]
 - 替换策略（Replacement Policy）：PLRU/SRIP等策略抽象与实现，决定淘汰候选。
 - 统计与配置：StatsCollector汇总命中率、延迟、失效次数；JsonConfig加载参数。
 - 性能模型与任务转换：将上层请求转换为缓存操作，驱动命中/失效流程并上报指标。
+- **新增**：CQ异步处理线程（cq_async_process_thread）：实现命令队列的异步执行和背压控制。
 
 章节来源
 - [cache_subsystem.h:1-200](file://iommu/cache_src/subsystem/cache_subsystem.h#L1-L200)
@@ -119,12 +132,14 @@ O --> P["iommu_task_cache_convert.hh/cc"]
 - [plru_policy.h:1-200](file://iommu/cache_src/replacement/plru_policy.h#L1-L200)
 - [srrip_policy.h:1-200](file://iommu/cache_src/replacement/srrip_policy.h#L1-L200)
 - [stats_collector.h:1-200](file://iommu/cache_src/common/stats_collector.h#L1-200)
-- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-200)
-- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-200)
-- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-200)
+- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-L200)
+- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-L200)
+- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-L200)
 
 ## 架构总览
-下图展示场景10中“缓存失效”的关键路径：上层请求经性能模型转换为缓存操作，进入缓存子系统，命中则返回；未命中或发生一致性事件时触发失效与回写，更新替换状态并上报统计。
+下图展示场景10中"缓存失效"的关键路径：上层请求经性能模型转换为缓存操作，进入缓存子系统，命中则返回；未命中或发生一致性事件时触发失效与回写，更新替换状态并上报统计。
+
+**更新**：新增CQ异步处理线程和多核信用反压机制，实现命令队列的异步执行和背压控制。
 
 ```mermaid
 sequenceDiagram
@@ -135,6 +150,7 @@ participant TaskConv as "任务转换(iommu_task_cache_convert)"
 participant Subsys as "缓存子系统(cache_subsystem)"
 participant Cache as "具体缓存(PT/DC/PC/MSIPT/Walker)"
 participant Stats as "统计(StatsCollector)"
+participant CQThread as "CQ异步线程(cq_async_process_thread)"
 App->>Top : "发起I/O或地址转换请求"
 Top->>Perf : "路由到性能模型"
 Perf->>TaskConv : "构造缓存任务"
@@ -151,16 +167,20 @@ Cache-->>Subsys : "未命中/失效事件"
 Subsys->>Cache : "按策略淘汰/回写/更新"
 Subsys->>Stats : "记录命中率/失效/延迟"
 Subsys-->>TaskConv : "失败或重试路径"
-TaskConv-->>Perf : "上报指标"
-Perf-->>Top : "继续处理或返回错误"
-Top-->>App : "最终响应"
+TaskConv->>CQThread : "提交失效命令到CQ"
+CQThread->>Subsys : "异步执行失效命令"
+Subsys->>Stats : "上报指标"
+CQThread-->>TaskConv : "命令执行完成"
+TaskConv-->>Perf : "继续处理或返回错误"
+Perf-->>Top : "最终响应"
+Top-->>App : "成功响应"
 end
 ```
 
 图表来源 
 - [iommu_top.cc:1-200](file://iommu/iommu_top.cc#L1-L200)
-- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-200)
-- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-200)
+- [iommu_perf_model.hh:1-200](file://iommu/iommu_perf_model/iommu_perf_model.hh#L1-L200)
+- [iommu_task_cache_convert.hh:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.hh#L1-L200)
 - [cache_subsystem.h:1-200](file://iommu/cache_src/subsystem/cache_subsystem.h#L1-L200)
 - [cache_base.h:1-200](file://iommu/cache_src/cache/cache_base.h#L1-L200)
 - [stats_collector.h:1-200](file://iommu/cache_src/common/stats_collector.h#L1-200)
@@ -293,19 +313,52 @@ Conv-->>Model : "指标与状态"
 - [iommu_task_cache_convert.cc:1-200](file://iommu/iommu_perf_model/iommu_task_cache_convert.cc#L1-L200)
 
 ### 场景10：缓存失效测试场景
-- 目标：验证在页表/上下文/中断映射变更时，相关缓存能正确失效，避免脏读或错误转换。
-- 典型步骤：
-  1) 预热：构造访问模式，使目标缓存条目命中。
-  2) 触发失效：通过页表更新、上下文切换或中断重映射，产生一致性事件。
-  3) 验证：检查命中率为零或显著下降，统计显示失效计数增加，后续访问走回退路径。
-  4) 回归：再次访问应重新填充缓存且结果正确。
-- 参考用例与脚本：
-  - 功能与线程化测试：[test_rp_func.cc](file://rp/test_rp_func.cc)、[test_rp_rand4k_two_stage_inval_thread.cc](file://rp/test_rp_rand4k_two_stage_inval_thread.cc)
-  - 场景10扫描脚本：[s10_sweep.sh](file://tmp/s10_sweep.sh)
+
+**重大更新**：新增了两种严格的缓存失效测试场景，支持多核操作和CQ背压机制。
+
+#### 严格模式（rand4k_msi_mix_multichan_inval_strict）
+- **目标**：验证在页表/上下文/中断映射变更时，相关缓存能正确失效，避免脏读或错误转换。
+- **核心特性**：
+  - 每笔4KB页完成事件触发一笔精准失效命令（VMA 010）
+  - 只失效PT Cache中匹配的cacheline，不影响Walker Cache
+  - 不启动延时失效策略（LIB/VN）
+  - 支持多核操作，每核独立信用反压
+  - CQ异步处理，命令投递与执行解耦
+
+#### 懒模式（rand4k_msi_mix_multichan_inval_lazy）
+- **目标**：验证批量失效策略的性能优势，通过合并失效命令减少开销。
+- **核心特性**：
+  - 每N个4KB页完成事件触发一笔全局失效命令（VMA 100）
+  - 清除PT Cache与Walker Cache中所有GSCID匹配的行
+  - 启动延时失效策略（LIB记录 + VN递增）
+  - 支持多核操作，每核初始信用=N组
+  - CQ异步处理，命令投递与执行解耦
+
+#### 多核操作支持
+- **并发模型**：每个CPU核拥有独立的请求发送进程和失效命令进程
+- **信用反压**：每核独立的注入信用机制，避免跨核干扰
+- **CQ共享**：多核共享单一命令队列，通过锁机制保证原子性
+- **统计隔离**：每核独立的统计数据和性能指标
+
+#### CQ背压机制
+- **异步处理**：`cq_async_process_thread`常驻线程，异步取指执行失效命令
+- **门铃机制**：命令投递后敲门铃，由IOMMU侧异步处理
+- **背压控制**：CQ满时停止新命令投递，推进CQH后释放信用
+- **信用守恒**：严格保证信用池的完整性和一致性
+
+#### 典型步骤
+1) **预热**：构造访问模式，使目标缓存条目命中。
+2) **触发失效**：通过页表更新、上下文切换或中断重映射，产生一致性事件。
+3) **验证**：检查命中率为零或显著下降，统计显示失效计数增加，后续访问走回退路径。
+4) **回归**：再次访问应重新填充缓存且结果正确。
+
+#### 参考用例与脚本
+- **功能与线程化测试**：[test_rp_func.cc](file://rp/test_rp_func.cc)、[test_rp_rand4k_msi_mix_multichan_inval_thread.cc](file://rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc)
+- **场景10扫描脚本**：[s10_sweep.sh](file://tmp/s10_sweep.sh)
 
 章节来源
 - [test_rp_func.cc:1-200](file://rp/test_rp_func.cc#L1-L200)
-- [test_rp_rand4k_two_stage_inval_thread.cc:1-200](file://rp/test_rp_rand4k_two_stage_inval_thread.cc#L1-L200)
+- [test_rp_rand4k_msi_mix_multichan_inval_thread.cc:1-200](file://rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc#L1-L200)
 - [s10_sweep.sh:1-200](file://tmp/s10_sweep.sh#L1-L200)
 
 ## 依赖关系分析
@@ -313,10 +366,12 @@ Conv-->>Model : "指标与状态"
   - 顶层模块依赖性能模型与缓存子系统。
   - 缓存子系统依赖各具体缓存与替换策略。
   - 统计与配置被广泛使用，形成横向支撑。
+  - **新增**：CQ异步处理线程依赖命令队列和失效流水线。
 - 潜在风险：
   - 失效范围过大导致命中率骤降。
   - 替换策略选择不当造成抖动。
   - 统计口径不一致导致误判。
+  - **新增**：CQ背压机制不当可能导致死锁或性能退化。
 
 ```mermaid
 graph LR
@@ -331,6 +386,8 @@ Subsys --> Walker["Walker缓存"]
 Subsys --> Policy["替换策略"]
 Subsys --> Stats["统计"]
 Subsys --> Config["配置"]
+Top --> CQThread["CQ异步线程"]
+CQThread --> Subsys
 ```
 
 图表来源 
@@ -339,7 +396,7 @@ Subsys --> Config["配置"]
 - [cache_subsystem.h:1-200](file://iommu/cache_src/subsystem/cache_subsystem.h#L1-L200)
 - [replacement_policy.h:1-200](file://iommu/cache_src/replacement/replacement_policy.h#L1-L200)
 - [stats_collector.h:1-200](file://iommu/cache_src/common/stats_collector.h#L1-200)
-- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-200)
+- [json_config.h:1-200](file://iommu/cache_src/common/json_config.h#L1-L200)
 
 章节来源
 - [Makefile:1-200](file://Makefile#L1-L200)
@@ -349,6 +406,8 @@ Subsys --> Config["配置"]
 - 替换策略选择：PLRU适合热数据稳定场景，SRIP对突发访问更稳健。
 - 统计开销：高频统计可能引入额外延迟，建议批量化或异步上报。
 - 内存与容量：缓存容量过小导致频繁淘汰，过大则占用资源。
+- **新增**：CQ背压机制优化：合理设置CQ深度和信用窗口，避免过度反压或死锁。
+- **新增**：多核扩展性：确保每核信用机制的正确性，避免跨核竞争和性能瓶颈。
 
 ## 故障排查指南
 - 现象：命中率异常低或失效计数激增
@@ -358,18 +417,28 @@ Subsys --> Config["配置"]
 - 现象：一致性错误（脏读/错误转换）
   - 确认失效范围是否覆盖所有相关条目。
   - 校验页表/上下文更新路径是否及时通知缓存子系统。
+- **新增**：CQ背压相关问题
+  - 检查CQ深度配置是否合理（64-8192范围内2的幂）。
+  - 验证信用分配机制是否正确，避免信用泄漏或耗尽。
+  - 监控CQ占用率和背压触发频率，识别性能瓶颈。
+- **新增**：多核操作问题
+  - 检查每核信用独立性，避免跨核干扰。
+  - 验证CQ写入锁机制，确保原子性操作。
+  - 监控各核负载均衡，避免单核过载。
 - 工具与用例：
   - 使用场景10扫描脚本进行压力与回归测试。
   - 参考线程化失效用例观察并发下的失效行为。
 
 章节来源
 - [s10_sweep.sh:1-200](file://tmp/s10_sweep.sh#L1-L200)
-- [test_rp_rand4k_two_stage_inval_thread.cc:1-200](file://rp/test_rp_rand4k_two_stage_inval_thread.cc#L1-L200)
+- [test_rp_rand4k_msi_mix_multichan_inval_thread.cc:1-200](file://rp/test_rp_rand4k_msi_mix_multichan_inval_thread.cc#L1-L200)
 
 ## 结论
-场景10聚焦于IOMMU缓存的一致性失效验证。通过统一的缓存子系统、明确的替换策略与完善的统计体系，能够准确刻画失效路径与性能影响。建议在真实工作负载下结合统计与用例进行回归，确保失效范围合理、命中率稳定、一致性无误。
+场景10聚焦于IOMMU缓存的一致性失效验证。通过统一的缓存子系统、明确的替换策略与完善的统计体系，能够准确刻画失效路径与性能影响。**最新更新**增强了多核操作支持和CQ背压机制，提供了更真实的硬件模拟环境。建议在真实工作负载下结合统计与用例进行回归，确保失效范围合理、命中率稳定、一致性无误，同时充分利用新的多核和背压特性进行性能优化。
 
 ## 附录
 - 构建与运行：参考根目录构建脚本与Makefile。
 - 配置：通过JSON配置文件调整缓存参数与统计开关。
 - 扩展：新增缓存类型需继承基础缓存并实现一致性语义。
+- **新增**：CQ配置参数：`INVAL_CQ_DEPTH`（命令队列深度）、`INVAL_DELAY_NS`（软件响应延迟）、`INVAL_LAZY_N`（懒模式批量大小）。
+- **新增**：多核配置参数：`CPU_COUNT`（CPU核数）、`TEST_CFG_CPU_COUNT`（测试CPU数量）。

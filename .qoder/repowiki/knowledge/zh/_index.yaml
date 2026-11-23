@@ -3,22 +3,60 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-09-14T02:10:45Z"
+exported_at: "2026-11-18T01:45:06Z"
 modules:
     "":
-        dir_name: RISC-V IOMMU SystemC 性能仿真模型
-        title: RISC-V IOMMU SystemC 性能仿真模型
+        dir_name: RISC-V IOMMU SystemC 性能建模与仿真平台
+        title: RISC-V IOMMU SystemC 性能建模与仿真平台
         scope: []
+        source_files: []
+        children:
+            - cache_config
+            - rp
+            - rwsplit_results
+            - tmp
+        depends_on: []
+        related_to: []
+    cache_config:
+        dir_name: 去重 Cache 默认配置（Dedup512）
+        title: 去重 Cache 默认配置（Dedup512）
+        scope:
+            - iommu/cache_config/default_config_dedup512.json
         source_files: []
         children: []
         depends_on: []
         related_to: []
     rp:
-        dir_name: IOMMU RP 测试与验证平台
-        title: IOMMU RP 测试与验证平台
+        dir_name: rp
+        title: rp
         scope:
-            - rp/
+            - rp/ab_dedup256_512.py
+            - rp/probe_c3_hit_composition.py
+            - rp/probe_walker_c3_mechanism.py
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: rwsplit_results
+    rwsplit_results:
+        dir_name: 去重 Cache 256→512 全量 A_B 对照报告
+        title: 去重 Cache 256→512 全量 A/B 对照报告
+        scope:
+            - rwsplit_results/nvrr6_dedup512_20261112/AB_256_vs_512.md
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: rp
+            - path: tmp
+    tmp:
+        dir_name: NVRR6 去重 Cache 512B 场景性能回归脚本
+        title: NVRR6 去重 Cache 512B 场景性能回归脚本
+        scope:
+            - tmp/nvrr6_dedup512_run.sh
+            - tmp/nvrr6_matrix_run_all.sh
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: rwsplit_results

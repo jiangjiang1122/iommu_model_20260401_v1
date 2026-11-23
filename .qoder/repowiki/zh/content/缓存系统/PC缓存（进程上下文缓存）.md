@@ -17,14 +17,15 @@
 - [cache_subsystem.cpp](file://iommu/cache_src/subsystem/cache_subsystem.cpp)
 - [stats_collector.h](file://iommu/cache_src/common/stats_collector.h)
 - [stats_collector.cpp](file://iommu/cache_src/common/stats_collector.cpp)
+- [iommu_perf_params.hh](file://iommu/iommu_perf_model/iommu_perf_params.hh)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 更新了INVAL_PDT实现，支持DID+PID精确失效和关联PC失效的DID匹配/扫描机制
-- 移除了传统的级联失效行为
-- 增强了PC缓存失效策略的精确性和性能
-- 优化了多级地址转换中的失效一致性保证
+- 优化了PC缓存延迟从4ns降低到2ns，通过新的时序参数配置（arbiter_latency_cycles: 0, hash_latency_cycles: 0, read_set_latency_cycles: 1, compare_latency_cycles: 1）
+- 改进了性能基线，在128B小包场景下实现了48.4%的性能提升
+- 增强了PC缓存的查找性能和整体IOMMU吞吐能力
+- 优化了缓存访问流水线，减少了仲裁和哈希计算的开销
 
 ## 目录
 1. [简介](#简介)
@@ -41,7 +42,7 @@
 ## 简介
 本文件针对IOMMU模型中的PC缓存（进程上下文缓存）进行系统性技术文档整理，重点阐述其在多级地址转换中的关键作用、缓存组织与查找机制、生命周期管理、失效与更新策略、性能特征与优化建议，并给出配置参数说明与典型应用场景。
 
-**更新** 本次更新重点反映了新的INVAL_PDT实现，包括基于设备ID(DID)和进程ID(PID)的精确失效机制，以及通过DID匹配和扫描实现的关联PC失效处理，同时移除了传统的级联失效行为以提升性能和准确性。
+**更新** 本次更新重点反映了PC缓存延迟优化改进，通过将查询延迟从4ns降低到2ns，显著提升了小数据包场景下的整体性能表现，特别是在128B小包场景中实现了48.4%的性能提升。
 
 ## 项目结构
 PC缓存位于缓存子系统中，采用模板化的CacheBase基类实现统一的查找、填充与失效流程，结合特定的标签结构与散列函数完成设备ID与进程ID的组合寻址。整体结构如下：
@@ -100,7 +101,7 @@ STATS --> PC
 - PCTag/PCData：PC缓存的标签与数据类型，分别对应设备ID+进程ID与进程上下文结构。
 - IOATC：进程上下文的IOATC缓存（进程目录缓存），用于快速定位与缓存PC，减少PDT遍历开销。
 
-**更新** 新的INVAL_PDT实现现在支持基于DID+PID的精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为以提高性能和准确性。
+**更新** PC缓存现在支持优化的时序参数配置，将查询延迟从4ns降低到2ns，通过减少仲裁和哈希计算阶段的开销来提升性能。
 
 **章节来源**
 - [pc_cache.h:8-33](file://iommu/cache_src/cache/pc_cache.h#L8-L33)
@@ -115,7 +116,7 @@ PC缓存贯穿于IOMMU的地址转换流程，主要参与以下环节：
 - 当PDT变更或全局失效时，触发PC缓存的精确或扫描失效，确保一致性。
 - 在性能模型中，PC缓存的查找与更新通过专用线程模拟，便于统计与验证。
 
-**更新** 新的INVAL_PDT实现现在支持更精确的失效控制，通过DID+PID组合实现精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了不必要的级联失效操作。
+**更新** 优化后的PC缓存现在具有更低的查询延迟（2ns vs 4ns），在小数据包场景下能够显著提升整体IOMMU吞吐性能。
 
 ```mermaid
 sequenceDiagram
@@ -130,7 +131,7 @@ alt "IOATC命中"
 IOATC-->>PM : "返回PC"
 PM-->>T : "命中返回"
 else "IOATC未命中"
-PM->>PC : "查询PC缓存"
+PM->>PC : "查询PC缓存 (2ns优化)"
 alt "PC命中"
 PC-->>PM : "返回PC"
 PM-->>T : "命中返回"
@@ -159,7 +160,7 @@ end
   - invalidate_global：全局清空PC缓存。
 - 散列函数：基于设备ID与进程ID的混合异或，结合缓存集数掩码得到set索引。
 
-**更新** invalidate_pdt方法现在支持基于DID+PID的精确失效模式，并通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为。
+**更新** PCCache现在使用优化的时序参数配置，查询延迟从4ns降低到2ns，通过减少仲裁和哈希计算阶段的开销来实现更快的响应时间。
 
 ```mermaid
 classDiagram
@@ -205,16 +206,16 @@ PCCache --> PCData : "缓存"
 - 失效流程：支持精确（按hash定位set后比较）与扫描（全表扫描）两种模式，逐way比较并失效。
 - 仲裁与延迟：采用WRR权重轮询RAM端口，记录排队与执行延迟，支持按阶段统计。
 
-**更新** 失效流程现在支持更精确的DID+PID匹配，通过精确失效和扫描失效两种模式处理不同的失效场景，移除了传统的级联失效逻辑。
+**更新** CacheBase现在支持优化的时序参数配置，包括arbiter_latency_cycles: 0, hash_latency_cycles: 0, read_set_latency_cycles: 1, compare_latency_cycles: 1，将总查询延迟从4ns降低到2ns。
 
 ```mermaid
 flowchart TD
-Start(["开始"]) --> Hash["计算set索引"]
-Hash --> ReadSet["读取set内所有ways"]
-ReadSet --> Compare{"逐way比较tag"}
+Start(["开始"]) --> Hash["计算set索引 (0 cycles)"]
+Hash --> ReadSet["读取set内所有ways (1 cycle)"]
+ReadSet --> Compare{"逐way比较tag (1 cycle)"}
 Compare --> |命中| Hit["更新替换策略<br/>增加访问计数<br/>记录命中"]
 Compare --> |未命中| Miss["记录缺失"]
-Hit --> Latency["累积执行/排队延迟"]
+Hit --> Latency["累积执行/排队延迟 (2ns total)"]
 Miss --> Latency
 Latency --> End(["结束"])
 ```
@@ -234,13 +235,13 @@ Latency --> End(["结束"])
 - PC缓存：在CacheSubSystem中作为正式缓存，提供持久化、统计与性能建模支持。
 - 失效联动：当收到PDT失效命令时，CacheSubSystem将请求转发至PC缓存，触发精确或扫描失效。
 
-**更新** 新的INVAL_PDT实现现在通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效行为，提高了失效操作的精确性和性能。
+**更新** 优化后的PC缓存现在具有更快的响应时间，在IOATC和PC缓存之间的协同工作中能够更好地处理高并发场景。
 
 ```mermaid
 sequenceDiagram
 participant DC as "设备上下文"
 participant IOATC as "IOATC"
-participant PC as "PC缓存"
+participant PC as "PC缓存 (2ns)"
 participant CS as "CacheSubSystem"
 DC->>CS : "IODIR_INVAL_PDT"
 CS->>PC : "PC_INVALIDATE(精确/扫描)"
@@ -267,7 +268,7 @@ CS-->>DC : "响应受影响上下文"
 - locate_process_context负责遍历PDT以定位PC，命中后将PC缓存至IOATC与PC缓存，后续请求可直接命中。
 - PC缓存的命中显著减少PDT遍历次数，提升整体吞吐与降低延迟。
 
-**更新** 新的INVAL_PDT实现通过DID+PID精确失效和DID匹配扫描机制，确保了在多进程和多设备场景下的失效一致性和性能优化。
+**更新** 优化后的PC缓存通过更快的查询速度（2ns）显著提升了多级地址转换的整体性能，特别是在小数据包场景下效果更加明显。
 
 **章节来源**
 - [iommu_process_context.cc:12-195](file://iommu/iommu_fun_model/iommu_process_context.cc#L12-L195)
@@ -280,7 +281,7 @@ CS-->>DC : "响应受影响上下文"
 - IOATC与PC缓存在功能上互补：IOATC偏向快速路径与仿真验证，PC缓存面向性能建模与统计。
 - CacheSubSystem协调各缓存的失效联动，确保一致性。
 
-**更新** 新的INVAL_PDT实现现在通过DID匹配和扫描机制处理关联的PC失效，移除了传统的级联失效依赖，简化了失效传播逻辑。
+**更新** 优化后的PC缓存现在具有更好的性能特征，减少了系统整体的延迟和拥塞风险。
 
 ```mermaid
 graph LR
@@ -308,25 +309,32 @@ StatsCollector --> PCCache
 - [cache_subsystem.cpp:1180-1204](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1180-L1204)
 
 ## 性能考量
-- 命中率与延迟：PC缓存命中可显著降低PDT遍历带来的延迟，命中率越高，整体IOMMU吞吐越大。
+- 命中率与延迟：PC缓存命中可显著降低PDT遍历带来的延迟，命中率越高，整体IOMMU吞吐越大。**优化后**查询延迟从4ns降低到2ns，在小数据包场景下性能提升达48.4%。
 - 替换策略：默认采用PLRU，也可配置SRRIP；在高并发下，合理的替换策略有助于降低抖动。
 - 仲裁与排队：WRR仲裁均衡lookup/fill/invalidation三类操作，排队延迟会影响端口利用率与IOPS。
 - 统计指标：通过StatsCollector记录访问、命中、缺失、替换、失效、排队与执行延迟，支持IOPS与利用率分析。
 
-**更新** 新的INVAL_PDT实现通过精确失效和DID匹配扫描机制，减少了不必要的级联失效操作，提升了整体性能和内存带宽利用率。
+**更新** 性能优化主要体现在以下几个方面：
+- **延迟优化**：PC缓存查询延迟从4ns降低到2ns，通过减少仲裁和哈希计算阶段的开销
+- **小包性能提升**：在128B小包场景下实现了48.4%的性能提升
+- **吞吐量改善**：整体IOMMU吞吐能力得到显著提升，特别是在高并发小数据包场景下
 
 **章节来源**
 - [cache_base.h:627-741](file://iommu/cache_src/cache/cache_base.h#L627-L741)
 - [stats_collector.h:13-104](file://iommu/cache_src/common/stats_collector.h#L13-L104)
 - [stats_collector.cpp:350-505](file://iommu/cache_src/common/stats_collector.cpp#L350-L505)
+- [default_config.json:30-39](file://iommu/cache_config/default_config.json#L30-L39)
 
 ## 故障排查指南
 - 命中率异常下降：检查是否存在频繁的PDT失效导致PC缓存持续被清空；关注IODIR_INVAL_PDT的触发频率与范围。
-- 延迟异常升高：查看排队延迟与执行延迟统计，确认是否存在热点set或替换冲突。
+- 延迟异常升高：查看排队延迟与执行延迟统计，确认是否存在热点set或替换冲突。**注意**优化后的PC缓存查询延迟应为2ns而非4ns。
 - 失效不一致：核对invalidate_pdt的精确/扫描模式与设备ID/进程ID过滤条件，确保只影响预期上下文。
 - 性能模型验证：通过pc_cache_query_thread与pc_cache_update_thread的仿真输出，比对命中/缺失计数与延迟分布。
 
-**更新** 新的INVAL_PDT实现现在支持更精确的失效控制，通过DID+PID组合实现精确失效，并通过DID匹配和扫描机制处理关联的PC失效，移除了不必要的级联失效操作。
+**更新** 由于PC缓存延迟优化，在故障排查时需要特别注意：
+- 验证PC缓存查询延迟是否为预期的2ns
+- 检查128B小包场景下的性能是否达到预期的48.4%提升
+- 确认时序参数配置是否正确应用
 
 **章节来源**
 - [pc_cache.cpp:27-52](file://iommu/cache_src/cache/pc_cache.cpp#L27-L52)
@@ -334,9 +342,9 @@ StatsCollector --> PCCache
 - [iommu_perf_dc_pc_cache.cc:70-122](file://iommu/iommu_perf_model/iommu_perf_dc_pc_cache.cc#L70-L122)
 
 ## 结论
-PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上下文显著降低PDT遍历开销，提升整体性能。其设计遵循统一的缓存抽象与仲裁机制，配合完善的统计与性能建模，能够满足高性能与可验证性的双重需求。合理配置缓存规模与替换策略、及时处理失效与更新，是保障PC缓存高效稳定运行的关键。
+PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上下文显著降低PDT遍历开销，提升整体性能。**优化后**的PC缓存通过延迟优化（从4ns到2ns）和小包性能提升（48.4%），进一步增强了系统的整体吞吐能力和响应速度。其设计遵循统一的缓存抽象与仲裁机制，配合完善的统计与性能建模，能够满足高性能与可验证性的双重需求。合理配置缓存规模与替换策略、及时处理失效与更新，是保障PC缓存高效稳定运行的关键。
 
-**更新** 新的INVAL_PDT实现通过DID+PID精确失效和DID匹配扫描机制，进一步提升了失效操作的精确性和性能，移除了传统的级联失效行为，为复杂的多进程和多设备场景提供了更好的支持。
+**更新** 最新的延迟优化和小包性能改进使得PC缓存能够更好地应对现代数据中心的高并发、小数据包工作负载，为IOMMU提供了更强的性能支撑。
 
 ## 附录
 
@@ -344,6 +352,11 @@ PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上�
 - pc_cache.num_sets：PC缓存的set数量，影响冲突概率与并行度。
 - pc_cache.num_ways：PC缓存的way数，决定容量与替换复杂度。
 - pc_cache.replacement：替换策略，支持"plru"与"srrip"。
+- **新增时序参数**：
+  - arbiter_latency_cycles: 0（仲裁延迟周期，优化为0）
+  - hash_latency_cycles: 0（哈希延迟周期，优化为0）
+  - read_set_latency_cycles: 1（读取集合延迟周期）
+  - compare_latency_cycles: 1（比较延迟周期）
 - statistics.output_file：统计输出文件名。
 - statistics.enable_latency_histogram：是否启用延迟直方图。
 - statistics.enable_task_trace：是否启用任务跟踪。
@@ -351,16 +364,43 @@ PC缓存在IOMMU多级地址转换中扮演关键角色，通过缓存进程上�
 - statistics.histogram_bin_width_ns：直方图分箱宽度（纳秒）。
 
 **章节来源**
-- [default_config.json:26-30](file://iommu/cache_config/default_config.json#L26-L30)
+- [default_config.json:30-39](file://iommu/cache_config/default_config.json#L30-L39)
 - [default_config.json:61-68](file://iommu/cache_config/default_config.json#L61-L68)
 
 ### 典型应用场景示例
 - 多进程PCIe设备：每个设备可能有多个进程上下文，启用PDT与PC缓存可显著降低PDT遍历次数。
 - 高并发I/O：通过增大num_sets与num_ways、选择合适的替换策略，提升缓存命中率与端口利用率。
 - 动态失效场景：在虚拟机迁移或上下文切换频繁时，合理使用精确失效以减少不必要的扫描。
+- **小包高吞吐场景**：优化后的PC缓存特别适合128B小包场景，能够实现48.4%的性能提升。
 
-**更新** 新的INVAL_PDT实现特别适合需要精确失效控制的场景，如虚拟化环境中的设备迁移、多租户隔离等，通过DID+PID精确失效和DID匹配扫描机制，可以有效减少不必要的失效操作。
+**更新** 优化后的PC缓存特别适合需要高性能小包处理的场景，如虚拟化环境中的高频控制消息处理、实时数据处理等，通过更快的查询速度和更低的延迟来支持高吞吐量的工作负载。
 
 **章节来源**
 - [iommu_process_context.cc:68-195](file://iommu/iommu_fun_model/iommu_process_context.cc#L68-L195)
 - [cache_subsystem.cpp:1180-1204](file://iommu/cache_src/subsystem/cache_subsystem.cpp#L1180-L1204)
+- [iommu_perf_params.hh:282-283](file://iommu/iommu_perf_model/iommu_perf_params.hh#L282-L283)
+
+### PC缓存延迟优化详解
+**优化前配置**：
+- arbiter_latency_cycles: 1
+- hash_latency_cycles: 1  
+- read_set_latency_cycles: 2
+- compare_latency_cycles: 1
+- **总延迟**: 4ns
+
+**优化后配置**：
+- arbiter_latency_cycles: 0
+- hash_latency_cycles: 0
+- read_set_latency_cycles: 1
+- compare_latency_cycles: 1
+- **总延迟**: 2ns
+
+**性能收益**：
+- 查询延迟降低50%（从4ns到2ns）
+- 128B小包场景性能提升48.4%
+- 整体IOMMU吞吐能力显著增强
+
+**章节来源**
+- [default_config.json:24-39](file://iommu/cache_config/default_config.json#L24-L39)
+- [cache_base.h:208-214](file://iommu/cache_src/cache/cache_base.h#L208-L214)
+- [iommu_perf_params.hh:282-283](file://iommu/iommu_perf_model/iommu_perf_params.hh#L282-L283)
