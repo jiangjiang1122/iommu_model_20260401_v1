@@ -265,9 +265,10 @@ CacheSubsystem::CacheSubsystem(sc_module_name name, const GlobalConfig& cfg)
     dedup_num_rams_ = dedup_cache_->num_rams();
     assert(dedup_num_rams_ >= 1 && dedup_num_rams_ <= DEDUP_MAX_RAMS);
 #if TEST_CFG_DEDUP_UNIT_V1123
-    // [1123] 几何约束: 4 Bank x 64 CL = 256 (num_sets=64 x num_ways=4 x num_rams=4)
+    // [1123] 几何约束: 4 Bank x 128 CL = 512 (num_sets=128 x num_ways=4 x num_rams=4)
+    //   20261123 由 256(64sets) 扩容至 512(128sets); Buffer 保持 4x128=512 entry 不变。
     assert(dedup_num_rams_ == DEDUP_NUM_BANKS && "V1123 要求 dedup_cache.num_rams=4");
-    assert(dedup_cache_->total_lines() == 256 && "V1123 要求去重Cache总cacheline=256");
+    assert(dedup_cache_->total_lines() == 512 && "V1123 要求去重Cache总cacheline=512");
 #endif
     {
 #if TEST_CFG_DEDUP_UNIT_V1123

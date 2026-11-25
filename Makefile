@@ -1123,9 +1123,10 @@ TEST_FLAGS += -DTEST_CFG_DEDUP_UPD_FLUSH_CYCLES=$(DEDUP_UPD_FLUSH_NS)
 DEDUP_UNIT_V1123 ?= 1
 TEST_FLAGS += -DTEST_CFG_DEDUP_UNIT_V1123=$(DEDUP_UNIT_V1123)
 
-# [P9->P1 实验] 预取注入模式(仅V1123=1生效): 1=外层inter fifo满则阻塞写(复现死锁环),
-#   0=满则丢弃(G1护栏)。改此宏需 make clean 全量重编。
-DEDUP_PF_BLOCK ?= 1
+# [预取注入模式 20261124] (仅V1123=1生效): 0=外层inter req fifo满则丢弃预取(默认, G1护栏,
+#   worker不在任务中途阻塞 => 结构上无死锁); 1=满则阻塞写(实验用, 已实证多设备跨bank双环死锁)。
+#   改此宏需 make clean 全量重编。
+DEDUP_PF_BLOCK ?= 0
 TEST_FLAGS += -DTEST_CFG_DEDUP_PREFETCH_BLOCK=$(DEDUP_PF_BLOCK)
 
 # Source files

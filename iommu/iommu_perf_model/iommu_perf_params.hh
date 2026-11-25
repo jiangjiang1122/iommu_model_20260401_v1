@@ -146,8 +146,8 @@ static_assert(TEST_CFG_AGG_FLUSH_RELEASE_FIRST == 0 || TEST_CFG_AGG_FLUSH_RELEAS
 //         写入该ram的类型化FIFO: req(32)/inter(8)/upd(2);
 //     (c) RAM内严格优先仲裁 upd > inter > req, 同RAM顺序处理;
 //         req/inter出队受本bank Buffer满门控, upd出队永不受门控;
-//     (d) 去重Cache=4 Bank x 64 CL=256; 去重Buffer拆为4个(每bank 128 entry),
-//         与bank一一绑定(链不跨bank);
+//     (d) 去重Cache=4 Bank x 128 CL=512(20261123扩容, 原64x4=256); 去重Buffer保持4 bank
+//         x 128 entry=512(与bank一一绑定, 链不跨bank);
 //     (e) req/inter原子段 5ns->4ns (UPDATE保持"3+链长x2"可变模型);
 //     (f) 延时更新三条件: c1 每笔200ns定时器 / c2 占用>20排一组4笔 /
 //         c3 由"单Buffer满"改为"4个bank Buffer全满";
@@ -295,16 +295,15 @@ static const uint32_t DEDUP_RAM_INTER_FIFO_DEPTH  = TEST_CFG_DEDUP_RAM_INTER_FIF
 static const uint32_t DEDUP_RAM_UPD_FIFO_DEPTH    = TEST_CFG_DEDUP_RAM_UPD_FIFO_DEPTH;
 static const uint32_t DEDUP_RSP_STAGE_DEPTH       = TEST_CFG_DEDUP_RSP_STAGE_DEPTH;
 
-// [P9->P1 实验 20261123] 预取注入模式 (TEST_CFG_DEDUP_PREFETCH_BLOCK):
-//   1(默认): 外层 inter req fifo(深度1)满时**阻塞写** —— 废除"满则丢弃"护栏G1,
-//     用于复现理论分析 P1 死锁环:
-//     worker X 任务中途阻塞写inter(1) ← inter-hash 阻塞写 bank Y 的 inter fifo(8)
-//     ← bank Y 的 worker 同样阻塞在 inter(1) 写上(或后续全部worker相继阻塞)
-//     → Y 的 upd 停止消费 → handoff/delayed 顶满 → agg_flush 停 → PTW 额度不释放
-//     → 释放链全停 → 环闭合。
-//   0: 维持 nb_write 满则丢弃(G1护栏, 与1123首版回归一致), 供A/B对照。
+// [预取注入模式 20261124] TEST_CFG_DEDUP_PREFETCH_BLOCK:
+//   0(默认): 主任务派生的预取任务对**外层 inter req fifo(深度1)** 做 nb_write,
+//     满则丢弃并计数(护栏G1) —— worker 绝不在任务中途阻塞, 从结构上消除 P1 死锁环:
+//     (环边①"worker 冻结在中途写"被移除 → inter-hash/upd-hash 的跨bank队头阻塞
+//      退化为瞬态, 不再锁死)。代价=高密度注入下预取丢弃率上升(仅性能降级, 不影响功能)。
+//   1: 满则阻塞写(实验用), 已实证在多设备场景复现跨bank双环死锁(S2/S3/S4 abort),
+//     仅保留作 A/B 对照, 不作为默认。
 #ifndef TEST_CFG_DEDUP_PREFETCH_BLOCK
-#define TEST_CFG_DEDUP_PREFETCH_BLOCK 1
+#define TEST_CFG_DEDUP_PREFETCH_BLOCK 0
 #endif
 static_assert(TEST_CFG_DEDUP_PREFETCH_BLOCK == 0 || TEST_CFG_DEDUP_PREFETCH_BLOCK == 1,
               "DEDUP_PREFETCH_BLOCK 必须为 0 或 1");

@@ -55,7 +55,7 @@
   },
 
   "dedup_cache": {
-    "num_sets": 64,
+    "num_sets": 128,
     "num_ways": 4,
     "num_rams": 4,
     "ram_fifo_depth": 8
